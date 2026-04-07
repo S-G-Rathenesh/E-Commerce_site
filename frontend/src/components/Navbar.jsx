@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 
 const navItems = ['Women', 'Men', 'Kids', 'Beauty', 'Studio']
@@ -144,8 +144,26 @@ export default function Navbar() {
   const [activeMenu, setActiveMenu] = useState(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
+  const menuCloseTimeoutRef = useRef(null)
   const navigate = useNavigate()
   const location = useLocation()
+
+  const clearMenuCloseTimeout = () => {
+    if (menuCloseTimeoutRef.current) {
+      clearTimeout(menuCloseTimeoutRef.current)
+      menuCloseTimeoutRef.current = null
+    }
+  }
+
+  const scheduleMenuClose = () => {
+    clearMenuCloseTimeout()
+    menuCloseTimeoutRef.current = setTimeout(() => {
+      setMenuOpen(false)
+      setActiveMenu(null)
+    }, 180)
+  }
+
+  useEffect(() => () => clearMenuCloseTimeout(), [])
 
   const currentMenu = activeMenu || 'Women'
   const menuColumns = useMemo(() => megaMenuData[currentMenu] || megaMenuData.Women, [currentMenu])
@@ -166,6 +184,21 @@ export default function Navbar() {
 
   const visibleActiveMenu = menuOpen ? activeMenu : selectedSection
 
+  const handleWishlistClick = () => {
+    const isLoggedIn = localStorage.getItem('isLoggedIn') === 'true'
+    if (!isLoggedIn) {
+      navigate('/login')
+    }
+  }
+
+  const handleBagClick = (event) => {
+    const isLoggedIn = localStorage.getItem('isLoggedIn') === 'true'
+    if (!isLoggedIn) {
+      event.preventDefault()
+      navigate('/login')
+    }
+  }
+
   return (
     <header className={`navbar-wrap ${(menuOpen || profileOpen) ? 'navbar-wrap-open' : ''}`}>
       <div className="navbar-shell">
@@ -177,10 +210,8 @@ export default function Navbar() {
 
           <div
             className="nav-menu-region"
-            onMouseLeave={() => {
-              setMenuOpen(false)
-              setActiveMenu(null)
-            }}
+            onMouseEnter={clearMenuCloseTimeout}
+            onMouseLeave={scheduleMenuClose}
           >
             <div className="nav-links nav-links-retail">
               <NavLink to="/" end className={({ isActive }) => `nav-link nav-link-retail ${isActive ? 'active-link' : ''}`}>
@@ -193,14 +224,17 @@ export default function Navbar() {
                   type="button"
                   className={`nav-link nav-link-retail nav-link-button ${visibleActiveMenu === item ? 'active-link' : ''}`}
                   onMouseEnter={() => {
+                    clearMenuCloseTimeout()
                     setMenuOpen(true)
                     setActiveMenu(item)
                   }}
                   onFocus={() => {
+                    clearMenuCloseTimeout()
                     setMenuOpen(true)
                     setActiveMenu(item)
                   }}
                   onClick={() => {
+                    clearMenuCloseTimeout()
                     setMenuOpen(false)
                     navigate(productSectionPath(item))
                   }}
@@ -211,7 +245,12 @@ export default function Navbar() {
               ))}
             </div>
 
-            <section className={`mega-menu shell ${menuOpen ? 'mega-menu-open' : ''}`} aria-label={`${currentMenu} menu`}>
+            <section
+              className={`mega-menu shell ${menuOpen ? 'mega-menu-open' : ''}`}
+              aria-label={`${currentMenu} menu`}
+              onMouseEnter={clearMenuCloseTimeout}
+              onMouseLeave={scheduleMenuClose}
+            >
               <div className="mega-menu-head">
                 <div>
                   <p className="eyebrow">{currentMenu}</p>
@@ -298,11 +337,11 @@ export default function Navbar() {
           </div>
 
           <div className="nav-actions">
-            <button type="button" className="nav-action">
+            <button type="button" className="nav-action" onClick={handleWishlistClick}>
               <span>♡</span>
               <small>Wishlist</small>
             </button>
-            <NavLink to="/cart" className="nav-action" aria-label="Open cart">
+            <NavLink to="/cart" className="nav-action" aria-label="Open cart" onClick={handleBagClick}>
               <span>🛍</span>
               <small>Bag</small>
             </NavLink>

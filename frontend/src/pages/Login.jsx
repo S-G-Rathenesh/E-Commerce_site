@@ -27,11 +27,15 @@ export default function Login() {
       setMessage(data.message || 'Login complete')
 
       const role = (data.role || 'user').toLowerCase()
+      localStorage.setItem('isLoggedIn', 'true')
+      localStorage.setItem('userRole', role)
       navigate(role === 'merchant' ? '/admin' : '/')
     } catch {
       setMessage('Backend unavailable, demo mode active.')
 
       const demoRole = email.toLowerCase().includes('merchant') ? 'merchant' : 'user'
+      localStorage.setItem('isLoggedIn', 'true')
+      localStorage.setItem('userRole', demoRole)
       navigate(demoRole === 'merchant' ? '/admin' : '/')
     }
   }
