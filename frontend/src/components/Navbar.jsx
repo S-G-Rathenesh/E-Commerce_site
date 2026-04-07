@@ -111,7 +111,7 @@ const megaMenuData = {
     },
     {
       title: 'Featured Brands',
-      items: ['Digital Atelier', 'Studio Select', 'Modern Basics', 'Premium Edit'],
+      items: ['Veloura', 'Studio Select', 'Modern Basics', 'Premium Edit'],
     },
   ],
 }
@@ -170,9 +170,9 @@ export default function Navbar() {
     <header className={`navbar-wrap ${(menuOpen || profileOpen) ? 'navbar-wrap-open' : ''}`}>
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
-          <NavLink to="/" className="brand brand-retail" aria-label="Digital Atelier home">
+          <NavLink to="/" className="brand brand-retail" aria-label="Veloura home">
             <span className="brand-mark">DA</span>
-            <span>Digital Atelier</span>
+            <span>Veloura</span>
           </NavLink>
 
           <div
@@ -185,6 +185,10 @@ export default function Navbar() {
             <div className="nav-links nav-links-retail">
               <NavLink to="/" end className={({ isActive }) => `nav-link nav-link-retail ${isActive ? 'active-link' : ''}`}>
                 HOME
+              </NavLink>
+
+              <NavLink to="/products" end className={({ isActive }) => `nav-link nav-link-retail ${isActive ? 'active-link' : ''}`}>
+                ALL
               </NavLink>
 
               {navItems.map((item) => (
