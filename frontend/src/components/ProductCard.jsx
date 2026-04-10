@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import Button from './Button'
 
-export default function ProductCard({ product }) {
+export default function ProductCard({ product, onAddToWishlist, isWishlisted = false }) {
   const navigate = useNavigate()
 
   const openProduct = () => {
@@ -34,15 +34,26 @@ export default function ProductCard({ product }) {
         </p>
         <p>{product.description}</p>
         <p className="product-price">${product.price.toFixed(2)}</p>
-        <Button
-          variant="secondary"
-          onClick={(event) => {
-            event.stopPropagation()
-            openProduct()
-          }}
-        >
-          View Details
-        </Button>
+        <div className="product-card-actions">
+          <Button
+            variant="secondary"
+            onClick={(event) => {
+              event.stopPropagation()
+              openProduct()
+            }}
+          >
+            View Details
+          </Button>
+          <Button
+            variant={isWishlisted ? 'primary' : 'secondary'}
+            onClick={(event) => {
+              event.stopPropagation()
+              onAddToWishlist?.(product)
+            }}
+          >
+            {isWishlisted ? 'Wishlisted' : 'Add to Wishlist'}
+          </Button>
+        </div>
       </div>
     </article>
   )
