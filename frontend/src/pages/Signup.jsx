@@ -1,8 +1,11 @@
 import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import PageWrapper from '../components/PageWrapper'
+import { findLocalAccountByEmail, setStoredUser, upsertLocalAccount } from '../utils/auth'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
 export default function Signup() {
   const [fullName, setFullName] = useState('')
@@ -10,8 +13,9 @@ export default function Signup() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [message, setMessage] = useState('')
+  const navigate = useNavigate()
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault()
 
     if (password !== confirmPassword) {
@@ -19,7 +23,53 @@ export default function Signup() {
       return
     }
 
-    setMessage(`Account created for ${fullName || 'your profile'} (demo).`)
+    try {
+      const response = await fetch(`${API_BASE}/signup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          full_name: fullName,
+          email,
+          password,
+        }),
+      })
+      const data = await response.json()
+
+      if (!response.ok) {
+        setMessage(data?.detail || 'Unable to create account.')
+        return
+      }
+
+      if (data?.user) {
+        setStoredUser(data.user)
+      }
+
+      setMessage(data.message || `Account created for ${fullName || 'your profile'}.`)
+      navigate('/')
+    } catch {
+      const existing = findLocalAccountByEmail(email)
+      if (existing) {
+        setMessage('Account already exists. Please login.')
+        return
+      }
+
+      const localAccount = upsertLocalAccount({
+        full_name: fullName,
+        email,
+        password,
+        provider: 'email',
+      })
+
+      setStoredUser({
+        full_name: localAccount.full_name,
+        email: localAccount.email,
+        provider: localAccount.provider,
+      })
+      setMessage(`Account created for ${localAccount.full_name}.`)
+      navigate('/')
+    }
   }
 
   return (
