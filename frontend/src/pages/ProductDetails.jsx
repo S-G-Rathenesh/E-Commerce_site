@@ -3,6 +3,9 @@ import { Link, useParams } from 'react-router-dom'
 import { findProductById } from '../data/products'
 import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
+import { addToCart } from '../utils/cart'
+import { getStoredUser } from '../utils/auth'
+import { addToWishlist } from '../utils/wishlist'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -55,6 +58,8 @@ export default function ProductDetails() {
   const [selectedSize, setSelectedSize] = useState('M')
   const [quantity, setQuantity] = useState(1)
   const [activeImageIndex, setActiveImageIndex] = useState(0)
+  const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const [actionMessage, setActionMessage] = useState('')
 
   useEffect(() => {
     let active = true
@@ -79,10 +84,27 @@ export default function ProductDetails() {
   }, [id, localProduct])
 
   useEffect(() => {
-    setActiveImageIndex(0)
-    setQuantity(1)
-    setSelectedSize('M')
-  }, [id])
+    const syncAuth = () => setCurrentUser(getStoredUser())
+    window.addEventListener('auth-changed', syncAuth)
+    window.addEventListener('storage', syncAuth)
+
+    return () => {
+      window.removeEventListener('auth-changed', syncAuth)
+      window.removeEventListener('storage', syncAuth)
+    }
+  }, [])
+
+  const imageSet = useMemo(() => {
+    if (!product) {
+      return []
+    }
+
+    const curatedSet = galleryById[product.id]
+    if (Array.isArray(curatedSet) && curatedSet.length > 0) {
+      return curatedSet
+    }
+    return [product.image, product.image, product.image]
+  }, [product])
 
   if (!product) {
     return (
@@ -94,16 +116,22 @@ export default function ProductDetails() {
     )
   }
 
-  const imageSet = useMemo(() => {
-    const curatedSet = galleryById[product.id]
-    if (Array.isArray(curatedSet) && curatedSet.length > 0) {
-      return curatedSet
-    }
-    return [product.image, product.image, product.image]
-  }, [product])
-
   const activeImage = imageSet[activeImageIndex] || product.image
   const renderedStars = '★★★★★'
+
+  const handleAddToCart = () => {
+    addToCart(product, { quantity, size: selectedSize, user: currentUser })
+    setActionMessage(`${product.name} added to bag.`)
+  }
+
+  const handleAddToWishlist = () => {
+    const result = addToWishlist(product, { user: currentUser })
+    if (result.added) {
+      setActionMessage(`${product.name} added to wishlist.`)
+    } else {
+      setActionMessage(`${product.name} is already in wishlist.`)
+    }
+  }
 
   return (
     <PageWrapper className="product-detail-page">
@@ -177,10 +205,21 @@ export default function ProductDetails() {
                 +
               </button>
             </div>
-            <Button variant="primary" className="btn-wide detail-add-btn">
+            <Button variant="primary" className="btn-wide detail-add-btn" onClick={handleAddToCart}>
               Add to Cart
             </Button>
           </div>
+
+          <div className="row-gap">
+            <Button variant="secondary" onClick={handleAddToWishlist}>
+              Add to Wishlist
+            </Button>
+            <Link to="/wishlist" className="btn btn-link">
+              View Wishlist
+            </Link>
+          </div>
+
+          {actionMessage ? <p className="wishlist-message">{actionMessage}</p> : null}
 
           <div className="detail-feature-row">
             <p>🚚 Free Express Shipping</p>

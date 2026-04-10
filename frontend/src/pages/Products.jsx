@@ -4,6 +4,8 @@ import ProductCard from '../components/ProductCard'
 import PageWrapper from '../components/PageWrapper'
 import Input from '../components/Input'
 import { products as seedProducts } from '../data/products'
+import { getStoredUser } from '../utils/auth'
+import { addToWishlist, getWishlistItems } from '../utils/wishlist'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -17,6 +19,12 @@ export default function Products() {
   const [sortBy, setSortBy] = useState('featured')
   const [maxPrice, setMaxPrice] = useState(10000)
   const [items, setItems] = useState(seedProducts)
+  const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const [wishlistedIds, setWishlistedIds] = useState(() => {
+    const ids = getWishlistItems({ user: getStoredUser() }).map((item) => Number(item.id))
+    return new Set(ids)
+  })
+  const [wishlistMessage, setWishlistMessage] = useState('')
 
   const section = searchParams.get('section') || ''
   const sectionLabel = section ? section.charAt(0).toUpperCase() + section.slice(1) : 'Collection'
@@ -51,6 +59,25 @@ export default function Products() {
       })
   }, [])
 
+  useEffect(() => {
+    const syncWishlist = () => {
+      const user = getStoredUser()
+      setCurrentUser(user)
+      const ids = getWishlistItems({ user }).map((item) => Number(item.id))
+      setWishlistedIds(new Set(ids))
+    }
+
+    window.addEventListener('wishlist-changed', syncWishlist)
+    window.addEventListener('auth-changed', syncWishlist)
+    window.addEventListener('storage', syncWishlist)
+
+    return () => {
+      window.removeEventListener('wishlist-changed', syncWishlist)
+      window.removeEventListener('auth-changed', syncWishlist)
+      window.removeEventListener('storage', syncWishlist)
+    }
+  }, [])
+
   const sectionItems = useMemo(() => {
     if (!sectionNormalized) {
       return items
@@ -67,10 +94,7 @@ export default function Products() {
     const max = Math.max(...sectionItems.map((item) => Number(item.price) || 0))
     return Math.max(500, Math.ceil(max / 100) * 100)
   }, [sectionItems])
-
-  useEffect(() => {
-    setMaxPrice((current) => Math.min(current, highestPrice))
-  }, [highestPrice])
+  const effectiveMaxPrice = Math.min(maxPrice, highestPrice)
 
   const departments = useMemo(() => {
     if (sectionNormalized === 'men') {
@@ -124,7 +148,7 @@ export default function Products() {
       const matchesDepartment = resolvedDepartment === 'All' || item.category === resolvedDepartment
       const matchesType = activeType === 'All' || item.productType === activeType
       const matchesSubType = activeSubType === 'All' || item.subType === activeSubType
-      const matchesPrice = Number(item.price) <= maxPrice
+      const matchesPrice = Number(item.price) <= effectiveMaxPrice
 
       const legacyCategoryMatch =
         !normalizedCategory ||
@@ -161,7 +185,7 @@ export default function Products() {
     resolvedDepartment,
     activeType,
     activeSubType,
-    maxPrice,
+    effectiveMaxPrice,
     urlCategory,
     sortBy,
   ])
@@ -197,6 +221,17 @@ export default function Products() {
     setQuery('')
     setSortBy('featured')
     setMaxPrice(highestPrice)
+  }
+
+  const handleAddToWishlist = (product) => {
+    const result = addToWishlist(product, { user: currentUser })
+
+    if (result.added) {
+      setWishlistMessage(`${product.name} added to wishlist.`)
+      return
+    }
+
+    setWishlistMessage(`${product.name} is already in wishlist.`)
   }
 
   return (
@@ -276,7 +311,7 @@ export default function Products() {
             <p className="filter-title">Price Range</p>
             <div className="price-marks">
               <span>Rs. 0</span>
-              <span>Rs. {maxPrice}</span>
+              <span>Rs. {effectiveMaxPrice}</span>
             </div>
             <input
               className="price-slider"
@@ -284,7 +319,7 @@ export default function Products() {
               min="0"
               max={highestPrice}
               step="100"
-              value={maxPrice}
+              value={effectiveMaxPrice}
               onChange={(event) => setMaxPrice(Number(event.target.value))}
             />
           </div>
@@ -321,10 +356,16 @@ export default function Products() {
               <h2>All products</h2>
               <p>{filtered.length} results</p>
             </div>
+            {wishlistMessage ? <p className="wishlist-message">{wishlistMessage}</p> : null}
             {filtered.length > 0 ? (
               <div className="product-grid product-grid-wide">
                 {filtered.map((product) => (
-                  <ProductCard key={product.id} product={product} />
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    onAddToWishlist={handleAddToWishlist}
+                    isWishlisted={wishlistedIds.has(Number(product.id))}
+                  />
                 ))}
               </div>
             ) : (

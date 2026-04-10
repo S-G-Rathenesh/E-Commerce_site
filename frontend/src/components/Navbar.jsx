@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { products as seedProducts } from '../data/products'
 import { clearStoredUser, getStoredUser } from '../utils/auth'
+import { syncGuestWishlistToUser } from '../utils/wishlist'
 
 const navItems = ['Women', 'Men', 'Kids']
 
@@ -87,7 +88,14 @@ export default function Navbar() {
   }
 
   useEffect(() => {
-    const syncAuth = () => setCurrentUser(getStoredUser())
+    const syncAuth = () => {
+      const user = getStoredUser()
+      if (user) {
+        syncGuestWishlistToUser(user)
+      }
+      setCurrentUser(user)
+    }
+
     window.addEventListener('auth-changed', syncAuth)
     window.addEventListener('storage', syncAuth)
 
@@ -116,11 +124,6 @@ export default function Navbar() {
   }
 
   const handleProtectedNav = (path) => {
-    if (!currentUser) {
-      navigate('/login')
-      return
-    }
-
     navigate(path)
   }
 

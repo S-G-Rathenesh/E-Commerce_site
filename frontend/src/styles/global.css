@@ -1355,6 +1355,11 @@ textarea {
   flex: 1;
 }
 
+.product-card-actions {
+  display: grid;
+  gap: 8px;
+}
+
 .product-content h3 {
   font-size: 20px;
   line-height: 1.25;
@@ -1749,6 +1754,96 @@ textarea {
 .admin-layout {
   display: grid;
   gap: 24px;
+}
+
+.wishlist-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.wishlist-list-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.wishlist-share-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.wishlist-share-links a {
+  font-size: 13px;
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.wishlist-share-links a:hover {
+  text-decoration: underline;
+}
+
+.wishlist-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.wishlist-card {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px;
+}
+
+.wishlist-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+}
+
+.wishlist-stock {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.wishlist-stock-in {
+  color: #0f7b43;
+}
+
+.wishlist-stock-out {
+  color: #b42318;
+}
+
+.wishlist-notes {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wishlist-notes span {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 98, 254, 0.1);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.wishlist-message {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 98, 254, 0.2);
+  background: rgba(15, 98, 254, 0.08);
+  color: var(--brand-dark);
+  font-weight: 600;
 }
 
 .cart-layout {
@@ -2212,8 +2307,13 @@ textarea {
   }
 
   .catalog-layout,
+  .wishlist-layout,
   .product-grid-wide {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .wishlist-grid {
+    grid-template-columns: 1fr;
   }
 
   .merchant-progress-steps {
@@ -2332,7 +2432,12 @@ textarea {
   }
 
   .catalog-layout,
+  .wishlist-layout,
   .product-grid-wide {
+    grid-template-columns: 1fr;
+  }
+
+  .wishlist-card {
     grid-template-columns: 1fr;
   }
 
