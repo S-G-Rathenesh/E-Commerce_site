@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { products } from '../data/products'
 import ProductCard from '../components/ProductCard'
-import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
 
 const categoryCards = [
@@ -25,64 +24,27 @@ const categoryCards = [
   },
 ]
 
+const budgetPicks = [...products]
+  .sort((a, b) => a.price - b.price)
+  .slice(0, 4)
+
 export default function Home() {
   return (
-    <PageWrapper
-      eyebrow="Flat 300 OFF"
-      title="Fashion-led shopping with a premium retail feel"
-      description="A storefront inspired by modern fashion marketplaces: strong hero promotions, category discovery, polished cards, and a unified browsing rhythm."
-      actions={
-        <>
-          <Button to="/products" variant="primary">
-            Shop Collection
-          </Button>
-          <Button to="/admin" variant="secondary">
-            Open Admin
-          </Button>
-        </>
-      }
-    >
-      <section className="promo-strip section-card">
-        <span>On your 1st purchase via app</span>
-        <strong>Use code STYLE300</strong>
-        <span>Limited time offer</span>
-      </section>
-
-      <section className="hero-banner section-card">
-        <div>
-          <p className="eyebrow">Fashion carnival</p>
-          <h2>Sun’s out. Deals are in.</h2>
-          <p className="hero-copy">
-            Discover an elevated shopping experience built around seasonal fashion, bold promotions, and a clean marketplace layout.
-          </p>
-          <div className="row-gap">
-            <Button to="/products" variant="primary">
-              Shop Collection
-            </Button>
-            <Button to="/login" variant="secondary">
-              Sign In
-            </Button>
+    <PageWrapper className="home-page">
+      <section className="section-card panel-stack">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Budget picks</p>
+            <h2>Budget-Friendly Picks</h2>
           </div>
-          <div className="hero-metrics">
-            <div>
-              <strong>1.2k+</strong>
-              <span>New arrivals</span>
-            </div>
-            <div>
-              <strong>300+</strong>
-              <span>Premium brands</span>
-            </div>
-            <div>
-              <strong>24h</strong>
-              <span>Express dispatch</span>
-            </div>
-          </div>
+          <Link to="/products" className="btn btn-link">
+            See all deals
+          </Link>
         </div>
-        <div className="hero-visual">
-          <div className="hero-deal-card">
-            <p>50-80% OFF</p>
-            <span>Shop by style and season</span>
-          </div>
+        <div className="product-grid">
+          {budgetPicks.map((product) => (
+            <ProductCard key={product.id} product={product} />
+          ))}
         </div>
       </section>
 
