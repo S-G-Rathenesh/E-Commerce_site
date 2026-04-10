@@ -28,6 +28,10 @@ export default function ProductCard({ product }) {
       <div className="product-content">
         <p className="product-category">{product.category}</p>
         <h3>{product.name}</h3>
+        <p>
+          {(product.productType || product.category) +
+            (product.subType ? ` • ${product.subType}` : '')}
+        </p>
         <p>{product.description}</p>
         <p className="product-price">${product.price.toFixed(2)}</p>
         <Button

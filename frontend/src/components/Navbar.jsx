@@ -1,51 +1,86 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { clearStoredUser, getStoredUser } from '../utils/auth'
 
-const navItems = ['Women', 'Men', 'Kids', 'Beauty', 'Studio']
+const navItems = ['Women', 'Men', 'Kids']
 
 const megaMenuData = {
   Women: [
     {
-      title: 'Topwear',
-      items: ['T-Shirts', 'Casual Shirts', 'Formal Shirts', 'Sweatshirts', 'Sweaters', 'Jackets'],
+      title: 'Western Wear',
+      items: [
+        'Dresses',
+        'Tops & T-Shirts',
+        'Shirts & Blouses',
+        'Jumpsuits & Playsuits',
+        'Skirts',
+        'Jeans & Jeggings',
+        'Trousers & Pants',
+        'Shorts',
+      ],
     },
     {
-      title: 'Bottomwear',
-      items: ['Jeans', 'Casual Trousers', 'Formal Trousers', 'Shorts', 'Track Pants & Joggers'],
+      title: 'Ethnic Wear',
+      items: ['Sarees', 'Kurtis', 'Salwar Kameez', 'Lehenga Choli', 'Ethnic Gowns', 'Dupattas'],
     },
     {
-      title: 'Footwear',
-      items: ['Casual Shoes', 'Sports Shoes', 'Formal Shoes', 'Sneakers', 'Sandals & Floaters'],
+      title: 'Winter & Outerwear',
+      items: ['Jackets', 'Coats', 'Shrugs', 'Sweaters', 'Hoodies'],
     },
     {
-      title: 'Fashion Accessories',
-      items: ['Wallets', 'Belts', 'Perfumes & Body Mists', 'Trimmers', 'Caps & Hats'],
+      title: 'Innerwear & Loungewear',
+      items: ['Bras', 'Panties', 'Shapewear', 'Nightwear', 'Loungewear'],
     },
     {
-      title: 'Bags & Backpacks',
-      items: ['Handbags', 'Backpacks', 'Clutches', 'Laptop Bags', 'Luggage & Trolleys'],
+      title: 'Footwear & Accessories',
+      items: [
+        'Heels',
+        'Flats',
+        'Sneakers',
+        'Sandals',
+        'Boots',
+        'Handbags',
+        'Jewelry',
+        'Scarves & Stoles',
+        'Belts',
+        'Sunglasses',
+      ],
     },
   ],
   Men: [
     {
       title: 'Topwear',
-      items: ['T-Shirts', 'Casual Shirts', 'Formal Shirts', 'Sweatshirts', 'Jackets'],
+      items: [
+        'T-Shirts (Crew neck, V-neck, Polo)',
+        'Shirts (Casual, Formal, Linen, Denim)',
+        'Sweatshirts',
+        'Hoodies',
+        'Jackets & Coats (Bomber, Blazer, Leather, Winter)',
+        'Vests',
+      ],
     },
     {
       title: 'Bottomwear',
-      items: ['Jeans', 'Casual Trousers', 'Formal Trousers', 'Shorts', 'Joggers'],
+      items: [
+        'Jeans (Slim, Skinny, Regular)',
+        'Trousers (Formal, Casual)',
+        'Chinos',
+        'Joggers',
+        'Shorts',
+        'Track Pants',
+      ],
+    },
+    {
+      title: 'Ethnic Wear',
+      items: ['Kurta & Pajama', 'Sherwani', 'Nehru Jackets', 'Dhoti'],
+    },
+    {
+      title: 'Innerwear & Sleepwear',
+      items: ['Vests', 'Briefs / Boxers', 'Thermals', 'Nightwear'],
     },
     {
       title: 'Footwear',
-      items: ['Casual Shoes', 'Sports Shoes', 'Sneakers', 'Formal Shoes', 'Sandals'],
-    },
-    {
-      title: 'Accessories',
-      items: ['Wallets', 'Belts', 'Sunglasses', 'Perfumes', 'Caps & Hats'],
-    },
-    {
-      title: 'Grooming',
-      items: ['Trimmers', 'Shaving Essentials', 'Fragrances', 'Deodorants', 'Grooming Kits'],
+      items: ['Sneakers', 'Formal Shoes', 'Loafers', 'Sandals & Flip-flops', 'Boots'],
     },
   ],
   Kids: [
@@ -141,33 +176,35 @@ const profileLinks = [
 ]
 
 export default function Navbar() {
-  const [activeMenu, setActiveMenu] = useState(null)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [profileOpen, setProfileOpen] = useState(false)
+  const [currentUser, setCurrentUser] = useState(getStoredUser())
   const navigate = useNavigate()
   const location = useLocation()
 
-  const currentMenu = activeMenu || 'Women'
-  const menuColumns = useMemo(() => megaMenuData[currentMenu] || megaMenuData.Women, [currentMenu])
-
   const productSectionPath = (section) => `/products?section=${encodeURIComponent(section.toLowerCase())}`
+  const sectionParam = (new URLSearchParams(location.search).get('section') || '').trim().toLowerCase()
+  const isHomeActive = location.pathname === '/'
+  const isAllActive = location.pathname === '/products' && !sectionParam
 
-  const categoryPath = (category) => `/products?category=${encodeURIComponent(category)}`
+  useEffect(() => {
+    const syncAuth = () => setCurrentUser(getStoredUser())
+    window.addEventListener('auth-changed', syncAuth)
+    window.addEventListener('storage', syncAuth)
 
-  const sectionParam = useMemo(() => {
-    const params = new URLSearchParams(location.search)
-    return (params.get('section') || '').trim().toLowerCase()
-  }, [location.search])
+    return () => {
+      window.removeEventListener('auth-changed', syncAuth)
+      window.removeEventListener('storage', syncAuth)
+    }
+  }, [])
 
-  const selectedSection = useMemo(
-    () => navItems.find((item) => item.toLowerCase() === sectionParam) || null,
-    [sectionParam],
-  )
+  const displayName = (currentUser?.full_name || '').trim() || 'Guest'
 
-  const visibleActiveMenu = menuOpen ? activeMenu : selectedSection
+  const handleLogout = () => {
+    clearStoredUser()
+    navigate('/')
+  }
 
   return (
-    <header className={`navbar-wrap ${(menuOpen || profileOpen) ? 'navbar-wrap-open' : ''}`}>
+    <header className="navbar-wrap">
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
           <NavLink to="/" className="brand brand-retail" aria-label="Veloura home">
@@ -175,19 +212,13 @@ export default function Navbar() {
             <span>Veloura</span>
           </NavLink>
 
-          <div
-            className="nav-menu-region"
-            onMouseLeave={() => {
-              setMenuOpen(false)
-              setActiveMenu(null)
-            }}
-          >
+          <div className="nav-menu-region">
             <div className="nav-links nav-links-retail">
-              <NavLink to="/" end className={({ isActive }) => `nav-link nav-link-retail ${isActive ? 'active-link' : ''}`}>
+              <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
                 HOME
               </NavLink>
 
-              <NavLink to="/products" end className={({ isActive }) => `nav-link nav-link-retail ${isActive ? 'active-link' : ''}`}>
+              <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
                 ALL
               </NavLink>
 
@@ -195,113 +226,39 @@ export default function Navbar() {
                 <button
                   key={item}
                   type="button"
-                  className={`nav-link nav-link-retail nav-link-button ${visibleActiveMenu === item ? 'active-link' : ''}`}
-                  onMouseEnter={() => {
-                    setMenuOpen(true)
-                    setActiveMenu(item)
-                  }}
-                  onFocus={() => {
-                    setMenuOpen(true)
-                    setActiveMenu(item)
-                  }}
+                  className={`nav-link nav-link-retail nav-link-button ${
+                    location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
+                  }`}
                   onClick={() => {
-                    setMenuOpen(false)
                     navigate(productSectionPath(item))
                   }}
-                  aria-expanded={activeMenu === item}
                 >
                   {item.toUpperCase()}
                 </button>
               ))}
             </div>
-
-            <section className={`mega-menu shell ${menuOpen ? 'mega-menu-open' : ''}`} aria-label={`${currentMenu} menu`}>
-              <div className="mega-menu-head">
-                <div>
-                  <p className="eyebrow">{currentMenu}</p>
-                  <h2>Shop by category</h2>
-                </div>
-                <p>Expand and browse like a modern fashion marketplace.</p>
-              </div>
-
-              <div className="mega-menu-grid">
-                {menuColumns.map((column) => (
-                  <div key={column.title} className="mega-menu-column">
-                    <h3>{column.title}</h3>
-                    <ul>
-                      {column.items.map((item) => (
-                        <li key={item}>
-                          <NavLink to={categoryPath(item)}>{item}</NavLink>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-
-                <div className="mega-menu-side">
-                  {quickLinks.map((link) => (
-                    <article key={link.title}>
-                      <p className="meta-label">{link.title}</p>
-                      <p>{link.text}</p>
-                    </article>
-                  ))}
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <div className="nav-search">
-            <span className="nav-search-icon">⌕</span>
-            <input aria-label="Search products" placeholder="Search for products, brands and more" />
-          </div>
-
-          <div
-            className="nav-profile-wrap"
-            onMouseEnter={() => setProfileOpen(true)}
-            onMouseLeave={() => setProfileOpen(false)}
-          >
-            <button
-              type="button"
-              className={`nav-action nav-profile-trigger ${profileOpen ? 'nav-profile-trigger-open' : ''}`}
-              onClick={() => setProfileOpen((current) => !current)}
-              aria-expanded={profileOpen}
-            >
-              <span>◌</span>
-              <small>Profile</small>
-            </button>
-
-            <div className={`profile-menu ${profileOpen ? 'profile-menu-open' : ''}`}>
-              <div className="profile-menu-head">
-                <h3>Welcome</h3>
-                <p>To access account and manage orders</p>
-                <div className="profile-auth-actions">
-                  <NavLink to="/login" className="btn btn-secondary profile-login-btn" onClick={() => setProfileOpen(false)}>
-                    LOGIN
-                  </NavLink>
-                  <NavLink to="/signup" className="btn btn-primary profile-signup-btn" onClick={() => setProfileOpen(false)}>
-                    SIGNUP
-                  </NavLink>
-                </div>
-              </div>
-
-              <div className="profile-menu-list">
-                {profileLinks.slice(0, 4).map((item) => (
-                  <NavLink key={item} to={item === 'Orders' ? '/cart' : '/products'} className="profile-menu-link">
-                    {item}
-                  </NavLink>
-                ))}
-                <div className="profile-menu-divider" />
-                {profileLinks.slice(4).map((item) => (
-                  <NavLink key={item} to="/products" className="profile-menu-link profile-menu-link-muted">
-                    {item}
-                    {item === 'Myntra Insider' ? <span>New</span> : null}
-                  </NavLink>
-                ))}
-              </div>
-            </div>
           </div>
 
           <div className="nav-actions">
+            {currentUser ? (
+              <>
+                <span className="nav-user-name" title={currentUser.email}>
+                  {displayName}
+                </span>
+                <button type="button" className="nav-action" onClick={handleLogout}>
+                  <small>Logout</small>
+                </button>
+              </>
+            ) : (
+              <>
+                <NavLink to="/login" className="nav-action">
+                  <small>Login</small>
+                </NavLink>
+                <NavLink to="/signup" className="nav-action nav-action-signup">
+                  <small>Signup</small>
+                </NavLink>
+              </>
+            )}
             <button type="button" className="nav-action">
               <span>♡</span>
               <small>Wishlist</small>
@@ -312,8 +269,6 @@ export default function Navbar() {
             </NavLink>
           </div>
         </nav>
-
-        <div className={`mega-menu-overlay ${menuOpen ? 'mega-menu-overlay-open' : ''}`} aria-hidden="true" />
       </div>
     </header>
   )
