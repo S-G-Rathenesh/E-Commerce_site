@@ -5,6 +5,13 @@ import { clearStoredUser, getStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
 
 const navItems = ['Women', 'Men', 'Kids']
+const merchantNavItems = [
+  { label: 'Dashboard', path: '/admin', tab: '' },
+  { label: 'Products', path: '/admin/products', tab: '' },
+  { label: 'Orders', path: '/admin?tab=orders', tab: 'orders' },
+  { label: 'Customers', path: '/admin?tab=customers', tab: 'customers' },
+  { label: 'Analytics', path: '/admin?tab=analytics', tab: 'analytics' },
+]
 
 const normalize = (value) => String(value || '').trim().toLowerCase()
 
@@ -19,6 +26,7 @@ export default function Navbar() {
 
   const searchParams = new URLSearchParams(location.search)
   const sectionParam = normalize(searchParams.get('section'))
+  const merchantTabParam = normalize(searchParams.get('tab'))
   const departmentParam = searchParams.get('department') || ''
   const typeParam = searchParams.get('type') || ''
   const isHomeActive = location.pathname === '/'
@@ -117,6 +125,7 @@ export default function Navbar() {
   }, [])
 
   const displayName = (currentUser?.full_name || '').trim() || 'Guest'
+  const isMerchant = (currentUser?.role || '').toLowerCase() === 'merchant'
 
   const handleLogout = () => {
     clearStoredUser()
@@ -125,6 +134,18 @@ export default function Navbar() {
 
   const handleProtectedNav = (path) => {
     navigate(path)
+  }
+
+  const isMerchantItemActive = (item) => {
+    if (item.path === '/admin/products') {
+      return location.pathname === '/admin/products'
+    }
+
+    if (item.tab) {
+      return location.pathname === '/admin' && merchantTabParam === item.tab
+    }
+
+    return location.pathname === '/admin' && !merchantTabParam
   }
 
   return (
@@ -136,114 +157,129 @@ export default function Navbar() {
             <span>Veloura</span>
           </NavLink>
 
-          <div
-            className="nav-menu-region"
-            onMouseEnter={clearCloseTimer}
-            onMouseLeave={scheduleMegaMenuClose}
-          >
+          {isMerchant ? (
             <div className="nav-links nav-links-retail">
-              <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
-                HOME
-              </NavLink>
-
-              <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
-                ALL
-              </NavLink>
-
-              {navItems.map((item) => (
+              {merchantNavItems.map((item) => (
                 <button
-                  key={item}
+                  key={item.label}
                   type="button"
-                  className={`nav-link nav-link-retail nav-link-button ${
-                    location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
-                  }`}
-                  onMouseEnter={() => openMegaMenu(item)}
-                  onFocus={() => openMegaMenu(item)}
-                  onClick={() => goToProducts(item)}
-                  aria-expanded={activeMegaMenu === item}
+                  className={`nav-link nav-link-retail nav-link-button ${isMerchantItemActive(item) ? 'active-link' : ''}`}
+                  onClick={() => navigate(item.path)}
                 >
-                  {item.toUpperCase()}
+                  {item.label.toUpperCase()}
                 </button>
               ))}
             </div>
-
+          ) : (
             <div
-              className={`mega-menu-overlay ${activeMegaMenu ? 'mega-menu-overlay-open' : ''}`}
-              onMouseEnter={clearCloseTimer}
-              onMouseLeave={scheduleMegaMenuClose}
-              onClick={closeMegaMenu}
-              aria-hidden={!activeMegaMenu}
-            />
-
-            <div
-              className={`mega-menu ${activeMegaMenu ? 'mega-menu-open' : ''}`}
+              className="nav-menu-region"
               onMouseEnter={clearCloseTimer}
               onMouseLeave={scheduleMegaMenuClose}
             >
-              {activeMegaMenu ? (
-                <div>
-                  <div className="mega-menu-head">
-                    <div>
-                      <p className="eyebrow">Shop {activeMegaMenu}</p>
-                      <h3>{activeMegaMenu} categories</h3>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-link"
-                      onClick={() => goToProducts(activeMegaMenu)}
-                    >
-                      View all {activeMegaMenu}
-                    </button>
-                  </div>
+              <div className="nav-links nav-links-retail">
+                <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
+                  HOME
+                </NavLink>
 
-                  <div className="mega-menu-grid">
-                    {activeColumns.map((group) => (
-                      <div className="mega-menu-column" key={group.title}>
-                        <h3>{group.title}</h3>
-                        <ul>
-                          <li>
-                            <button
-                              type="button"
-                              className={`mega-menu-link ${
-                                location.pathname === '/products' &&
-                                sectionParam === normalize(activeMegaMenu) &&
-                                departmentParam === group.title &&
-                                !typeParam
-                                  ? 'mega-menu-link-active'
-                                  : ''
-                              }`}
-                              onClick={() => goToProducts(activeMegaMenu, { department: group.title })}
-                            >
-                              All {group.title}
-                            </button>
-                          </li>
-                          {group.items.map((item) => (
-                            <li key={`${group.title}-${item}`}>
+                <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
+                  ALL
+                </NavLink>
+
+                {navItems.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className={`nav-link nav-link-retail nav-link-button ${
+                      location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
+                    }`}
+                    onMouseEnter={() => openMegaMenu(item)}
+                    onFocus={() => openMegaMenu(item)}
+                    onClick={() => goToProducts(item)}
+                    aria-expanded={activeMegaMenu === item}
+                  >
+                    {item.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              <div
+                className={`mega-menu-overlay ${activeMegaMenu ? 'mega-menu-overlay-open' : ''}`}
+                onMouseEnter={clearCloseTimer}
+                onMouseLeave={scheduleMegaMenuClose}
+                onClick={closeMegaMenu}
+                aria-hidden={!activeMegaMenu}
+              />
+
+              <div
+                className={`mega-menu ${activeMegaMenu ? 'mega-menu-open' : ''}`}
+                onMouseEnter={clearCloseTimer}
+                onMouseLeave={scheduleMegaMenuClose}
+              >
+                {activeMegaMenu ? (
+                  <div>
+                    <div className="mega-menu-head">
+                      <div>
+                        <p className="eyebrow">Shop {activeMegaMenu}</p>
+                        <h3>{activeMegaMenu} categories</h3>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        onClick={() => goToProducts(activeMegaMenu)}
+                      >
+                        View all {activeMegaMenu}
+                      </button>
+                    </div>
+
+                    <div className="mega-menu-grid">
+                      {activeColumns.map((group) => (
+                        <div className="mega-menu-column" key={group.title}>
+                          <h3>{group.title}</h3>
+                          <ul>
+                            <li>
                               <button
                                 type="button"
                                 className={`mega-menu-link ${
                                   location.pathname === '/products' &&
                                   sectionParam === normalize(activeMegaMenu) &&
                                   departmentParam === group.title &&
-                                  typeParam === item
+                                  !typeParam
                                     ? 'mega-menu-link-active'
                                     : ''
                                 }`}
-                                onClick={() => goToProducts(activeMegaMenu, { department: group.title, type: item })}
+                                onClick={() => goToProducts(activeMegaMenu, { department: group.title })}
                               >
-                                {item}
+                                All {group.title}
                               </button>
                             </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
+                            {group.items.map((item) => (
+                              <li key={`${group.title}-${item}`}>
+                                <button
+                                  type="button"
+                                  className={`mega-menu-link ${
+                                    location.pathname === '/products' &&
+                                    sectionParam === normalize(activeMegaMenu) &&
+                                    departmentParam === group.title &&
+                                    typeParam === item
+                                      ? 'mega-menu-link-active'
+                                      : ''
+                                  }`}
+                                  onClick={() => goToProducts(activeMegaMenu, { department: group.title, type: item })}
+                                >
+                                  {item}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
 
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="nav-actions">
             {currentUser ? (
@@ -251,6 +287,11 @@ export default function Navbar() {
                 <span className="nav-user-name" title={currentUser.email}>
                   {displayName}
                 </span>
+                {isMerchant ? (
+                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/admin?tab=profile')}>
+                    <small>Profile</small>
+                  </button>
+                ) : null}
                 <button type="button" className="nav-action" onClick={handleLogout}>
                   <small>Logout</small>
                 </button>
@@ -265,19 +306,23 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
-              <span>♡</span>
-              <small>Wishlist</small>
-            </button>
-            <button
-              type="button"
-              className="nav-action"
-              aria-label="Open cart"
-              onClick={() => handleProtectedNav('/cart')}
-            >
-              <span>🛍</span>
-              <small>Bag</small>
-            </button>
+            {isMerchant ? null : (
+              <>
+                <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
+                  <span>♡</span>
+                  <small>Wishlist</small>
+                </button>
+                <button
+                  type="button"
+                  className="nav-action"
+                  aria-label="Open cart"
+                  onClick={() => handleProtectedNav('/cart')}
+                >
+                  <span>🛍</span>
+                  <small>Bag</small>
+                </button>
+              </>
+            )}
           </div>
         </nav>
       </div>

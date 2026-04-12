@@ -1,6 +1,23 @@
 const AUTH_STORAGE_KEY = 'veloura_auth_user'
 const AUTH_ACCOUNTS_KEY = 'veloura_auth_accounts'
 
+const DEMO_ACCOUNTS = [
+  {
+    full_name: 'Demo Merchant',
+    email: 'merchant.demo@veloura.com',
+    password: 'Merchant@2026',
+    provider: 'email',
+    role: 'merchant',
+  },
+  {
+    full_name: 'Demo User',
+    email: 'user.demo@veloura.com',
+    password: 'User@2026',
+    provider: 'email',
+    role: 'user',
+  },
+]
+
 export function getStoredUser() {
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY)
@@ -27,12 +44,25 @@ function getStoredAccounts() {
   try {
     const raw = localStorage.getItem(AUTH_ACCOUNTS_KEY)
     if (!raw) {
-      return []
+      return DEMO_ACCOUNTS
     }
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) {
+      return DEMO_ACCOUNTS
+    }
+
+    const existingEmails = new Set(parsed.map((account) => String(account?.email || '').trim().toLowerCase()))
+    const merged = [...parsed]
+
+    for (const demoAccount of DEMO_ACCOUNTS) {
+      if (!existingEmails.has(demoAccount.email.toLowerCase())) {
+        merged.push(demoAccount)
+      }
+    }
+
+    return merged
   } catch {
-    return []
+    return DEMO_ACCOUNTS
   }
 }
 
@@ -61,6 +91,7 @@ export function upsertLocalAccount(account) {
     email: normalizedEmail,
     password: account?.password || '',
     provider: account?.provider || 'email',
+    role: account?.role || 'user',
   }
 
   const accounts = getStoredAccounts()
