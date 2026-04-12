@@ -63,10 +63,12 @@ export default function Login() {
         full_name: localAccount.full_name,
         email: localAccount.email,
         provider: localAccount.provider,
+        role: localAccount.role || 'user',
       })
       setMessage(`Welcome back, ${localAccount.full_name}!`)
       setNeedsSignup(false)
-      navigate('/')
+      const role = (localAccount.role || 'user').toLowerCase()
+      navigate(role === 'merchant' ? '/admin' : '/')
     }
   }
 
@@ -105,6 +107,15 @@ export default function Login() {
               Login
             </Button>
           </form>
+          <div className="login-demo-accounts" aria-label="Demo testing accounts">
+            <p className="eyebrow">Demo Accounts (Testing)</p>
+            <p>
+              <strong>Merchant:</strong> merchant.demo@veloura.com / Merchant@2026
+            </p>
+            <p>
+              <strong>User:</strong> user.demo@veloura.com / User@2026
+            </p>
+          </div>
           <p className="auth-switch-text">
             New to Veloura?{' '}
             <NavLink to="/signup" className="merchant-cta-link">

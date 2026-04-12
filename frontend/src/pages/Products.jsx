@@ -8,6 +8,8 @@ import { getStoredUser } from '../utils/auth'
 import { addToWishlist, getWishlistItems } from '../utils/wishlist'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+const MIN_BACKEND_PRODUCTS = 30
+const REQUIRED_SECTIONS = ['women', 'men', 'kids']
 
 const normalize = (value) => String(value || '').trim().toLowerCase()
 
@@ -48,7 +50,11 @@ export default function Products() {
           (item) => item?.section && item?.category && (item?.productType || item?.subType),
         )
 
-        if (hasMarketplaceShape) {
+        const sectionsInPayload = new Set(data.map((item) => normalize(item?.section)))
+        const hasRequiredSections = REQUIRED_SECTIONS.every((sectionName) => sectionsInPayload.has(sectionName))
+        const hasUsefulCatalogVolume = data.length >= MIN_BACKEND_PRODUCTS
+
+        if (hasMarketplaceShape && hasRequiredSections && hasUsefulCatalogVolume) {
           setItems(data)
         } else {
           setItems(seedProducts)

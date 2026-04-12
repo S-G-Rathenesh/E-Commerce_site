@@ -1,4 +1,5 @@
-import { Route, Routes } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import PageLayout from './components/PageLayout'
 import Home from './pages/Home'
 import Products from './pages/Products'
@@ -11,17 +12,35 @@ import Signup from './pages/Signup'
 import MerchantRegister from './pages/MerchantRegister'
 import AdminDashboard from './pages/AdminDashboard'
 import ManageProducts from './pages/ManageProducts'
+import { getStoredUser } from './utils/auth'
 
 function App() {
+  const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const isMerchantUser = (currentUser?.role || '').toLowerCase() === 'merchant'
+
+  useEffect(() => {
+    const syncAuthState = () => {
+      setCurrentUser(getStoredUser())
+    }
+
+    window.addEventListener('auth-changed', syncAuthState)
+    window.addEventListener('storage', syncAuthState)
+
+    return () => {
+      window.removeEventListener('auth-changed', syncAuthState)
+      window.removeEventListener('storage', syncAuthState)
+    }
+  }, [])
+
   return (
     <PageLayout>
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/products" element={<Products />} />
         <Route path="/product/:id" element={<ProductDetails />} />
-        <Route path="/cart" element={<Cart />} />
-        <Route path="/wishlist" element={<Wishlist />} />
-        <Route path="/checkout" element={<Checkout />} />
+        <Route path="/cart" element={isMerchantUser ? <Navigate to="/admin" replace /> : <Cart />} />
+        <Route path="/wishlist" element={isMerchantUser ? <Navigate to="/admin" replace /> : <Wishlist />} />
+        <Route path="/checkout" element={isMerchantUser ? <Navigate to="/admin" replace /> : <Checkout />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/merchant-register" element={<MerchantRegister />} />
