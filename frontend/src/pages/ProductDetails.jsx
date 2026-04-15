@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import { findProductById } from '../data/products'
 import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
+import AnimatedSection from '../components/AnimatedSection'
+import DeliveryEstimate from '../components/DeliveryEstimate'
 import { addToCart } from '../utils/cart'
 import { getStoredUser } from '../utils/auth'
 import { addToWishlist } from '../utils/wishlist'
@@ -10,6 +13,14 @@ import { addToWishlist } from '../utils/wishlist'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
 const sizeOptions = ['S', 'M', 'L', 'XL']
+
+const normalizeRole = (role) => {
+  const next = String(role || '').trim().toLowerCase()
+  if (next === 'merchant') {
+    return 'admin'
+  }
+  return next
+}
 
 const galleryById = {
   1: [
@@ -53,6 +64,7 @@ const reviews = [
 
 export default function ProductDetails() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const localProduct = findProductById(id)
   const [product, setProduct] = useState(localProduct)
   const [selectedSize, setSelectedSize] = useState('M')
@@ -120,16 +132,42 @@ export default function ProductDetails() {
   const renderedStars = '★★★★★'
 
   const handleAddToCart = () => {
+    const role = normalizeRole(currentUser?.role)
+
+    if (!currentUser || role !== 'user') {
+      const message = 'Please login to add products to bag.'
+      setActionMessage(message)
+      toast(message)
+      navigate('/login')
+      return
+    }
+
     addToCart(product, { quantity, size: selectedSize, user: currentUser })
-    setActionMessage(`${product.name} added to bag.`)
+    const message = `${product.name} added to bag.`
+    setActionMessage(message)
+    toast.success(message)
   }
 
   const handleAddToWishlist = () => {
+    const role = normalizeRole(currentUser?.role)
+
+    if (!currentUser || role !== 'user') {
+      const message = 'Please login to add products to wishlist.'
+      setActionMessage(message)
+      toast(message)
+      navigate('/login')
+      return
+    }
+
     const result = addToWishlist(product, { user: currentUser })
     if (result.added) {
-      setActionMessage(`${product.name} added to wishlist.`)
+      const message = `${product.name} added to wishlist.`
+      setActionMessage(message)
+      toast.success(message)
     } else {
-      setActionMessage(`${product.name} is already in wishlist.`)
+      const message = `${product.name} is already in wishlist.`
+      setActionMessage(message)
+      toast(message)
     }
   }
 
@@ -143,9 +181,11 @@ export default function ProductDetails() {
         <strong>{product.name}</strong>
       </nav>
 
-      <section className="detail-showcase">
+      <AnimatedSection as="section" className="detail-showcase">
         <div className="detail-gallery">
-          <img src={activeImage} alt={product.name} className="detail-main-image" />
+          <div className="detail-main-image-wrap">
+            <img src={activeImage} alt={product.name} className="detail-main-image" />
+          </div>
           <div className="detail-thumbs" aria-label="Product images">
             {imageSet.slice(0, 4).map((image, index) => (
               <button
@@ -162,73 +202,75 @@ export default function ProductDetails() {
         </div>
 
         <article className="detail-summary">
-          <h1>{product.name}</h1>
-          <p className="detail-price">${Number(product.price).toFixed(2)}</p>
-          <p className="detail-copy">{product.description}</p>
+          <div className="detail-summary-core">
+            <h1>{product.name}</h1>
+            <p className="detail-price">Rs. {Number(product.price).toFixed(2)}</p>
+            <p className="detail-copy">{product.description}</p>
+            <DeliveryEstimate productId={product.id} currentUser={currentUser} />
+          </div>
 
-          <div className="detail-size-row">
-            <div className="detail-size-head">
-              <p>Select Size</p>
-              <button type="button" className="btn btn-link detail-guide-btn">
-                Size Guide
-              </button>
-            </div>
-            <div className="detail-size-options">
-              {sizeOptions.map((size) => (
-                <button
-                  key={size}
-                  type="button"
-                  className={`detail-size-chip ${selectedSize === size ? 'detail-size-chip-active' : ''}`}
-                  onClick={() => setSelectedSize(size)}
-                >
-                  {size}
+          <div className="detail-purchase-block">
+            <div className="detail-size-row">
+              <div className="detail-size-head">
+                <p>Select Size</p>
+                <button type="button" className="btn btn-link detail-guide-btn">
+                  Size Guide
                 </button>
-              ))}
+              </div>
+              <div className="detail-size-options">
+                {sizeOptions.map((size) => (
+                  <button
+                    key={size}
+                    type="button"
+                    className={`detail-size-chip ${selectedSize === size ? 'detail-size-chip-active' : ''}`}
+                    onClick={() => setSelectedSize(size)}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
 
-          <div className="detail-cart-row">
-            <div className="detail-qty" aria-label="Quantity controls">
-              <button
-                type="button"
-                onClick={() => setQuantity((current) => Math.max(1, current - 1))}
-                aria-label="Decrease quantity"
-              >
-                −
-              </button>
-              <span>{quantity}</span>
-              <button
-                type="button"
-                onClick={() => setQuantity((current) => Math.min(10, current + 1))}
-                aria-label="Increase quantity"
-              >
-                +
-              </button>
+            <div className="detail-cart-row">
+              <div className="detail-qty" aria-label="Quantity controls">
+                <button
+                  type="button"
+                  onClick={() => setQuantity((current) => Math.max(1, current - 1))}
+                  aria-label="Decrease quantity"
+                >
+                  −
+                </button>
+                <span>{quantity}</span>
+                <button
+                  type="button"
+                  onClick={() => setQuantity((current) => Math.min(10, current + 1))}
+                  aria-label="Increase quantity"
+                >
+                  +
+                </button>
+              </div>
+              <Button variant="primary" className="btn-wide detail-add-btn" onClick={handleAddToCart}>
+                Add to Cart
+              </Button>
             </div>
-            <Button variant="primary" className="btn-wide detail-add-btn" onClick={handleAddToCart}>
-              Add to Cart
-            </Button>
-          </div>
 
-          <div className="row-gap">
-            <Button variant="secondary" onClick={handleAddToWishlist}>
-              Add to Wishlist
-            </Button>
-            <Link to="/wishlist" className="btn btn-link">
-              View Wishlist
-            </Link>
-          </div>
+            <div className="row-gap detail-secondary-actions">
+              <Button variant="secondary" onClick={handleAddToWishlist}>
+                Add to Wishlist
+              </Button>
+            </div>
 
-          {actionMessage ? <p className="wishlist-message">{actionMessage}</p> : null}
+            {actionMessage ? <p className="wishlist-message">{actionMessage}</p> : null}
+          </div>
 
           <div className="detail-feature-row">
             <p>🚚 Free Express Shipping</p>
             <p>🌿 Sustainable Materials</p>
           </div>
         </article>
-      </section>
+      </AnimatedSection>
 
-      <section className="detail-reviews">
+      <AnimatedSection as="section" className="detail-reviews" delay={0.06}>
         <div className="detail-reviews-head">
           <div>
             <h2>Client Reviews</h2>
@@ -264,7 +306,7 @@ export default function ProductDetails() {
             Continue Shopping
           </Link>
         </div>
-      </section>
+      </AnimatedSection>
     </PageWrapper>
   )
 }

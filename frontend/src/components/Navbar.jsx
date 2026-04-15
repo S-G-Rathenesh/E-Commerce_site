@@ -6,23 +6,42 @@ import { syncGuestWishlistToUser } from '../utils/wishlist'
 
 const navItems = ['Women', 'Men', 'Kids']
 const merchantNavItems = [
-  { label: 'Dashboard', path: '/admin', tab: '' },
-  { label: 'Products', path: '/admin/products', tab: '' },
-  { label: 'Orders', path: '/admin?tab=orders', tab: 'orders' },
-  { label: 'Customers', path: '/admin?tab=customers', tab: 'customers' },
-  { label: 'Analytics', path: '/admin?tab=analytics', tab: 'analytics' },
+  { label: 'Dashboard', path: '/admin/dashboard', legacyTab: '' },
+  { label: 'Products', path: '/admin/products', legacyTab: '' },
+  { label: 'Orders', path: '/admin/orders', legacyTab: 'orders' },
+  { label: 'Customers', path: '/admin/customers', legacyTab: 'customers' },
+  { label: 'Analytics', path: '/admin/analytics', legacyTab: 'analytics' },
 ]
 
 const normalize = (value) => String(value || '').trim().toLowerCase()
 
 const uniqueValues = (values) => [...new Set(values.filter(Boolean))]
 
+const normalizeRole = (role) => {
+  const next = String(role || '').trim().toLowerCase()
+  if (next === 'merchant' || next === 'admin') {
+    return 'admin'
+  }
+  if (next === 'customer' || next === 'user') {
+    return 'user'
+  }
+  if (next === 'delivery' || next === 'delivery_associate') {
+    return 'delivery'
+  }
+  if (next === 'operations' || next === 'operations_staff' || next === 'staff') {
+    return 'operations'
+  }
+  return 'user'
+}
+
 export default function Navbar() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [activeMegaMenu, setActiveMegaMenu] = useState('')
+  const [isCartPulse, setIsCartPulse] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
   const closeMenuTimerRef = useRef(null)
+  const cartPulseTimerRef = useRef(null)
 
   const searchParams = new URLSearchParams(location.search)
   const sectionParam = normalize(searchParams.get('section'))
@@ -104,12 +123,22 @@ export default function Navbar() {
       setCurrentUser(user)
     }
 
+    const onCartChanged = () => {
+      setIsCartPulse(true)
+      if (cartPulseTimerRef.current) {
+        clearTimeout(cartPulseTimerRef.current)
+      }
+      cartPulseTimerRef.current = setTimeout(() => setIsCartPulse(false), 420)
+    }
+
     window.addEventListener('auth-changed', syncAuth)
     window.addEventListener('storage', syncAuth)
+    window.addEventListener('cart-changed', onCartChanged)
 
     return () => {
       window.removeEventListener('auth-changed', syncAuth)
       window.removeEventListener('storage', syncAuth)
+      window.removeEventListener('cart-changed', onCartChanged)
     }
   }, [])
 
@@ -121,11 +150,17 @@ export default function Navbar() {
   useEffect(() => {
     return () => {
       clearCloseTimer()
+      if (cartPulseTimerRef.current) {
+        clearTimeout(cartPulseTimerRef.current)
+      }
     }
   }, [])
 
   const displayName = (currentUser?.full_name || '').trim() || 'Guest'
-  const isMerchant = (currentUser?.role || '').toLowerCase() === 'merchant'
+  const role = normalizeRole(currentUser?.role)
+  const isAdmin = role === 'admin'
+  const isDelivery = role === 'delivery'
+  const isOperations = role === 'operations'
 
   const handleLogout = () => {
     clearStoredUser()
@@ -133,31 +168,47 @@ export default function Navbar() {
   }
 
   const handleProtectedNav = (path) => {
+    if (!currentUser && (path === '/wishlist' || path === '/cart')) {
+      navigate('/login')
+      return
+    }
+
+    if ((role === 'admin' || role === 'delivery' || role === 'operations') && (path === '/wishlist' || path === '/cart')) {
+      if (role === 'admin') {
+        navigate('/admin/dashboard')
+      } else if (role === 'delivery') {
+        navigate('/delivery')
+      } else {
+        navigate('/operations')
+      }
+      return
+    }
+
     navigate(path)
   }
 
   const isMerchantItemActive = (item) => {
-    if (item.path === '/admin/products') {
-      return location.pathname === '/admin/products'
+    if (location.pathname === item.path) {
+      return true
     }
 
-    if (item.tab) {
-      return location.pathname === '/admin' && merchantTabParam === item.tab
+    if (item.legacyTab) {
+      return location.pathname === '/admin' && merchantTabParam === item.legacyTab
     }
 
-    return location.pathname === '/admin' && !merchantTabParam
+    return item.path === '/admin/dashboard' && location.pathname === '/admin/dashboard' && !merchantTabParam
   }
 
   return (
     <header className={`navbar-wrap ${activeMegaMenu ? 'navbar-wrap-open' : ''}`}>
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
-          <NavLink to="/" className="brand brand-retail" aria-label="Veloura home">
-            <span className="brand-mark">DA</span>
-            <span>Veloura</span>
+          <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
+            <img className="brand-logo" src="/movicloud%20logo.png" alt="Movi Fashion logo" />
+            <span>Movi Fashion</span>
           </NavLink>
 
-          {isMerchant ? (
+          {isAdmin ? (
             <div className="nav-links nav-links-retail">
               {merchantNavItems.map((item) => (
                 <button
@@ -169,6 +220,26 @@ export default function Navbar() {
                   {item.label.toUpperCase()}
                 </button>
               ))}
+            </div>
+          ) : isDelivery ? (
+            <div className="nav-links nav-links-retail">
+              <button
+                type="button"
+                className={`nav-link nav-link-retail nav-link-button ${location.pathname === '/delivery/dashboard' ? 'active-link' : ''}`}
+                onClick={() => navigate('/delivery')}
+              >
+                DELIVERY DASHBOARD
+              </button>
+            </div>
+          ) : isOperations ? (
+            <div className="nav-links nav-links-retail">
+              <button
+                type="button"
+                className={`nav-link nav-link-retail nav-link-button ${location.pathname === '/operations/dashboard' ? 'active-link' : ''}`}
+                onClick={() => navigate('/operations')}
+              >
+                OPERATIONS DASHBOARD
+              </button>
             </div>
           ) : (
             <div
@@ -287,9 +358,14 @@ export default function Navbar() {
                 <span className="nav-user-name" title={currentUser.email}>
                   {displayName}
                 </span>
-                {isMerchant ? (
-                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/admin?tab=profile')}>
+                {isAdmin ? (
+                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/admin/profile')}>
                     <small>Profile</small>
+                  </button>
+                ) : null}
+                {isDelivery ? (
+                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/delivery/dashboard')}>
+                    <small>Dashboard</small>
                   </button>
                 ) : null}
                 <button type="button" className="nav-action" onClick={handleLogout}>
@@ -306,7 +382,7 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            {isMerchant ? null : (
+            {isAdmin || isDelivery ? null : (
               <>
                 <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>
@@ -314,7 +390,7 @@ export default function Navbar() {
                 </button>
                 <button
                   type="button"
-                  className="nav-action"
+                  className={`nav-action ${isCartPulse ? 'nav-action-pulse' : ''}`}
                   aria-label="Open cart"
                   onClick={() => handleProtectedNav('/cart')}
                 >

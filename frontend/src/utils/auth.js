@@ -3,20 +3,59 @@ const AUTH_ACCOUNTS_KEY = 'veloura_auth_accounts'
 
 const DEMO_ACCOUNTS = [
   {
-    full_name: 'Demo Merchant',
-    email: 'merchant.demo@veloura.com',
-    password: 'Merchant@2026',
+    full_name: 'Demo Admin',
+    email: 'admin.demo@veloura.com',
+    password: 'Admin#Demo2026',
     provider: 'email',
-    role: 'merchant',
+    role: 'admin',
   },
   {
-    full_name: 'Demo User',
-    email: 'user.demo@veloura.com',
-    password: 'User@2026',
+    full_name: 'Demo Customer',
+    email: 'customer.demo@veloura.com',
+    password: 'Customer#Demo2026',
     provider: 'email',
     role: 'user',
   },
+  {
+    full_name: 'Demo Delivery Partner',
+    email: 'delivery.demo@veloura.com',
+    password: 'Delivery#Demo2026',
+    provider: 'email',
+    role: 'delivery',
+  },
+  {
+    full_name: 'Demo Operations Staff',
+    email: 'ops.demo@veloura.com',
+    password: 'Ops#Demo2026',
+    provider: 'email',
+    role: 'operations',
+  },
 ]
+
+function normalizeRole(role) {
+  const next = String(role || '').trim().toLowerCase()
+  if (next === 'merchant' || next === 'admin') {
+    return 'admin'
+  }
+  if (next === 'customer' || next === 'user') {
+    return 'user'
+  }
+  if (next === 'delivery' || next === 'delivery_associate') {
+    return 'delivery'
+  }
+  if (next === 'operations_staff' || next === 'staff' || next === 'operations') {
+    return 'operations'
+  }
+  return 'user'
+}
+
+function normalizeStatus(status) {
+  const next = String(status || '').trim().toUpperCase()
+  if (next === 'ACTIVE' || next === 'PENDING' || next === 'BLOCKED') {
+    return next
+  }
+  return 'ACTIVE'
+}
 
 export function getStoredUser() {
   try {
@@ -24,20 +63,55 @@ export function getStoredUser() {
     if (!raw) {
       return null
     }
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw)
+    if (!parsed) {
+      return null
+    }
+    return {
+      ...parsed,
+      role: normalizeRole(parsed.role),
+      status: normalizeStatus(parsed.status),
+      token: parsed.token || '',
+    }
   } catch {
     return null
   }
 }
 
 export function setStoredUser(user) {
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user))
+  const payload = {
+    ...user,
+    role: normalizeRole(user?.role),
+    status: normalizeStatus(user?.status),
+    token: user?.token || '',
+  }
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload))
   window.dispatchEvent(new Event('auth-changed'))
 }
 
 export function clearStoredUser() {
   localStorage.removeItem(AUTH_STORAGE_KEY)
   window.dispatchEvent(new Event('auth-changed'))
+}
+
+export function getAuthToken() {
+  const user = getStoredUser()
+  return String(user?.token || '').trim()
+}
+
+export function isAuthenticated() {
+  return Boolean(getAuthToken())
+}
+
+export function buildAuthHeaders(headers = {}) {
+  const token = getAuthToken()
+  if (!token) {
+    return { ...headers }
+  }
+  return {
+    ...headers,
+    Authorization: `Bearer ${token}`,
+  }
 }
 
 function getStoredAccounts() {
@@ -91,7 +165,9 @@ export function upsertLocalAccount(account) {
     email: normalizedEmail,
     password: account?.password || '',
     provider: account?.provider || 'email',
-    role: account?.role || 'user',
+    role: normalizeRole(account?.role || 'user'),
+    status: normalizeStatus(account?.status || 'ACTIVE'),
+    token: account?.token || '',
   }
 
   const accounts = getStoredAccounts()

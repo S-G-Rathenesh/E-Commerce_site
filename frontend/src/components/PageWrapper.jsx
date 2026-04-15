@@ -1,6 +1,15 @@
+import { motion } from 'framer-motion'
+
 export default function PageWrapper({ eyebrow, title, description, actions, children, className = '' }) {
+  const MotionDiv = motion.div
+
   return (
-    <div className={`page-shell ${className}`.trim()}>
+    <MotionDiv
+      className={`page-shell ${className}`.trim()}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+    >
       {(eyebrow || title || description || actions) && (
         <header className="page-header">
           <div>
@@ -12,6 +21,6 @@ export default function PageWrapper({ eyebrow, title, description, actions, chil
         </header>
       )}
       {children}
-    </div>
+    </MotionDiv>
   )
 }
