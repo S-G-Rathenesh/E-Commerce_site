@@ -1,4 +1,12 @@
 import { Link } from 'react-router-dom'
+import { motion } from 'framer-motion'
+
+const MotionLink = motion(Link)
+const buttonMotionProps = {
+  whileHover: { y: -2 },
+  whileTap: { scale: 0.96 },
+  transition: { duration: 0.2, ease: [0.22, 1, 0.36, 1] },
+}
 
 export default function Button({
   children,
@@ -12,15 +20,15 @@ export default function Button({
 
   if (to) {
     return (
-      <Link to={to} className={classes}>
+      <MotionLink to={to} className={classes} {...buttonMotionProps}>
         {children}
-      </Link>
+      </MotionLink>
     )
   }
 
   return (
-    <button type={type} className={classes} onClick={onClick}>
+    <motion.button type={type} className={classes} onClick={onClick} {...buttonMotionProps}>
       {children}
-    </button>
+    </motion.button>
   )
 }

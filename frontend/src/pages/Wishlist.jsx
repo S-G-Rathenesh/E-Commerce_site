@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import PageWrapper from '../components/PageWrapper'
@@ -18,6 +18,14 @@ import {
 } from '../utils/wishlist'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+
+function normalizeRole(role) {
+  const next = String(role || '').trim().toLowerCase()
+  if (next === 'merchant') {
+    return 'admin'
+  }
+  return next
+}
 
 function decodeSharePayload(encodedPayload) {
   if (!encodedPayload) {
@@ -49,6 +57,7 @@ function compareBySort(sortBy) {
 }
 
 export default function Wishlist() {
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [state, setState] = useState(() => getWishlistState(getStoredUser()))
@@ -182,6 +191,12 @@ export default function Wishlist() {
   }
 
   const onMoveToCart = (productId) => {
+    if (!currentUser || normalizeRole(currentUser?.role) !== 'user') {
+      setStatusMessage('Please login to move items to bag.')
+      navigate('/login')
+      return
+    }
+
     const moved = moveWishlistItemToCart(productId, { listId: activeList.id, user: currentUser })
     setStatusMessage(moved ? 'Moved to bag.' : 'Unable to move item.')
   }

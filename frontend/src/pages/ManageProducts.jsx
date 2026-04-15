@@ -33,7 +33,7 @@ export default function ManageProducts() {
                 <tr key={product.id}>
                   <td>{product.name}</td>
                   <td>{product.category}</td>
-                  <td>${product.price.toFixed(2)}</td>
+                  <td>Rs. {product.price.toFixed(2)}</td>
                   <td>Active</td>
                 </tr>
               ))}

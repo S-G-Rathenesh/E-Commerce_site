@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { motion } from 'framer-motion'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import ProductCard from '../components/ProductCard'
 import PageWrapper from '../components/PageWrapper'
 import Input from '../components/Input'
+import AnimatedSection from '../components/AnimatedSection'
+import SkeletonProductCard from '../components/SkeletonProductCard'
 import { products as seedProducts } from '../data/products'
 import { getStoredUser } from '../utils/auth'
 import { addToWishlist, getWishlistItems } from '../utils/wishlist'
@@ -15,12 +18,23 @@ const normalize = (value) => String(value || '').trim().toLowerCase()
 
 const menDepartments = ['Topwear', 'Bottomwear', 'Ethnic Wear', 'Innerwear & Sleepwear', 'Footwear']
 
+const normalizeRole = (role) => {
+  const next = String(role || '').trim().toLowerCase()
+  if (next === 'merchant') {
+    return 'admin'
+  }
+  return next
+}
+
 export default function Products() {
+  const MotionDiv = motion.div
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('featured')
   const [maxPrice, setMaxPrice] = useState(10000)
   const [items, setItems] = useState(seedProducts)
+  const [isLoading, setIsLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [wishlistedIds, setWishlistedIds] = useState(() => {
     const ids = getWishlistItems({ user: getStoredUser() }).map((item) => Number(item.id))
@@ -62,6 +76,9 @@ export default function Products() {
       })
       .catch(() => {
         setItems(seedProducts)
+      })
+      .finally(() => {
+        setIsLoading(false)
       })
   }, [])
 
@@ -230,6 +247,14 @@ export default function Products() {
   }
 
   const handleAddToWishlist = (product) => {
+    const role = normalizeRole(currentUser?.role)
+
+    if (!currentUser || role !== 'user') {
+      setWishlistMessage('Please login to add products to wishlist.')
+      navigate('/login')
+      return
+    }
+
     const result = addToWishlist(product, { user: currentUser })
 
     if (result.added) {
@@ -251,14 +276,14 @@ export default function Products() {
       }
     >
       {hideCollectionIntro ? null : (
-        <section className="promo-strip section-card">
+        <AnimatedSection as="section" className="promo-strip section-card">
           <span>On your 1st purchase via app</span>
           <strong>Flat 300 off on select styles</strong>
           <span>Limited time retail offer</span>
-        </section>
+        </AnimatedSection>
       )}
 
-      <section className="catalog-layout">
+      <AnimatedSection as="section" className="catalog-layout">
         <aside className="catalog-sidebar section-card panel-stack">
           <div>
             <p className="eyebrow">Filters</p>
@@ -363,23 +388,43 @@ export default function Products() {
               <p>{filtered.length} results</p>
             </div>
             {wishlistMessage ? <p className="wishlist-message">{wishlistMessage}</p> : null}
-            {filtered.length > 0 ? (
-              <div className="product-grid product-grid-wide">
-                {filtered.map((product) => (
+            {isLoading ? (
+              <div className="product-grid product-grid-wide" aria-busy="true" aria-live="polite">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <SkeletonProductCard key={`skeleton-${index}`} />
+                ))}
+              </div>
+            ) : filtered.length > 0 ? (
+              <MotionDiv
+                className="product-grid product-grid-wide"
+                initial="hidden"
+                animate="show"
+                variants={{
+                  hidden: { opacity: 1 },
+                  show: {
+                    opacity: 1,
+                    transition: {
+                      staggerChildren: 0.05,
+                    },
+                  },
+                }}
+              >
+                {filtered.map((product, index) => (
                   <ProductCard
                     key={product.id}
                     product={product}
                     onAddToWishlist={handleAddToWishlist}
                     isWishlisted={wishlistedIds.has(Number(product.id))}
+                    index={index}
                   />
                 ))}
-              </div>
+              </MotionDiv>
             ) : (
               <p>No products found for the selected filters.</p>
             )}
           </section>
         </main>
-      </section>
+      </AnimatedSection>
     </PageWrapper>
   )
 }

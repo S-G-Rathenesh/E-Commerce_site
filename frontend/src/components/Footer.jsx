@@ -3,7 +3,7 @@ export default function Footer() {
     <footer className="footer">
       <div className="shell footer-grid">
         <section>
-          <h4>Veloura</h4>
+          <h4>Movi Fashion E-Commerce Platform</h4>
           <p>Modern commerce UI with editorial clarity, consistent spacing, and a polished shopping flow.</p>
         </section>
         <section>
@@ -20,13 +20,13 @@ export default function Footer() {
         </section>
         <section>
           <h5>Contact</h5>
-          <p>support@veloura.com</p>
+          <p>support@movifashion.com</p>
           <p>Mon - Sat, 9am - 6pm</p>
           <p>Global shipping</p>
         </section>
       </div>
       <div className="shell">
-        <p className="copyright">Copyright 2026 Veloura. All rights reserved.</p>
+        <p className="copyright">Copyright 2026 Movi Fashion E-Commerce Platform. All rights reserved.</p>
       </div>
     </footer>
   )

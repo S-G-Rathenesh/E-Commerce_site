@@ -2,3 +2,7 @@ fastapi==0.115.11
 uvicorn[standard]==0.34.0
 pymongo==4.11.3
 python-dotenv==1.0.1
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+mongomock==4.3.0

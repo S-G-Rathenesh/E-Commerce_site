@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { products } from '../data/products'
 import ProductCard from '../components/ProductCard'
+import AnimatedSection from '../components/AnimatedSection'
 import PageWrapper from '../components/PageWrapper'
 
 const SALE_SLIDE_INTERVAL = 5000
@@ -142,7 +143,8 @@ export default function Home() {
 
   return (
     <PageWrapper className="home-page">
-      <section
+      <AnimatedSection
+        as="section"
         className="home-sale-stack section-card"
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
@@ -211,9 +213,9 @@ export default function Home() {
             ›
           </button>
         </div>
-      </section>
+      </AnimatedSection>
 
-      <section className="section-card panel-stack">
+      <AnimatedSection as="section" className="section-card panel-stack" delay={0.04}>
         <div className="section-head">
           <div>
             <p className="eyebrow">Budget picks</p>
@@ -224,13 +226,13 @@ export default function Home() {
           </Link>
         </div>
         <div className="product-grid">
-          {budgetPicks.map((product) => (
-            <ProductCard key={product.id} product={product} />
+          {budgetPicks.map((product, index) => (
+            <ProductCard key={product.id} product={product} index={index} />
           ))}
         </div>
-      </section>
+      </AnimatedSection>
 
-      <section className="section-card category-grid">
+      <AnimatedSection as="section" className="section-card category-grid" delay={0.06}>
         <div className="section-head">
           <div>
             <p className="eyebrow">Categories</p>
@@ -252,9 +254,9 @@ export default function Home() {
             </article>
           ))}
         </div>
-      </section>
+      </AnimatedSection>
 
-      <section className="section-card promo-banner">
+      <AnimatedSection as="section" className="section-card promo-banner" delay={0.08}>
         <div className="section-head">
           <div>
             <p className="eyebrow">Instant savings</p>
@@ -262,9 +264,9 @@ export default function Home() {
           </div>
           <p>Clean, premium, and built for conversion.</p>
         </div>
-      </section>
+      </AnimatedSection>
 
-      <section className="section-card panel-stack">
+      <AnimatedSection as="section" className="section-card panel-stack" delay={0.1}>
         <div className="section-head">
           <div>
             <p className="eyebrow">Featured Edit</p>
@@ -275,11 +277,11 @@ export default function Home() {
           </Link>
         </div>
         <div className="product-grid">
-          {products.slice(0, 4).map((product) => (
-            <ProductCard key={product.id} product={product} />
+          {products.slice(0, 4).map((product, index) => (
+            <ProductCard key={product.id} product={product} index={index} />
           ))}
         </div>
-      </section>
+      </AnimatedSection>
     </PageWrapper>
   )
 }

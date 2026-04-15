@@ -92,7 +92,7 @@ export default function Cart() {
                     +
                   </button>
                 </div>
-                <p className="detail-price">${item.price.toFixed(2)}</p>
+                <p className="detail-price">Rs. {item.price.toFixed(2)}</p>
               </div>
             ))
           ) : (
@@ -114,9 +114,9 @@ export default function Cart() {
         <aside className="panel panel-stack">
           <h2>Order summary</h2>
           <div className="summary-row">
-            <p>Subtotal: ${subtotal.toFixed(2)}</p>
-            <p>Tax: ${tax.toFixed(2)}</p>
-            <p>Total: ${total.toFixed(2)}</p>
+            <p>Subtotal: Rs. {subtotal.toFixed(2)}</p>
+            <p>Tax: Rs. {tax.toFixed(2)}</p>
+            <p>Total: Rs. {total.toFixed(2)}</p>
           </div>
           <Button to="/checkout" variant="primary" className="btn-wide">
             Proceed to Checkout
