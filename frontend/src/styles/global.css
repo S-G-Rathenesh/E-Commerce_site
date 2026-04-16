@@ -2250,6 +2250,45 @@ textarea {
   color: var(--brand);
 }
 
+.login-demo-accounts {
+  display: grid;
+  gap: 10px;
+}
+
+.login-demo-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.demo-role-link {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.field.demo-autofill-flash {
+  animation: demoAutofillFieldFlash 0.7s ease;
+}
+
+@keyframes demoAutofillFieldFlash {
+  0% {
+    background: #ffffff;
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
+
+  40% {
+    background: #f7fbff;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+  }
+
+  100% {
+    background: var(--surface-soft);
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
+}
+
 .merchant-cta-text {
   margin-top: 6px;
   text-align: center;
