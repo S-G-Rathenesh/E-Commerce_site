@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import PageWrapper from '../components/PageWrapper'
+import DeliveryInfo from '../components/DeliveryInfo'
 import { buildAuthHeaders, getStoredUser } from '../utils/auth'
 import { clearCart, getCartItems } from '../utils/cart'
 
@@ -93,6 +94,11 @@ export default function Checkout() {
             <Input label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+1 (555) 000-0000" />
             <Input label="City" value={city} onChange={(event) => setCity(event.target.value)} placeholder="New York" />
             <Input label="Postal code" value={postalCode} onChange={(event) => setPostalCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="560001" />
+            {postalCode && (
+              <div style={{ gridColumn: '1 / -1', marginTop: '-12px' }}>
+                <DeliveryInfo customerPincode={postalCode} showDetails={true} />
+              </div>
+            )}
             <label className="field-group">
               <span className="field-label">Payment Method</span>
               <select className="field" value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value)}>

@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { products as seedProducts } from '../data/products'
-import { clearStoredUser, getStoredUser } from '../utils/auth'
+import { buildAuthHeaders, clearStoredUser, getStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
 const navItems = ['Women', 'Men', 'Kids']
 const merchantNavItems = [
   { label: 'Dashboard', path: '/admin/dashboard', legacyTab: '' },
   { label: 'Products', path: '/admin/products', legacyTab: '' },
-  { label: 'Orders', path: '/admin/orders', legacyTab: 'orders' },
-  { label: 'Customers', path: '/admin/customers', legacyTab: 'customers' },
-  { label: 'Analytics', path: '/admin/analytics', legacyTab: 'analytics' },
+  { label: 'Orders', path: '/admin/orders', legacyTab: '' },
+  { label: 'Customers', path: '/admin/customers', legacyTab: '' },
+  { label: 'Analytics', path: '/admin/analytics', legacyTab: '' },
 ]
 
 const normalize = (value) => String(value || '').trim().toLowerCase()
@@ -38,10 +40,60 @@ export default function Navbar() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [activeMegaMenu, setActiveMegaMenu] = useState('')
   const [isCartPulse, setIsCartPulse] = useState(false)
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0)
+  const [pendingReturnsCount, setPendingReturnsCount] = useState(0)
   const navigate = useNavigate()
   const location = useLocation()
   const closeMenuTimerRef = useRef(null)
   const cartPulseTimerRef = useRef(null)
+
+  const loadApprovalsCount = async () => {
+    const role = normalizeRole(getStoredUser()?.role)
+    if (role !== 'admin') {
+      setPendingApprovalsCount(0)
+      return
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/admin/user-approvals?status_filter=PENDING`, {
+        headers: buildAuthHeaders(),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setPendingApprovalsCount(0)
+        return
+      }
+
+      const users = Array.isArray(data?.users) ? data.users : []
+      setPendingApprovalsCount(users.length)
+    } catch {
+      setPendingApprovalsCount(0)
+    }
+  }
+
+  const loadReturnsCount = async () => {
+    const role = normalizeRole(getStoredUser()?.role)
+    if (role !== 'admin') {
+      setPendingReturnsCount(0)
+      return
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/admin/returns?status_filter=RETURN_REQUESTED`, {
+        headers: buildAuthHeaders(),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setPendingReturnsCount(0)
+        return
+      }
+
+      const returns = Array.isArray(data?.returns) ? data.returns : []
+      setPendingReturnsCount(returns.length)
+    } catch {
+      setPendingReturnsCount(0)
+    }
+  }
 
   const searchParams = new URLSearchParams(location.search)
   const sectionParam = normalize(searchParams.get('section'))
@@ -131,16 +183,35 @@ export default function Navbar() {
       cartPulseTimerRef.current = setTimeout(() => setIsCartPulse(false), 420)
     }
 
+    const onApprovalsChanged = () => {
+      loadApprovalsCount()
+    }
+
+    const onReturnsChanged = () => {
+      loadReturnsCount()
+    }
+
     window.addEventListener('auth-changed', syncAuth)
     window.addEventListener('storage', syncAuth)
     window.addEventListener('cart-changed', onCartChanged)
+    window.addEventListener('approvals-changed', onApprovalsChanged)
+    window.addEventListener('returns-changed', onReturnsChanged)
 
     return () => {
       window.removeEventListener('auth-changed', syncAuth)
       window.removeEventListener('storage', syncAuth)
       window.removeEventListener('cart-changed', onCartChanged)
+      window.removeEventListener('approvals-changed', onApprovalsChanged)
+      window.removeEventListener('returns-changed', onReturnsChanged)
     }
   }, [])
+
+  useEffect(() => {
+    loadApprovalsCount()
+    loadReturnsCount()
+  }, [currentUser])
+
+  const pendingCustomersAttentionCount = pendingApprovalsCount + pendingReturnsCount
 
   useEffect(() => {
     closeMegaMenu()
@@ -161,10 +232,17 @@ export default function Navbar() {
   const isAdmin = role === 'admin'
   const isDelivery = role === 'delivery'
   const isOperations = role === 'operations'
+  const isCustomer = role === 'user'
+  const isAuthPage =
+    location.pathname === '/login' ||
+    location.pathname === '/signup' ||
+    location.pathname === '/merchant-register' ||
+    location.pathname === '/delivery-register' ||
+    location.pathname === '/operations-register'
 
   const handleLogout = () => {
     clearStoredUser()
-    navigate('/')
+    navigate('/login')
   }
 
   const handleProtectedNav = (path) => {
@@ -208,18 +286,38 @@ export default function Navbar() {
             <span>Movi Fashion</span>
           </NavLink>
 
-          {isAdmin ? (
-            <div className="nav-links nav-links-retail">
-              {merchantNavItems.map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  className={`nav-link nav-link-retail nav-link-button ${isMerchantItemActive(item) ? 'active-link' : ''}`}
-                  onClick={() => navigate(item.path)}
-                >
-                  {item.label.toUpperCase()}
-                </button>
-              ))}
+          {isAuthPage ? null : isAdmin ? (
+            <div className="nav-links nav-links-retail nav-links-admin">
+              <div className="nav-links nav-links-retail nav-links-admin-desktop">
+                {merchantNavItems.map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    className={`nav-link nav-link-retail nav-link-button ${isMerchantItemActive(item) ? 'active-link' : ''}`}
+                    onClick={() => navigate(item.path)}
+                  >
+                    {item.label.toUpperCase()}
+                    {item.path === '/admin/customers' && pendingCustomersAttentionCount > 0 ? (
+                      <span className="nav-badge">{pendingCustomersAttentionCount}</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+
+              <select
+                className="field nav-admin-select"
+                value={merchantNavItems.find((item) => isMerchantItemActive(item))?.path || '/admin/dashboard'}
+                onChange={(event) => navigate(event.target.value)}
+              >
+                {merchantNavItems.map((item) => (
+                  <option key={`select-${item.path}`} value={item.path}>
+                    {item.label}
+                    {item.path === '/admin/customers' && pendingCustomersAttentionCount > 0
+                      ? ` (${pendingCustomersAttentionCount})`
+                      : ''}
+                  </option>
+                ))}
+              </select>
             </div>
           ) : isDelivery ? (
             <div className="nav-links nav-links-retail">
@@ -353,16 +451,52 @@ export default function Navbar() {
           )}
 
           <div className="nav-actions">
-            {currentUser ? (
+            {currentUser && isCustomer ? (
+              <div className="profile-menu">
+                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open profile menu">
+                  <span className="profile-name">👤 {displayName}</span>
+                  <span className="dropdown-icon" aria-hidden="true">▼</span>
+                </button>
+
+                <div className="dropdown-menu" role="menu" aria-label="Profile menu">
+                  <NavLink to="/profile" role="menuitem">
+                    My Profile
+                  </NavLink>
+                  <NavLink to="/orders" role="menuitem">
+                    My Orders
+                  </NavLink>
+                  <NavLink to="/wishlist" role="menuitem">
+                    Wishlist
+                  </NavLink>
+                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                    Logout
+                  </button>
+                </div>
+              </div>
+            ) : currentUser && isAdmin ? (
+              <div className="profile-menu">
+                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open admin profile menu">
+                  <span className="profile-name">👤 {displayName}</span>
+                  <span className="dropdown-icon" aria-hidden="true">▼</span>
+                </button>
+
+                <div className="dropdown-menu" role="menu" aria-label="Admin profile menu">
+                  <NavLink to="/admin/profile" role="menuitem">
+                    Profile
+                  </NavLink>
+                  <NavLink to="/admin/settings" role="menuitem">
+                    Settings
+                  </NavLink>
+                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                    Logout
+                  </button>
+                </div>
+              </div>
+            ) : currentUser ? (
               <>
                 <span className="nav-user-name" title={currentUser.email}>
                   {displayName}
                 </span>
-                {isAdmin ? (
-                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/admin/profile')}>
-                    <small>Profile</small>
-                  </button>
-                ) : null}
                 {isDelivery ? (
                   <button type="button" className="nav-action" onClick={() => handleProtectedNav('/delivery/dashboard')}>
                     <small>Dashboard</small>
@@ -374,7 +508,7 @@ export default function Navbar() {
               </>
             ) : (
               <>
-                <NavLink to="/login" className="nav-action">
+                <NavLink to="/login" className="nav-action nav-action-login">
                   <small>Login</small>
                 </NavLink>
                 <NavLink to="/signup" className="nav-action nav-action-signup">
