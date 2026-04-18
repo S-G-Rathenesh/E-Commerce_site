@@ -1,20 +1,35 @@
-import { Link, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import Button from '../components/Button'
-import AdminOrdersManager from '../components/AdminOrdersManager'
-import DeliveryApprovalsPanel from '../components/DeliveryApprovalsPanel'
-import DeliveryCoverageSettings from '../components/DeliveryCoverageSettings'
 import RevenueChart from '../components/RevenueChart'
 import OrdersBarChart from '../components/OrdersBarChart'
 import AnimatedCounter from '../components/AnimatedCounter'
 import AnimatedSection from '../components/AnimatedSection'
 import PageWrapper from '../components/PageWrapper'
+import { buildAuthHeaders } from '../utils/auth'
+import { products } from '../data/products'
+import StatusBadge from '../components/StatusBadge'
+import { generateStock } from '../utils/adminUi'
 
-const stats = [
-  { label: 'Total Sales', value: 'Rs. 24,000', trend: '+12.5%' },
-  { label: 'Orders', value: '1.2k', trend: '+8.2%' },
-  { label: 'New Customers', value: '400', trend: '-2.4%' },
-]
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+
+const statsByRange = {
+  TODAY: [
+    { label: 'Total Sales', value: 'Rs. 84,000', trend: '+4.2%', sparkline: [42, 48, 44, 50, 53, 57, 60] },
+    { label: 'Orders', value: '214', trend: '+3.1%', sparkline: [22, 28, 26, 31, 33, 30, 34] },
+    { label: 'New Customers', value: '38', trend: '+1.5%', sparkline: [4, 6, 5, 7, 6, 8, 9] },
+  ],
+  WEEK: [
+    { label: 'Total Sales', value: 'Rs. 4,62,000', trend: '+9.5%', sparkline: [260, 280, 276, 292, 315, 328, 344] },
+    { label: 'Orders', value: '1,284', trend: '+8.2%', sparkline: [92, 108, 99, 116, 121, 127, 138] },
+    { label: 'New Customers', value: '206', trend: '+2.4%', sparkline: [21, 26, 24, 28, 30, 36, 41] },
+  ],
+  MONTH: [
+    { label: 'Total Sales', value: 'Rs. 18,40,000', trend: '+12.5%', sparkline: [880, 930, 910, 980, 1050, 1130, 1210] },
+    { label: 'Orders', value: '5,320', trend: '+10.8%', sparkline: [280, 300, 325, 341, 366, 390, 418] },
+    { label: 'New Customers', value: '804', trend: '+4.7%', sparkline: [40, 43, 51, 56, 60, 63, 68] },
+  ],
+}
 
 const dashboardSummary = {
   dashboard: {
@@ -44,31 +59,68 @@ const dashboardSummary = {
   },
 }
 
-const topCustomers = [
-  { name: 'Elena Martinez', orders: 16, spent: 'Rs. 4,290.00' },
-  { name: 'Julian Smith', orders: 11, spent: 'Rs. 2,875.00' },
-  { name: 'Kasper Berg', orders: 9, spent: 'Rs. 1,430.00' },
-]
-
 export default function AdminDashboard() {
   const MotionArticle = motion.article
-  const { pathname, search } = useLocation()
-  const searchParams = new URLSearchParams(search)
-  const legacyTab = (searchParams.get('tab') || '').trim().toLowerCase()
+  const [recentOrders, setRecentOrders] = useState([])
+  const [ordersLoading, setOrdersLoading] = useState(true)
+  const [range, setRange] = useState('WEEK')
 
-  let currentSection = 'dashboard'
-  if (pathname === '/admin/orders') currentSection = 'orders'
-  else if (pathname === '/admin/customers') currentSection = 'customers'
-  else if (pathname === '/admin/analytics') currentSection = 'analytics'
-  else if (pathname === '/admin/profile') currentSection = 'profile'
-  else if (pathname === '/admin' && legacyTab) currentSection = legacyTab
+  const lowStockItems = products
+    .map((product) => ({ ...product, stock: generateStock(product.id) }))
+    .filter((item) => item.stock < 8)
+    .slice(0, 3)
 
-  if (!dashboardSummary[currentSection]) {
-    currentSection = 'dashboard'
+  const renderSparkline = (values) => {
+    const max = Math.max(...values)
+    const min = Math.min(...values)
+    const points = values
+      .map((value, index) => {
+        const x = (index / (values.length - 1)) * 100
+        const y = max === min ? 50 : 100 - ((value - min) / (max - min)) * 100
+        return `${x},${y}`
+      })
+      .join(' ')
+
+    return (
+      <svg className="sparkline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <polyline points={points} />
+      </svg>
+    )
   }
 
-  const page = dashboardSummary[currentSection]
-  const pageActions = currentSection === 'dashboard' ? <Button to="/admin/products">Manage Products</Button> : null
+  const loadRecentOrders = async () => {
+    setOrdersLoading(true)
+    try {
+      const response = await fetch(`${API_BASE}/admin/orders`, {
+        headers: buildAuthHeaders(),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setRecentOrders([])
+        return
+      }
+
+      const nextOrders = Array.isArray(data?.orders) ? data.orders : []
+      setRecentOrders(nextOrders.slice(0, 5))
+    } catch {
+      setRecentOrders([])
+    } finally {
+      setOrdersLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadRecentOrders()
+  }, [])
+
+  const page = dashboardSummary.dashboard
+  const pageActions = (
+    <div className="row-gap">
+      <Button to="/admin/products">+ Add Product</Button>
+      <Button to="/admin/orders" variant="secondary">+ Create Order</Button>
+      <Button to="/admin/orders" variant="secondary">View Orders</Button>
+    </div>
+  )
 
   return (
     <PageWrapper
@@ -77,13 +129,32 @@ export default function AdminDashboard() {
       description={page.description}
       actions={pageActions}
     >
-      {currentSection === 'dashboard' ? (
-        <div className="admin-layout">
-          <div className="stats-grid">
-            {stats.map((stat, index) => (
+      <div className="admin-layout container admin-container">
+        <section className="section">
+          <div className="section-head section-head-tight">
+            <div className="tab-strip">
+              {[
+                { key: 'TODAY', label: 'Today' },
+                { key: 'WEEK', label: 'This Week' },
+                { key: 'MONTH', label: 'This Month' },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`tab-button ${range === item.key ? 'tab-button-active' : ''}`}
+                  onClick={() => setRange(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            {statsByRange[range].map((stat, index) => (
               <MotionArticle
                 key={stat.label}
-                className="panel stat-card"
+                className="panel stat-card card"
                 whileHover={{
                   y: -4,
                   scale: 1.03,
@@ -100,15 +171,26 @@ export default function AdminDashboard() {
                   <AnimatedCounter value={stat.value} duration={420 + index * 40} />
                 </h3>
                 <span>{stat.trend}</span>
+                {renderSparkline(stat.sparkline)}
               </MotionArticle>
             ))}
           </div>
+        </section>
 
-          <AnimatedSection as="section" className="panel panel-stack">
+        {lowStockItems.length > 0 ? (
+          <section className="section low-stock-banner">
+            <p>
+              Low stock alert: {lowStockItems.map((item) => `${item.name} (${item.stock})`).join(', ')}
+            </p>
+          </section>
+        ) : null}
+
+        <AnimatedSection as="section" className="panel panel-stack section card">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Performance</p>
                 <h2>Revenue activity</h2>
+                <p>Track sales trend and weekly order movement from one summary block.</p>
               </div>
               <p>Last 30 days</p>
             </div>
@@ -116,126 +198,53 @@ export default function AdminDashboard() {
             <div className="section-head" style={{ marginTop: 8 }}>
               <div>
                 <h2>Orders overview</h2>
+                <p>Weekly order volume summary.</p>
               </div>
               <p>Last 7 days</p>
             </div>
             <OrdersBarChart />
-          </AnimatedSection>
-
-          <AnimatedSection as="section" delay={0.04}>
-            <AdminOrdersManager compact />
-          </AnimatedSection>
-
-          <AnimatedSection as="section" delay={0.05}>
-            <DeliveryCoverageSettings />
-          </AnimatedSection>
-        </div>
-      ) : null}
-
-      {currentSection === 'orders' ? (
-        <AnimatedSection as="section">
-          <AdminOrdersManager />
         </AnimatedSection>
-      ) : null}
 
-      {currentSection === 'customers' ? (
-        <div className="admin-layout">
-          <AnimatedSection as="section" className="panel panel-stack">
-            <div className="section-head">
-              <div>
-                <p className="eyebrow">Customers</p>
-                <h2>Top customer activity</h2>
-              </div>
-              <p>Last 30 days</p>
+        <AnimatedSection as="section" delay={0.04} className="panel panel-stack section card">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Orders</p>
+              <h2>Recent orders summary</h2>
+              <p>Latest five orders for quick health checks.</p>
             </div>
+            <Button to="/admin/orders" variant="secondary">Open control center</Button>
+          </div>
+
+          {ordersLoading ? <p>Loading recent orders...</p> : null}
+          {!ordersLoading && recentOrders.length === 0 ? <p>No recent orders available.</p> : null}
+
+          {!ordersLoading && recentOrders.length > 0 ? (
             <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
+                    <th>Order</th>
                     <th>Customer</th>
-                    <th>Orders</th>
-                    <th style={{ textAlign: 'right' }}>Total Spend</th>
+                    <th>Status</th>
+                    <th style={{ textAlign: 'right' }}>Amount</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {topCustomers.map((customer) => (
-                    <tr key={customer.name}>
-                      <td>{customer.name}</td>
-                      <td>{customer.orders}</td>
-                      <td style={{ textAlign: 'right' }}>{customer.spent}</td>
+                  {recentOrders.map((order) => (
+                    <tr key={order.order_id}>
+                      <td>{order.order_id}</td>
+                      <td>{order.customer_email}</td>
+                      <td><StatusBadge status={order.status} /></td>
+                      <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </AnimatedSection>
-
-          <AnimatedSection as="section" delay={0.03}>
-            <DeliveryApprovalsPanel />
-          </AnimatedSection>
-        </div>
-      ) : null}
-
-      {currentSection === 'analytics' ? (
-        <AnimatedSection as="section" className="panel panel-stack">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">Analytics</p>
-              <h2>Revenue activity</h2>
-            </div>
-            <p>Last 30 days</p>
-          </div>
-          <RevenueChart />
-          <div className="section-head" style={{ marginTop: 8 }}>
-            <div>
-              <h2>Orders overview</h2>
-            </div>
-            <p>Last 7 days</p>
-          </div>
-          <OrdersBarChart />
-          <div className="stats-grid">
-            {stats.map((stat, index) => (
-              <MotionArticle
-                key={stat.label}
-                className="panel stat-card"
-                whileHover={{
-                  y: -4,
-                  scale: 1.03,
-                  boxShadow: '0 12px 24px rgba(15, 23, 42, 0.16)',
-                }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                initial={{ opacity: 0, y: 8 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, amount: 0.3 }}
-                style={{ willChange: 'transform, opacity' }}
-              >
-                <p>{stat.label}</p>
-                <h3 className="stat-value">
-                  <AnimatedCounter value={stat.value} duration={420 + index * 40} />
-                </h3>
-                <span>{stat.trend}</span>
-              </MotionArticle>
-            ))}
-          </div>
+          ) : null}
         </AnimatedSection>
-      ) : null}
 
-      {currentSection === 'profile' ? (
-        <AnimatedSection as="section" className="panel panel-stack">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">Profile</p>
-              <h2>Merchant account</h2>
-            </div>
-          </div>
-          <p>Profile tools are ready for account settings and store details.</p>
-          <div>
-            <Link to="/admin" className="btn btn-link">
-              Back to dashboard
-            </Link>
-          </div>
-        </AnimatedSection>
-      ) : null}
+      </div>
     </PageWrapper>
   )
 }

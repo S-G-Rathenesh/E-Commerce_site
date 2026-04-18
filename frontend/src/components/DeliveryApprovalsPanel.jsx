@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react'
 import { buildAuthHeaders } from '../utils/auth'
+import { getRelativeTime } from '../utils/adminUi'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+
+function formatRole(value) {
+  return String(value || 'user')
+    .replaceAll('_', ' ')
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
 
 export default function DeliveryApprovalsPanel() {
   const [users, setUsers] = useState([])
@@ -18,13 +26,17 @@ export default function DeliveryApprovalsPanel() {
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to load pending user approvals.')
         setUsers([])
+        window.dispatchEvent(new CustomEvent('approvals-changed', { detail: { count: 0 } }))
         return
       }
-      setUsers(Array.isArray(data?.users) ? data.users : [])
+      const nextUsers = Array.isArray(data?.users) ? data.users : []
+      setUsers(nextUsers)
+      window.dispatchEvent(new CustomEvent('approvals-changed', { detail: { count: nextUsers.length } }))
       setMessage('')
     } catch {
       setMessage('Unable to load pending user approvals.')
       setUsers([])
+      window.dispatchEvent(new CustomEvent('approvals-changed', { detail: { count: 0 } }))
     } finally {
       setLoading(false)
     }
@@ -79,13 +91,14 @@ export default function DeliveryApprovalsPanel() {
               <div>
                 <h3>{user.full_name || user.name || 'Pending User'}</h3>
                 <p>{user.email}</p>
+                <p>Requested {getRelativeTime(user.created_at || user.requested_at)}</p>
               </div>
               <p>{user.status || 'PENDING'}</p>
             </div>
             <div className="admin-orders-grid">
               <div className="field-group">
                 <span className="field-label">Role</span>
-                <p>{user.role || '-'}</p>
+                <p>{formatRole(user.role)}</p>
               </div>
               <div className="field-group">
                 <span className="field-label">Account ID</span>

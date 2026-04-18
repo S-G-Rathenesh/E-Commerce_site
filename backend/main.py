@@ -50,7 +50,7 @@ ADMIN_ALLOWED_STATES = {'CONFIRMED', 'SHIPPED'}
 OPERATIONS_ALLOWED_STATES = {'PACKED'}
 DELIVERY_ALLOWED_STATES = {'OUT_FOR_DELIVERY', 'DELIVERED'}
 PAYMENT_STATUSES = {'PENDING', 'SUCCESS', 'FAILED', 'REFUNDED'}
-RETURN_STATUS_FLOW = ['RETURN_REQUESTED', 'PICKUP', 'RETURNED', 'REFUNDED']
+RETURN_STATUS_FLOW = ['RETURN_REQUESTED', 'PICKUP', 'RETURNED', 'REFUNDED', 'RETURN_REJECTED']
 SPECIAL_ORDER_STATUSES = {'CANCELLED'}
 INDIA_PINCODE_REGEX = re.compile(r'^[1-9][0-9]{5}$')
 DELIVERY_SCOPE_VALUES = {'NATIONWIDE', 'STATE', 'CITY'}
@@ -203,6 +203,17 @@ class ReturnUpdateRequest(BaseModel):
     location: str | None = None
 
 
+class ReturnRequestCreateRequest(BaseModel):
+    reason: str | None = None
+    issue_details: str | None = None
+    proof_images: list[str] | None = None
+
+
+class ReturnDecisionRequest(BaseModel):
+    decision: str
+    review_note: str | None = None
+
+
 class CancelOrderRequest(BaseModel):
     reason: str | None = None
 
@@ -225,6 +236,12 @@ class AccountStatusUpdateRequest(BaseModel):
     status: str = 'ACTIVE'
 
 
+class MerchantProfileUpdateRequest(BaseModel):
+    profile_details: dict | None = None
+    phone_number: str | None = None
+    bank_details: dict | None = None
+
+
 class DeliveryCoverageCity(BaseModel):
     state: str
     city: str
@@ -235,6 +252,43 @@ class DeliveryCoverageRequest(BaseModel):
     states: list[str] | None = None
     cities: list[DeliveryCoverageCity] | None = None
     deliver_all_cities_in_selected_states: bool = False
+
+
+# ============================================================================
+# NEW: AMAZON-LIKE SHIPPING SYSTEM MODELS
+# ============================================================================
+
+class WarehouseConfig(BaseModel):
+    address: str
+    pincode: str
+    contact_number: str
+
+
+class DistanceBasedPricing(BaseModel):
+    base_charge: float
+    per_km_rate: float
+    min_charge: float
+    max_charge: float
+
+
+class CourierConfig(BaseModel):
+    available_couriers: list[str] = ['Local', 'Express', 'Premium']
+
+
+class CODRules(BaseModel):
+    cod_enabled: bool = True
+    cod_limit: float = 100000
+    cod_extra_charge: float = 0
+
+
+class MerchantShippingSettingsRequest(BaseModel):
+    warehouse: WarehouseConfig
+    distance_pricing: DistanceBasedPricing
+    couriers: CourierConfig
+    cod_rules: CODRules
+    allow_all_india: bool = True
+    serviceable_pincodes: list[str] | None = None  # CSV or list
+    blocked_pincodes: list[str] | None = None
 
 
 SEED_PRODUCTS = [
@@ -282,6 +336,18 @@ SEED_USERS = {
         'provider': 'email',
         'role': 'ADMIN',
         'status': 'ACTIVE',
+        'phone_number': '+91 98765 43210',
+        'profile_details': {
+            'store_name': 'Movi Trend Studio',
+            'gst_number': '29ABCDE1234F1Z5',
+            'logo_url': 'https://images.unsplash.com/photo-1523381210434-271e8be1f52b?auto=format&fit=crop&w=400&q=80',
+            'bank_details': {
+                'account_holder_name': 'Movi Trend Studio LLP',
+                'bank_name': 'HDFC Bank',
+                'account_number': '50200012345678',
+                'ifsc_code': 'HDFC0001234',
+            },
+        },
     },
     'customer.demo@veloura.com': {
         'id': 'USR-DEMO-CUSTOMER-01',
@@ -310,6 +376,33 @@ SEED_USERS = {
         'role': 'OPERATIONS_STAFF',
         'status': 'ACTIVE',
     },
+}
+
+SEED_MERCHANT_SHIPPING_SETTINGS = {
+    'USR-DEMO-ADMIN-01': {
+        'warehouse': {
+            'address': 'No. 42, Residency Road, Bengaluru, Karnataka',
+            'pincode': '560001',
+            'contact_number': '+91 98765 43210',
+        },
+        'distance_pricing': {
+            'base_charge': 49.0,
+            'per_km_rate': 1.75,
+            'min_charge': 39.0,
+            'max_charge': 499.0,
+        },
+        'couriers': {
+            'available_couriers': ['Local', 'Express', 'Premium'],
+        },
+        'cod_rules': {
+            'cod_enabled': True,
+            'cod_limit': 75000.0,
+            'cod_extra_charge': 25.0,
+        },
+        'allow_all_india': True,
+        'serviceable_pincodes': [],
+        'blocked_pincodes': ['682001'],
+    }
 }
 
 SEED_SHIPMENTS = [
@@ -452,6 +545,11 @@ delivery_coverage_collection = database['delivery_coverage']
 payments_collection = database['payments']
 returns_collection = database['returns']
 notifications_collection = database['notifications']
+# NEW: Shipping system collections
+merchant_shipping_settings_collection = database['merchant_shipping_settings']
+serviceable_pincodes_collection = database['serviceable_pincodes']
+blocked_pincodes_collection = database['blocked_pincodes']
+pincode_distance_cache_collection = database['pincode_distance_cache']
 database_mode = 'mongo'
 
 
@@ -470,6 +568,10 @@ def activate_in_memory_database(reason: str) -> None:
     global payments_collection
     global returns_collection
     global notifications_collection
+    global merchant_shipping_settings_collection
+    global serviceable_pincodes_collection
+    global blocked_pincodes_collection
+    global pincode_distance_cache_collection
     global database_mode
 
     mongo_client = mongomock.MongoClient()
@@ -486,6 +588,11 @@ def activate_in_memory_database(reason: str) -> None:
     payments_collection = database['payments']
     returns_collection = database['returns']
     notifications_collection = database['notifications']
+    # NEW: Shipping system collections
+    merchant_shipping_settings_collection = database['merchant_shipping_settings']
+    serviceable_pincodes_collection = database['serviceable_pincodes']
+    blocked_pincodes_collection = database['blocked_pincodes']
+    pincode_distance_cache_collection = database['pincode_distance_cache']
     database_mode = 'in-memory-fallback'
     print(f'[WARN] Falling back to in-memory database: {reason}')
 
@@ -665,6 +772,25 @@ def normalize_return_status(value: str, fallback: str = 'RETURN_REQUESTED') -> s
     if candidate in RETURN_STATUS_FLOW:
         return candidate
     return fallback
+
+
+def is_valid_return_transition(current_status: str, target_status: str) -> bool:
+    current = normalize_return_status(current_status)
+    target = normalize_return_status(target_status)
+
+    if current == target:
+        return True
+
+    if current == 'RETURN_REQUESTED' and target in {'PICKUP', 'RETURN_REJECTED'}:
+        return True
+
+    if current == 'PICKUP' and target == 'RETURNED':
+        return True
+
+    if current == 'RETURNED' and target == 'REFUNDED':
+        return True
+
+    return False
 
 
 def build_initial_status_timestamps(initial_status: str) -> dict:
@@ -1181,6 +1307,8 @@ def seed_products() -> None:
 def seed_users() -> None:
     for _, account in SEED_USERS.items():
         email = account['email'].strip().lower()
+        profile_details = account.get('profile_details') if isinstance(account.get('profile_details'), dict) else {}
+        bank_details = profile_details.get('bank_details') if isinstance(profile_details.get('bank_details'), dict) else {}
         users_collection.update_one(
             {'email': email},
             {
@@ -1192,6 +1320,18 @@ def seed_users() -> None:
                     'provider': account.get('provider', 'email'),
                     'role': normalize_role(account.get('role', 'CUSTOMER')),
                     'status': normalize_account_status(account.get('status', 'ACTIVE')),
+                    'phone_number': str(account.get('phone_number') or '').strip(),
+                    'profile_details': {
+                        'store_name': str(profile_details.get('store_name') or '').strip(),
+                        'gst_number': str(profile_details.get('gst_number') or '').strip(),
+                        'logo_url': str(profile_details.get('logo_url') or '').strip(),
+                        'bank_details': {
+                            'account_holder_name': str(bank_details.get('account_holder_name') or '').strip(),
+                            'bank_name': str(bank_details.get('bank_name') or '').strip(),
+                            'account_number': str(bank_details.get('account_number') or '').strip(),
+                            'ifsc_code': str(bank_details.get('ifsc_code') or '').strip(),
+                        },
+                    },
                     'password_hash': hash_password(account['password']),
                     'updated_at': now_utc(),
                 },
@@ -1352,6 +1492,50 @@ def backfill_nationwide_delivery_coverage() -> None:
         )
 
 
+def seed_demo_merchant_shipping_settings() -> None:
+    now = now_utc()
+    for merchant_id, settings in SEED_MERCHANT_SHIPPING_SETTINGS.items():
+        normalized_merchant_id = str(merchant_id or '').strip()
+        if not normalized_merchant_id:
+            continue
+
+        existing = merchant_shipping_settings_collection.find_one({'merchant_id': normalized_merchant_id}, {'_id': 1})
+        if existing:
+            continue
+
+        merchant_shipping_settings_collection.update_one(
+            {'merchant_id': normalized_merchant_id},
+            {
+                '$set': {
+                    'merchant_id': normalized_merchant_id,
+                    'warehouse': settings.get('warehouse') or {},
+                    'distance_pricing': settings.get('distance_pricing') or {},
+                    'couriers': settings.get('couriers') or {'available_couriers': ['Local', 'Express', 'Premium']},
+                    'cod_rules': settings.get('cod_rules') or {'cod_enabled': True, 'cod_limit': 100000, 'cod_extra_charge': 0},
+                    'allow_all_india': bool(settings.get('allow_all_india', True)),
+                    'updated_at': now,
+                },
+                '$setOnInsert': {'created_at': now},
+            },
+            upsert=True,
+        )
+
+        serviceable = parse_serviceable_pincodes(settings.get('serviceable_pincodes') or [])
+        blocked = parse_serviceable_pincodes(settings.get('blocked_pincodes') or [])
+
+        serviceable_pincodes_collection.delete_many({'merchant_id': normalized_merchant_id})
+        blocked_pincodes_collection.delete_many({'merchant_id': normalized_merchant_id})
+
+        if serviceable:
+            serviceable_pincodes_collection.insert_many(
+                [{'merchant_id': normalized_merchant_id, 'pincode': pin, 'created_at': now} for pin in serviceable]
+            )
+        if blocked:
+            blocked_pincodes_collection.insert_many(
+                [{'merchant_id': normalized_merchant_id, 'pincode': pin, 'created_at': now} for pin in blocked]
+            )
+
+
 def backfill_user_auth_shape() -> None:
     projection = {'_id': 1, 'id': 1, 'role': 1, 'status': 1, 'full_name': 1, 'name': 1}
     for account in users_collection.find({}, projection):
@@ -1378,8 +1562,122 @@ def seed_collections() -> None:
     backfill_product_warehouses()
     backfill_user_auth_shape()
     backfill_nationwide_delivery_coverage()
+    seed_demo_merchant_shipping_settings()
     backfill_order_items_and_logs()
     backfill_orders_workflow_state()
+
+
+# ============================================================================
+# SHIPPING SYSTEM HELPERS
+# ============================================================================
+
+PINCODE_DISTANCE_CACHE = {}  # Simple in-memory cache for pincode distances
+
+
+def sanitize_pincode(value: str) -> str:
+    """Extract only digits from pincode input."""
+    cleaned = ''.join(ch for ch in str(value or '').strip() if ch.isdigit())
+    return cleaned[:6] if cleaned else ''
+
+
+def parse_serviceable_pincodes(value: str | list) -> list[str]:
+    """Parse pincode input (CSV string or list) and return valid pincodes."""
+    if isinstance(value, list):
+        pincodes = value
+    else:
+        pincodes = [p.strip() for p in str(value or '').split(',')]
+    
+    result = []
+    for p in pincodes:
+        cleaned = sanitize_pincode(p)
+        if len(cleaned) == 6:
+            result.append(cleaned)
+    return result
+
+
+def calculate_distance(pincode1: str, pincode2: str) -> float:
+    """
+    Calculate approximate distance between two pincodes using simple mapping.
+    Uses cached values or internal pincode mapping table.
+    
+    In production, integrate Google Maps or OpenRoute API.
+    """
+    cache_key = f"{pincode1}:{pincode2}"
+    if cache_key in PINCODE_DISTANCE_CACHE:
+        return PINCODE_DISTANCE_CACHE[cache_key]
+    
+    # Reverse lookup also
+    reverse_key = f"{pincode2}:{pincode1}"
+    if reverse_key in PINCODE_DISTANCE_CACHE:
+        return PINCODE_DISTANCE_CACHE[reverse_key]
+    
+    # Simple approximation: use pincode prefix as rough geography
+    prefix1 = int(pincode1[:2]) if len(pincode1) >= 2 else 0
+    prefix2 = int(pincode2[:2]) if len(pincode2) >= 2 else 0
+    
+    # Rough distance: difference in prefix * 100 km per state
+    distance = abs(prefix1 - prefix2) * 100
+    if distance == 0:
+        distance = 10  # Same state, assume ~10km average
+    
+    PINCODE_DISTANCE_CACHE[cache_key] = float(distance)
+    return float(distance)
+
+
+def calculate_delivery_charge(
+    distance_km: float,
+    base_charge: float,
+    per_km_rate: float,
+    min_charge: float,
+    max_charge: float,
+) -> float:
+    """Calculate delivery charge based on distance and pricing rules."""
+    charge = base_charge + (distance_km * per_km_rate)
+    charge = max(charge, min_charge)
+    charge = min(charge, max_charge)
+    return round(charge, 2)
+
+
+def estimate_delivery_timeframe(distance_km: float) -> tuple[int, int]:
+    """Estimate delivery days based on distance."""
+    if distance_km <= 50:
+        return (1, 2)  # 1-2 days
+    elif distance_km <= 200:
+        return (2, 4)  # 2-4 days
+    else:
+        return (4, 7)  # 4-7 days
+
+
+def is_pincode_serviceable(
+    customer_pincode: str,
+    merchant_id: str,
+    allow_all_india: bool = True,
+) -> bool:
+    """Check if customer pincode is serviceable by merchant."""
+    customer_pincode = sanitize_pincode(customer_pincode)
+    if not customer_pincode:
+        return False
+    
+    # Check blocked pincodes first
+    if blocked_pincodes_collection.find_one({'merchant_id': merchant_id, 'pincode': customer_pincode}):
+        return False
+    
+    # Check allow_all_india flag
+    if allow_all_india:
+        return True  # Serve all of India except blocked
+    
+    # Check serviceable pincodes list
+    return bool(
+        serviceable_pincodes_collection.find_one({'merchant_id': merchant_id, 'pincode': customer_pincode})
+    )
+
+
+def get_merchant_shipping_settings(merchant_id: str) -> dict | None:
+    """Retrieve merchant shipping settings."""
+    return merchant_shipping_settings_collection.find_one(
+        {'merchant_id': merchant_id},
+        {'_id': 0},
+    )
 
 
 @app.on_event('startup')
@@ -1656,6 +1954,57 @@ def google_auth(payload: GoogleAuthRequest):
     }
 
 
+@app.put('/api/merchant/profile')
+def update_merchant_profile(
+    payload: MerchantProfileUpdateRequest,
+    current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT')),
+):
+    """Update merchant profile details (store info, phone, banking details)"""
+    user_id = current_user.get('id')
+    email = current_user.get('email', '').strip().lower()
+
+    # Get current user document
+    user = users_collection.find_one({'$or': [{'id': user_id}, {'email': email}]})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+
+    # Merge profile details
+    current_profile_details = user.get('profile_details', {}) or {}
+    if payload.profile_details:
+        current_profile_details.update(payload.profile_details)
+
+    # Add phone number if provided
+    if payload.phone_number:
+        current_profile_details['phone_number'] = payload.phone_number.strip()
+
+    # Merge bank details
+    if payload.bank_details:
+        current_bank_details = current_profile_details.get('bank_details', {}) or {}
+        current_bank_details.update(payload.bank_details)
+        current_profile_details['bank_details'] = current_bank_details
+
+    # Update user document
+    result = users_collection.update_one(
+        {'id': user_id},
+        {
+            '$set': {
+                'profile_details': current_profile_details,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=400, detail='Failed to update profile.')
+
+    # Return updated user
+    updated_user = users_collection.find_one({'id': user_id})
+    return {
+        'message': 'Merchant profile updated successfully.',
+        'user': serialize_user(updated_user),
+    }
+
+
 @app.get('/admin/delivery-associates')
 def get_delivery_associates(
     status_filter: str | None = None,
@@ -1763,6 +2112,199 @@ def update_admin_delivery_coverage(
 
     updated = get_merchant_delivery_coverage(merchant_id)
     return {'message': 'Delivery coverage settings saved.', **updated}
+
+
+# ============================================================================
+# NEW: AMAZON-LIKE SHIPPING SYSTEM ENDPOINTS
+# ============================================================================
+
+@app.get('/admin/shipping-settings')
+def get_merchant_shipping_config(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
+    """Retrieve merchant shipping configuration."""
+    merchant_id = str(current_user.get('id') or '').strip()
+    if not merchant_id:
+        raise HTTPException(status_code=400, detail='Unable to resolve merchant ID.')
+    
+    settings = get_merchant_shipping_settings(merchant_id)
+    if not settings:
+        # Return default empty config
+        return {
+            'merchant_id': merchant_id,
+            'warehouse': {
+                'address': '',
+                'pincode': '',
+                'contact_number': '',
+            },
+            'distance_pricing': {
+                'base_charge': 40,
+                'per_km_rate': 1.5,
+                'min_charge': 30,
+                'max_charge': 500,
+            },
+            'couriers': {
+                'available_couriers': ['Local', 'Express', 'Premium'],
+            },
+            'cod_rules': {
+                'cod_enabled': True,
+                'cod_limit': 100000,
+                'cod_extra_charge': 0,
+            },
+            'allow_all_india': True,
+            'serviceable_pincodes_count': 0,
+            'blocked_pincodes_count': 0,
+        }
+    
+    # Count pincodes
+    serviceable_count = serviceable_pincodes_collection.count_documents({'merchant_id': merchant_id})
+    blocked_count = blocked_pincodes_collection.count_documents({'merchant_id': merchant_id})
+    settings['serviceable_pincodes_count'] = serviceable_count
+    settings['blocked_pincodes_count'] = blocked_count
+    
+    return settings
+
+
+@app.put('/admin/shipping-settings')
+def update_merchant_shipping_config(
+    payload: MerchantShippingSettingsRequest,
+    current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT')),
+):
+    """Update merchant shipping configuration."""
+    merchant_id = str(current_user.get('id') or '').strip()
+    if not merchant_id:
+        raise HTTPException(status_code=400, detail='Unable to resolve merchant ID.')
+    
+    # Validate warehouse pincode
+    warehouse_pincode = sanitize_pincode(payload.warehouse.pincode)
+    if len(warehouse_pincode) != 6:
+        raise HTTPException(status_code=400, detail='Warehouse pincode must be 6 digits.')
+    
+    # Validate pricing
+    if payload.distance_pricing.base_charge < 0 or payload.distance_pricing.per_km_rate < 0:
+        raise HTTPException(status_code=400, detail='Charges cannot be negative.')
+    
+    # Save main settings
+    now = now_utc()
+    merchant_shipping_settings_collection.update_one(
+        {'merchant_id': merchant_id},
+        {
+            '$set': {
+                'merchant_id': merchant_id,
+                'warehouse': payload.warehouse.dict(),
+                'distance_pricing': payload.distance_pricing.dict(),
+                'couriers': payload.couriers.dict(),
+                'cod_rules': payload.cod_rules.dict(),
+                'allow_all_india': payload.allow_all_india,
+                'updated_at': now,
+            },
+            '$setOnInsert': {'created_at': now},
+        },
+        upsert=True,
+    )
+    
+    # Update serviceable pincodes
+    if not payload.allow_all_india and payload.serviceable_pincodes:
+        valid_pincodes = parse_serviceable_pincodes(payload.serviceable_pincodes)
+        serviceable_pincodes_collection.delete_many({'merchant_id': merchant_id})
+        if valid_pincodes:
+            serviceable_pincodes_collection.insert_many([
+                {'merchant_id': merchant_id, 'pincode': p, 'created_at': now}
+                for p in valid_pincodes
+            ])
+    
+    # Update blocked pincodes
+    if payload.blocked_pincodes:
+        valid_blocked = parse_serviceable_pincodes(payload.blocked_pincodes)
+        blocked_pincodes_collection.delete_many({'merchant_id': merchant_id})
+        if valid_blocked:
+            blocked_pincodes_collection.insert_many([
+                {'merchant_id': merchant_id, 'pincode': p, 'created_at': now}
+                for p in valid_blocked
+            ])
+    
+    updated = get_merchant_shipping_settings(merchant_id)
+    return {
+        'message': 'Shipping settings updated successfully.',
+        'settings': updated,
+    }
+
+
+@app.post('/check-delivery')
+def check_delivery_serviceability(
+    customer_pincode: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Check delivery serviceability for a customer pincode.
+    
+    Returns:
+    - is_serviceable: bool
+    - estimated_days: str (e.g., "2-4 days")
+    - delivery_charge: float
+    - cod_available: bool
+    """
+    merchant_id = str(current_user.get('id') or '').strip()
+    if not merchant_id:
+        merchant_id = get_default_merchant_id()
+    
+    if not merchant_id:
+        raise HTTPException(status_code=400, detail='No merchant found.')
+    
+    customer_pincode = sanitize_pincode(customer_pincode)
+    if len(customer_pincode) != 6:
+        raise HTTPException(status_code=400, detail='Invalid customer pincode.')
+    
+    # Get settings
+    settings = get_merchant_shipping_settings(merchant_id)
+    if not settings:
+        return {
+            'is_serviceable': False,
+            'estimated_days': 'Not available',
+            'delivery_charge': 0,
+            'cod_available': False,
+            'error': 'Shipping settings not configured.',
+        }
+    
+    # Check serviceability
+    is_serviceable = is_pincode_serviceable(
+        customer_pincode,
+        merchant_id,
+        settings.get('allow_all_india', True),
+    )
+    
+    if not is_serviceable:
+        return {
+            'is_serviceable': False,
+            'estimated_days': 'Not available',
+            'delivery_charge': 0,
+            'cod_available': False,
+        }
+    
+    # Calculate distance and delivery charge
+    warehouse_pincode = settings['warehouse']['pincode']
+    distance = calculate_distance(warehouse_pincode, customer_pincode)
+    
+    delivery_charge = calculate_delivery_charge(
+        distance,
+        settings['distance_pricing']['base_charge'],
+        settings['distance_pricing']['per_km_rate'],
+        settings['distance_pricing']['min_charge'],
+        settings['distance_pricing']['max_charge'],
+    )
+    
+    # Estimate delivery timeframe
+    min_days, max_days = estimate_delivery_timeframe(distance)
+    estimated_days = f'{min_days}-{max_days} days'
+    
+    # Check COD availability
+    cod_available = settings['cod_rules']['cod_enabled']
+    
+    return {
+        'is_serviceable': True,
+        'estimated_days': estimated_days,
+        'delivery_charge': delivery_charge,
+        'cod_available': cod_available,
+        'distance_km': round(distance, 2),
+    }
 
 
 def apply_order_status_update(order: dict, next_status: str, actor_id: str, location: str = '') -> dict:
@@ -2430,7 +2972,11 @@ def cancel_order(order_id: str, payload: CancelOrderRequest, current_user: dict 
 
 
 @app.post('/orders/{order_id}/return-request')
-def request_order_return(order_id: str, current_user: dict = Depends(require_roles('CUSTOMER'))):
+def request_order_return(
+    order_id: str,
+    payload: ReturnRequestCreateRequest | None = None,
+    current_user: dict = Depends(require_roles('CUSTOMER')),
+):
     order = orders_collection.find_one({'order_id': order_id})
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
@@ -2447,11 +2993,22 @@ def request_order_return(order_id: str, current_user: dict = Depends(require_rol
     if existing_return:
         raise HTTPException(status_code=400, detail='Return request already exists for this order.')
 
+    proof_images = []
+    raw_images = (payload.proof_images if payload else None) or []
+    for image in raw_images:
+        normalized = str(image or '').strip()
+        if normalized:
+            proof_images.append(normalized)
+    proof_images = proof_images[:5]
+
     returns_collection.insert_one(
         {
             'id': f"RET-{uuid4().hex[:12].upper()}",
             'order_id': order_id,
             'status': 'RETURN_REQUESTED',
+            'reason': str((payload.reason if payload else '') or '').strip(),
+            'issue_details': str((payload.issue_details if payload else '') or '').strip(),
+            'proof_images': proof_images,
             'timestamps': {'RETURN_REQUESTED': now_utc().isoformat()},
             'created_by': actor_id or actor_email,
             'created_at': now_utc(),
@@ -2474,11 +3031,8 @@ def update_return_status(
 
     current_status = normalize_return_status(request.get('status', 'RETURN_REQUESTED'))
     target_status = normalize_return_status(payload.status)
-    if current_status != target_status:
-        current_index = RETURN_STATUS_FLOW.index(current_status)
-        target_index = RETURN_STATUS_FLOW.index(target_status)
-        if target_index != current_index + 1:
-            raise HTTPException(status_code=400, detail='Invalid return status transition.')
+    if not is_valid_return_transition(current_status, target_status):
+        raise HTTPException(status_code=400, detail='Invalid return status transition.')
 
     actor = str(current_user.get('id') or current_user.get('email') or 'staff')
     returns_collection.update_one(
@@ -2499,6 +3053,75 @@ def update_return_status(
 
     create_notification(target_status, order_id, f'Return status for {order_id} updated to {target_status}.')
     return {'message': 'Return status updated.', 'return_request': serialize_return_for_order(order_id)}
+
+
+@app.get('/admin/returns')
+def get_admin_returns(
+    status_filter: str = 'RETURN_REQUESTED',
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    _ = current_user
+    query = {'status': normalize_return_status(status_filter, fallback='RETURN_REQUESTED')}
+    results = []
+    for return_request in returns_collection.find(query, {'_id': 0}).sort('created_at', -1):
+        order_id = str(return_request.get('order_id') or '').strip()
+        order = orders_collection.find_one({'order_id': order_id}, {'_id': 0}) if order_id else None
+
+        payload = dict(return_request)
+        if isinstance(payload.get('created_at'), datetime):
+            payload['created_at'] = payload['created_at'].isoformat()
+        if isinstance(payload.get('updated_at'), datetime):
+            payload['updated_at'] = payload['updated_at'].isoformat()
+
+        payload['status'] = normalize_return_status(payload.get('status', 'RETURN_REQUESTED'))
+        payload['proof_images'] = [str(item).strip() for item in (payload.get('proof_images') or []) if str(item).strip()]
+        payload['order'] = serialize_order(order, include_shipment=True) if order else None
+        results.append(payload)
+
+    return {'returns': results}
+
+
+@app.put('/admin/returns/{order_id}/decision')
+def decide_return_request(
+    order_id: str,
+    payload: ReturnDecisionRequest,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    request = returns_collection.find_one({'order_id': order_id})
+    if not request:
+        raise HTTPException(status_code=404, detail='Return request not found.')
+
+    current_status = normalize_return_status(request.get('status', 'RETURN_REQUESTED'))
+    if current_status != 'RETURN_REQUESTED':
+        raise HTTPException(status_code=400, detail='Only RETURN_REQUESTED items can be approved or rejected.')
+
+    decision = str(payload.decision or '').strip().upper()
+    if decision not in {'APPROVE', 'REJECT'}:
+        raise HTTPException(status_code=400, detail='Decision must be APPROVE or REJECT.')
+
+    target_status = 'PICKUP' if decision == 'APPROVE' else 'RETURN_REJECTED'
+    actor = str(current_user.get('id') or current_user.get('email') or 'staff').strip() or 'staff'
+    review_note = str(payload.review_note or '').strip()
+
+    returns_collection.update_one(
+        {'order_id': order_id},
+        {
+            '$set': {
+                'status': target_status,
+                f'timestamps.{target_status}': now_utc().isoformat(),
+                'review_note': review_note,
+                'reviewed_by': actor,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+
+    if target_status == 'RETURN_REJECTED':
+        create_notification('RETURN_REJECTED', order_id, f'Return request for {order_id} was rejected.')
+        return {'message': 'Return request rejected.', 'return_request': serialize_return_for_order(order_id)}
+
+    create_notification('RETURN_APPROVED', order_id, f'Return request for {order_id} approved. Pickup initiated.')
+    return {'message': 'Return request approved.', 'return_request': serialize_return_for_order(order_id)}
 
 
 @app.put('/orders/{order_id}/payment')

@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { buildAuthHeaders } from '../utils/auth'
+import StatusBadge from './StatusBadge'
+import { formatStatusLabel, getSlaState, normalizeOrderStatus } from '../utils/adminUi'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const COURIERS = ['BlueDart', 'Delhivery', 'DTDC', 'Ecom Express']
-const ADMIN_STATUSES = ['SHIPPED']
+const ADMIN_STATUSES = ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const ORDER_TABS = ['ALL', 'PENDING', 'PACKED', 'SHIPPED', 'DELIVERED']
+const TIMELINE_STEPS = ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 function defaultDraft(order) {
   return {
@@ -20,6 +24,10 @@ export default function AdminOrdersManager({ compact = false }) {
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(true)
   const [drafts, setDrafts] = useState({})
+  const [filters, setFilters] = useState({ status: 'ALL', date: '', customer: '' })
+  const [activeOrderId, setActiveOrderId] = useState('')
+  const [statusTab, setStatusTab] = useState('ALL')
+  const [searchTerm, setSearchTerm] = useState('')
   const [selectedOrders, setSelectedOrders] = useState([])
   const [shipmentDraft, setShipmentDraft] = useState({
     courier_name: COURIERS[0],
@@ -27,12 +35,39 @@ export default function AdminOrdersManager({ compact = false }) {
   })
   const [trackingLogsByOrder, setTrackingLogsByOrder] = useState({})
 
+  const filteredOrders = useMemo(() => {
+    const statusFilter = String(filters.status || 'ALL').trim().toUpperCase()
+    const dateFilter = String(filters.date || '').trim()
+    const customerFilter = String(filters.customer || '').trim().toLowerCase()
+    const search = String(searchTerm || '').trim().toLowerCase()
+
+    return orders.filter((order) => {
+      const statusValue = normalizeOrderStatus(order.status)
+      const createdValue = String(order.created_at || '').trim()
+      const customerValue = String(order.customer_email || '').trim().toLowerCase()
+      const orderIdValue = String(order.order_id || '').trim().toLowerCase()
+
+      const statusMatch = statusFilter === 'ALL' || statusValue === statusFilter
+      const dateMatch = !dateFilter || createdValue.slice(0, 10) === dateFilter
+      const customerMatch = !customerFilter || customerValue.includes(customerFilter)
+      const tabMatch = statusTab === 'ALL' || statusValue === statusTab
+      const searchMatch = !search || orderIdValue.includes(search) || customerValue.includes(search)
+
+      return statusMatch && dateMatch && customerMatch && tabMatch && searchMatch
+    })
+  }, [filters, orders, searchTerm, statusTab])
+
   const displayedOrders = useMemo(() => {
     if (compact) {
-      return orders.slice(0, 4)
+      return filteredOrders.slice(0, 5)
     }
-    return orders
-  }, [compact, orders])
+    return filteredOrders
+  }, [compact, filteredOrders])
+
+  const focusedOrders = useMemo(
+    () => displayedOrders.filter((order) => order.order_id === activeOrderId),
+    [activeOrderId, displayedOrders],
+  )
 
   const loadOrders = async () => {
     setLoading(true)
@@ -68,6 +103,17 @@ export default function AdminOrdersManager({ compact = false }) {
   useEffect(() => {
     loadOrders()
   }, [])
+
+  useEffect(() => {
+    if (!displayedOrders.length) {
+      setActiveOrderId('')
+      return
+    }
+
+    if (activeOrderId && !displayedOrders.some((order) => order.order_id === activeOrderId)) {
+      setActiveOrderId('')
+    }
+  }, [activeOrderId, displayedOrders])
 
   const updateDraft = (orderId, field, value) => {
     setDrafts((current) => ({
@@ -221,11 +267,12 @@ export default function AdminOrdersManager({ compact = false }) {
   }
 
   return (
-    <section className="panel panel-stack">
+    <section className="panel panel-stack card">
       <div className="section-head">
         <div>
-          <p className="eyebrow">Orders</p>
-          <h2>Order and shipment controls</h2>
+          <p className="eyebrow">ORDERS</p>
+          <h2>Orders control center</h2>
+          <p>Manage order flow, shipment creation, partner assignment, and tracking updates.</p>
         </div>
         <button type="button" className="btn btn-secondary" onClick={loadOrders}>
           Refresh
@@ -238,9 +285,158 @@ export default function AdminOrdersManager({ compact = false }) {
 
       {!loading && displayedOrders.length === 0 ? <p>No orders found.</p> : null}
 
-      <section className="section-card panel-stack">
-        <h3>Create Shipment</h3>
-        <p>Select multiple packed orders and generate one shipment.</p>
+      <section className="section-card panel-stack section card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">FILTERS</p>
+            <h3>Filter orders</h3>
+            <p>Narrow by status, order date, or customer email.</p>
+          </div>
+        </div>
+
+        <div className="tab-strip">
+          {ORDER_TABS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              className={`tab-button ${statusTab === tab ? 'tab-button-active' : ''}`}
+              onClick={() => setStatusTab(tab)}
+            >
+              {formatStatusLabel(tab)}
+            </button>
+          ))}
+        </div>
+
+        <div className="admin-orders-grid">
+          <label className="field-group">
+            <span className="field-label">Status</span>
+            <select
+              className="field"
+              value={filters.status}
+              onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+            >
+              <option value="ALL">All statuses</option>
+              <option value="PENDING">PENDING</option>
+              <option value="PACKED">PACKED</option>
+              <option value="SHIPPED">SHIPPED</option>
+              <option value="OUT_FOR_DELIVERY">OUT_FOR_DELIVERY</option>
+              <option value="DELIVERED">DELIVERED</option>
+            </select>
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Date</span>
+            <input
+              type="date"
+              className="field"
+              value={filters.date}
+              onChange={(event) => setFilters((current) => ({ ...current, date: event.target.value }))}
+            />
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Customer</span>
+            <input
+              className="field"
+              value={filters.customer}
+              onChange={(event) => setFilters((current) => ({ ...current, customer: event.target.value }))}
+              placeholder="Search customer email"
+            />
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Search</span>
+            <input
+              className="field"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Order ID or customer email"
+            />
+          </label>
+
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setFilters({ status: 'ALL', date: '', customer: '' })
+              setStatusTab('ALL')
+              setSearchTerm('')
+            }}
+          >
+            Clear Filters
+          </button>
+        </div>
+      </section>
+
+      <section className="section-card panel-stack section card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">ORDERS</p>
+            <h3>Orders table</h3>
+            <p>Primary order list with quick selection and action focus.</p>
+          </div>
+        </div>
+
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Select</th>
+                <th>Order ID</th>
+                <th>Customer</th>
+                <th>Status</th>
+                <th style={{ textAlign: 'right' }}>Amount</th>
+                <th>SLA</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayedOrders.map((order) => {
+                const eligibleForShipment = ['PACKED', 'SHIPPED'].includes(String(order.status || '').toUpperCase())
+                return (
+                  <tr key={`table-${order.order_id}`}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedOrders.includes(order.order_id)}
+                        onChange={() => toggleOrderSelection(order.order_id)}
+                        disabled={!eligibleForShipment}
+                      />
+                    </td>
+                    <td>{order.order_id}</td>
+                    <td>{order.customer_email}</td>
+                    <td><StatusBadge status={order.status} /></td>
+                    <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</td>
+                    <td>
+                      <span className={getSlaState(order).className}>{getSlaState(order).label}</span>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() =>
+                          setActiveOrderId((current) => (current === order.order_id ? '' : order.order_id))
+                        }
+                      >
+                        {activeOrderId === order.order_id ? 'Collapse' : 'Manage'}
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="section-card panel-stack section card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">SHIPMENTS</p>
+            <h3>Create shipment</h3>
+            <p>Select packed orders and generate shipments in bulk.</p>
+          </div>
+        </div>
         <div className="admin-orders-grid">
           <label className="field-group">
             <span className="field-label">Courier</span>
@@ -281,12 +477,25 @@ export default function AdminOrdersManager({ compact = false }) {
         </div>
       </section>
 
-      <div className="admin-orders-stack">
-        {displayedOrders.map((order) => {
+      <section className="section-card panel-stack section card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">FULFILLMENT</p>
+            <h3>Shipment and partner actions</h3>
+            <p>Assign partners, update tracking IDs, sync statuses, and inspect tracking logs.</p>
+          </div>
+        </div>
+
+        {!activeOrderId ? <p className="empty-state">Select an order from the table to expand shipment actions.</p> : null}
+
+        <div className="admin-orders-stack">
+        {focusedOrders.map((order) => {
           const draft = drafts[order.order_id] || defaultDraft(order)
           const shipment = order.shipment || {}
           const trackingLogs = trackingLogsByOrder[order.order_id] || []
           const eligibleForShipment = ['PACKED', 'SHIPPED'].includes(String(order.status || '').toUpperCase())
+          const currentStepIndex = TIMELINE_STEPS.indexOf(normalizeOrderStatus(draft.status || order.status))
+          const sla = getSlaState(order)
 
           return (
             <article key={order.order_id} className="section-card panel-stack">
@@ -304,7 +513,26 @@ export default function AdminOrdersManager({ compact = false }) {
                   <h3>{order.order_id}</h3>
                   <p>{order.customer_email}</p>
                 </div>
-                <p>{order.status}</p>
+                <div className="row-gap">
+                  <StatusBadge status={order.status} />
+                  <span className={sla.className}>{sla.label}</span>
+                </div>
+              </div>
+
+              <div className="tracking-timeline">
+                {TIMELINE_STEPS.map((step, index) => {
+                  const isCompleted = currentStepIndex > index
+                  const isActive = currentStepIndex === index
+                  return (
+                    <div
+                      key={`${order.order_id}-${step}`}
+                      className={`tracking-step ${isCompleted ? 'tracking-step-completed' : ''} ${isActive ? 'tracking-step-active' : ''}`}
+                    >
+                      <span className="tracking-dot" />
+                      <span>{formatStatusLabel(step)}</span>
+                    </div>
+                  )
+                })}
               </div>
 
               <div className="admin-orders-grid">
@@ -403,7 +631,8 @@ export default function AdminOrdersManager({ compact = false }) {
             </article>
           )
         })}
-      </div>
+        </div>
+      </section>
     </section>
   )
 }
