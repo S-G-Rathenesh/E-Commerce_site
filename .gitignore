@@ -1,0 +1,11 @@
+# Environment files
+.env
+**/.env
+
+# Python cache/log artifacts
+**/__pycache__/
+*.py[cod]
+*.log
+
+# Local machine artifacts
+Microsoft/
