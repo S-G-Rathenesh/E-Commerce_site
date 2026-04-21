@@ -1,11 +1,29 @@
+# Dependency directories
+node_modules/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
 # Environment files
 .env
-**/.env
+.env.*
 
-# Python cache/log artifacts
-**/__pycache__/
+# Build output
+build/
+dist/
+
+# Cache files and directories
+__pycache__/
 *.py[cod]
-*.log
+*.cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Local machine artifacts
-Microsoft/
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
