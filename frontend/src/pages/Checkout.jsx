@@ -7,9 +7,20 @@ import DeliveryInfo from '../components/DeliveryInfo'
 import { buildAuthHeaders, getStoredUser } from '../utils/auth'
 import { clearCart, getCartItems } from '../utils/cart'
 import { getFinalDeliveryCharge } from '../utils/shipping'
+import { getSavedDefaultAddress } from '../utils/profileAddress'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const API_FALLBACK_BASE = API_BASE.includes('127.0.0.1') ? API_BASE.replace('127.0.0.1', 'localhost') : ''
+const API_CANDIDATES = Array.from(
+  new Set(
+    [
+      API_BASE,
+      API_FALLBACK_BASE,
+      'http://127.0.0.1:8000',
+      'http://localhost:8000',
+    ].filter(Boolean),
+  ),
+)
 
 const PAYMENT_OPTIONS = [
   { value: 'UPI', label: 'UPI' },
@@ -41,6 +52,8 @@ export default function Checkout() {
   const [savedMethods, setSavedMethods] = useState([])
   const [usingSaved, setUsingSaved] = useState(false)
   const [selectedSavedMethod, setSelectedSavedMethod] = useState(null)
+  const [savedDefaultAddress, setSavedDefaultAddress] = useState(null)
+  const [addressSource, setAddressSource] = useState('current')
   const navigate = useNavigate()
 
   const currentUser = getStoredUser()
@@ -53,24 +66,69 @@ export default function Checkout() {
   const total = Math.max(0, subtotal - discount)
   const shippingCharge = getFinalDeliveryCharge(total)
   const finalTotal = total + shippingCharge
+  const isUsingDefaultAddress = Boolean(savedDefaultAddress) && addressSource === 'default'
 
   useEffect(() => {
     loadSavedPaymentMethods()
+    const existingAddress = getSavedDefaultAddress(currentUser)
+    if (existingAddress) {
+      setSavedDefaultAddress(existingAddress)
+      setAddressSource('default')
+      setFullName(existingAddress.fullName)
+      setPhone(existingAddress.phone)
+      setCity(existingAddress.city)
+      setPostalCode(existingAddress.postalCode)
+      setAddress(existingAddress.addressLine)
+    }
   }, [])
 
-  const loadSavedPaymentMethods = async () => {
-    try {
-      const token = localStorage.getItem('auth_token')
-      const response = await fetch(`${API_BASE}/payment-methods`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setSavedMethods(data.payment_methods || [])
-      }
-    } catch (error) {
-      console.error('Failed to load saved payment methods:', error)
+  const useCurrentOrderAddress = () => {
+    setAddressSource('current')
+    setFullName('')
+    setPhone('')
+    setCity('')
+    setPostalCode('')
+    setAddress('')
+  }
+
+  const useSavedDefaultAddress = () => {
+    if (!savedDefaultAddress) {
+      return
     }
+    setAddressSource('default')
+    setFullName(savedDefaultAddress.fullName)
+    setPhone(savedDefaultAddress.phone)
+    setCity(savedDefaultAddress.city)
+    setPostalCode(savedDefaultAddress.postalCode)
+    setAddress(savedDefaultAddress.addressLine)
+  }
+
+  const loadSavedPaymentMethods = async () => {
+    const token = localStorage.getItem('auth_token')
+    const requestInit = {
+      headers: { Authorization: `Bearer ${token}` },
+    }
+
+    for (const baseUrl of API_CANDIDATES) {
+      try {
+        const response = await fetch(`${baseUrl}/payment-methods`, requestInit)
+        if (response.ok) {
+          const data = await response.json()
+          setSavedMethods(data.payment_methods || [])
+          return
+        }
+        if (response.status < 500) {
+          setSavedMethods([])
+          return
+        }
+      } catch (error) {
+        if (baseUrl === API_CANDIDATES[API_CANDIDATES.length - 1]) {
+          console.error('Failed to load saved payment methods:', error)
+        }
+      }
+    }
+
+    setSavedMethods([])
   }
 
   const buildPaymentDetails = () => {
@@ -135,14 +193,16 @@ export default function Checkout() {
       body: JSON.stringify(orderPayload),
     }
 
-    try {
-      return await fetch(`${API_BASE}/orders`, requestOptions)
-    } catch (error) {
-      if (!API_FALLBACK_BASE) {
-        throw error
+    let lastError = null
+    for (const baseUrl of API_CANDIDATES) {
+      try {
+        return await fetch(`${baseUrl}/orders`, requestOptions)
+      } catch (error) {
+        lastError = error
       }
-      return fetch(`${API_FALLBACK_BASE}/orders`, requestOptions)
     }
+
+    throw lastError || new Error('Unable to reach the order service.')
   }
 
   const handlePlaceOrder = async () => {
@@ -153,6 +213,16 @@ export default function Checkout() {
 
     if (!postalCode || String(postalCode).trim().length < 6) {
       setMessage('Enter a valid pincode to place the order.')
+      return
+    }
+
+    if (!String(fullName || '').trim() || !String(city || '').trim() || !String(address || '').trim()) {
+      setMessage('Please complete shipping details before placing the order.')
+      return
+    }
+
+    if (String(phone || '').replace(/\D/g, '').length < 10) {
+      setMessage('Please enter a valid phone number for shipping.')
       return
     }
 
@@ -230,10 +300,72 @@ export default function Checkout() {
         <section className="panel panel-stack checkout-form-card">
           <h2>Shipping details</h2>
           <div className="form-grid">
-            <Input label="Full name" value={fullName} onChange={(event) => setFullName(event.target.value)} placeholder="e.g. Julianne Moore" />
-            <Input label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+1 (555) 000-0000" />
-            <Input label="City" value={city} onChange={(event) => setCity(event.target.value)} placeholder="New York" />
-            <Input label="Postal code" value={postalCode} onChange={(event) => setPostalCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="560001" />
+            {savedDefaultAddress ? (
+              <div className="checkout-address-source">
+                <p className="checkout-section-label">Address preference</p>
+                <div className="checkout-saved-method-list">
+                  <label className={`checkout-saved-method ${addressSource === 'default' ? 'checkout-saved-method-active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="addressSource"
+                      checked={addressSource === 'default'}
+                      onChange={useSavedDefaultAddress}
+                      className="checkout-saved-method-radio"
+                    />
+                    <div className="checkout-saved-method-details">
+                      <p>Use default saved address</p>
+                      <p>{`${savedDefaultAddress.fullName}, ${savedDefaultAddress.city} - ${savedDefaultAddress.postalCode}`}</p>
+                    </div>
+                  </label>
+
+                  <label className={`checkout-saved-method ${addressSource === 'current' ? 'checkout-saved-method-active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="addressSource"
+                      checked={addressSource === 'current'}
+                      onChange={useCurrentOrderAddress}
+                      className="checkout-saved-method-radio"
+                    />
+                    <div className="checkout-saved-method-details">
+                      <p>Use current order address</p>
+                      <p>Enter a one-time address for this order only</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            ) : null}
+
+            {isUsingDefaultAddress ? (
+              <div className="checkout-summary-breakdown">
+                <div>
+                  <span>Name</span>
+                  <strong>{fullName}</strong>
+                </div>
+                <div>
+                  <span>Phone</span>
+                  <strong>{phone}</strong>
+                </div>
+                <div>
+                  <span>City</span>
+                  <strong>{city}</strong>
+                </div>
+                <div>
+                  <span>Pincode</span>
+                  <strong>{postalCode}</strong>
+                </div>
+                <div>
+                  <span>Address</span>
+                  <strong>{address}</strong>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Input label="Full name" value={fullName} onChange={(event) => setFullName(event.target.value)} placeholder="e.g. Julianne Moore" />
+                <Input label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+1 (555) 000-0000" />
+                <Input label="City" value={city} onChange={(event) => setCity(event.target.value)} placeholder="New York" />
+                <Input label="Postal code" value={postalCode} onChange={(event) => setPostalCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="560001" />
+              </>
+            )}
 
             {postalCode ? (
               <div className="checkout-delivery-availability">
@@ -347,7 +479,16 @@ export default function Checkout() {
               </>
             ) : null}
 
-            <Input label="Street address" value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Apartment, suite, unit, etc." multiline rows={4} />
+            {!isUsingDefaultAddress ? (
+              <Input
+                label="Street address"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                placeholder="Apartment, suite, unit, etc."
+                multiline
+                rows={4}
+              />
+            ) : null}
           </div>
         </section>
 

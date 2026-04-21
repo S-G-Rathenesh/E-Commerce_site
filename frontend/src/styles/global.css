@@ -16,8 +16,8 @@
   --shadow-md: 0 10px 24px rgba(15, 23, 42, 0.08);
   --shadow-lg: 0 18px 40px rgba(15, 23, 42, 0.12);
   --radius: 12px;
-  --container: 1400px;
-  --page-gutter: 24px;
+  --container: 100%;
+  --page-gutter: clamp(16px, 2vw, 28px);
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -103,15 +103,15 @@ textarea {
 .shell,
 .container {
   width: 100%;
-  max-width: var(--container);
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   padding-inline: var(--page-gutter);
 }
 
 .admin-container {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 20px;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 
 .section {
@@ -700,7 +700,7 @@ textarea {
 .page-shell {
   display: grid;
   gap: 32px;
-  padding: 0;
+  padding: clamp(4px, 0.8vw, 12px);
 }
 
 .page-header {
@@ -1038,7 +1038,7 @@ textarea {
 .section-card,
 .panel,
 .card {
-  padding: 16px;
+  padding: clamp(20px, 1.8vw, 30px);
 }
 
 .section-card,
@@ -3644,6 +3644,12 @@ textarea.field:focus {
   display: grid;
   gap: 10px;
   margin-top: 8px;
+}
+
+.checkout-address-source {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
 }
 
 .checkout-section-label {

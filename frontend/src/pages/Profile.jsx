@@ -3,8 +3,20 @@ import PageWrapper from '../components/PageWrapper'
 import { getStoredUser } from '../utils/auth'
 import { useEffect, useState } from 'react'
 import Input from '../components/Input'
+import { clearSavedDefaultAddress, getSavedDefaultAddress, saveDefaultAddress } from '../utils/profileAddress'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+const API_FALLBACK_BASE = API_BASE.includes('127.0.0.1') ? API_BASE.replace('127.0.0.1', 'localhost') : ''
+const API_CANDIDATES = Array.from(
+  new Set(
+    [
+      API_BASE,
+      API_FALLBACK_BASE,
+      'http://127.0.0.1:8000',
+      'http://localhost:8000',
+    ].filter(Boolean),
+  ),
+)
 
 function normalizeRole(role) {
   const next = String(role || '').trim().toLowerCase()
@@ -34,6 +46,16 @@ export default function Profile() {
   const [loading, setLoading] = useState(false)
   const [showAddForm, setShowAddForm] = useState(false)
   const [selectedMethod, setSelectedMethod] = useState(null)
+  const [addressForm, setAddressForm] = useState({
+    fullName: '',
+    phone: '',
+    city: '',
+    postalCode: '',
+    addressLine: '',
+  })
+  const [savedAddress, setSavedAddress] = useState(null)
+  const [editingAddress, setEditingAddress] = useState(true)
+  const [addressMessage, setAddressMessage] = useState('')
   const [formData, setFormData] = useState({
     method_type: 'UPI',
     nickname: '',
@@ -48,21 +70,109 @@ export default function Profile() {
 
   useEffect(() => {
     loadPaymentMethods()
+    const existingAddress = getSavedDefaultAddress(currentUser)
+    if (existingAddress) {
+      setSavedAddress(existingAddress)
+      setAddressForm(existingAddress)
+      setEditingAddress(false)
+    } else {
+      setAddressForm((previous) => ({
+        ...previous,
+        fullName: displayName === 'My profile' ? '' : displayName,
+      }))
+      setEditingAddress(true)
+    }
   }, [])
+
+  function updateAddressForm(field, value) {
+    setAddressForm((previous) => ({
+      ...previous,
+      [field]: field === 'postalCode' ? String(value || '').replace(/\D/g, '').slice(0, 6) : value,
+    }))
+  }
+
+  function validateAddressForm() {
+    if (!addressForm.fullName.trim()) {
+      return 'Please enter full name.'
+    }
+    if (String(addressForm.phone || '').replace(/\D/g, '').length < 10) {
+      return 'Please enter a valid phone number.'
+    }
+    if (!addressForm.city.trim()) {
+      return 'Please enter city.'
+    }
+    if (String(addressForm.postalCode || '').trim().length !== 6) {
+      return 'Please enter a valid 6-digit postal code.'
+    }
+    if (!addressForm.addressLine.trim()) {
+      return 'Please enter street address.'
+    }
+    return ''
+  }
+
+  function handleSaveDefaultAddress() {
+    const validationError = validateAddressForm()
+    if (validationError) {
+      setAddressMessage(validationError)
+      return
+    }
+
+    const saved = saveDefaultAddress(currentUser, addressForm)
+    setSavedAddress(saved)
+    setAddressForm(saved)
+    setEditingAddress(false)
+    setAddressMessage('Default address saved. Checkout will let you use this directly.')
+  }
+
+  function handleEditAddress() {
+    setAddressForm(savedAddress || addressForm)
+    setEditingAddress(true)
+    setAddressMessage('')
+  }
+
+  function handleCancelAddressEdit() {
+    if (savedAddress) {
+      setAddressForm(savedAddress)
+      setEditingAddress(false)
+    }
+    setAddressMessage('')
+  }
+
+  function handleClearSavedAddress() {
+    clearSavedDefaultAddress(currentUser)
+    setSavedAddress(null)
+    setAddressForm({ fullName: '', phone: '', city: '', postalCode: '', addressLine: '' })
+    setEditingAddress(true)
+    setAddressMessage('Saved default address removed.')
+  }
 
   async function loadPaymentMethods() {
     try {
       setLoading(true)
       const token = localStorage.getItem('auth_token')
-      const response = await fetch(`${API_BASE}/payment-methods`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setPaymentMethods(data.payment_methods || [])
+      for (const baseUrl of API_CANDIDATES) {
+        try {
+          const response = await fetch(`${baseUrl}/payment-methods`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          if (response.ok) {
+            const data = await response.json()
+            setPaymentMethods(data.payment_methods || [])
+            return
+          }
+          if (response.status < 500) {
+            setPaymentMethods([])
+            return
+          }
+        } catch (error) {
+          if (baseUrl === API_CANDIDATES[API_CANDIDATES.length - 1]) {
+            console.error('Failed to load payment methods:', error)
+          }
+        }
       }
     } catch (error) {
       console.error('Failed to load payment methods:', error)
+      setPaymentMethods([])
     } finally {
       setLoading(false)
     }
@@ -197,6 +307,87 @@ export default function Profile() {
         </div>
       </section>
 
+      <section className="section-card panel-stack">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Checkout shortcut</p>
+            <h3>Default shipping address</h3>
+          </div>
+          {savedAddress && !editingAddress ? (
+            <div className="row-gap">
+              <Button variant="secondary" onClick={handleEditAddress}>Edit</Button>
+              <Button variant="secondary" onClick={handleClearSavedAddress}>Clear</Button>
+            </div>
+          ) : null}
+        </div>
+
+        {!editingAddress && savedAddress ? (
+          <div className="checkout-summary-breakdown">
+            <div>
+              <span>Name</span>
+              <strong>{savedAddress.fullName}</strong>
+            </div>
+            <div>
+              <span>Phone</span>
+              <strong>{savedAddress.phone}</strong>
+            </div>
+            <div>
+              <span>City</span>
+              <strong>{savedAddress.city}</strong>
+            </div>
+            <div>
+              <span>Pincode</span>
+              <strong>{savedAddress.postalCode}</strong>
+            </div>
+            <div>
+              <span>Address</span>
+              <strong>{savedAddress.addressLine}</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="form-grid">
+            <Input
+              label="Full name"
+              value={addressForm.fullName}
+              onChange={(event) => updateAddressForm('fullName', event.target.value)}
+              placeholder="e.g. Julianne Moore"
+            />
+            <Input
+              label="Phone number"
+              value={addressForm.phone}
+              onChange={(event) => updateAddressForm('phone', event.target.value)}
+              placeholder="+91 98765 43210"
+            />
+            <Input
+              label="City"
+              value={addressForm.city}
+              onChange={(event) => updateAddressForm('city', event.target.value)}
+              placeholder="Bengaluru"
+            />
+            <Input
+              label="Postal code"
+              value={addressForm.postalCode}
+              onChange={(event) => updateAddressForm('postalCode', event.target.value)}
+              placeholder="560001"
+            />
+            <Input
+              label="Street address"
+              value={addressForm.addressLine}
+              onChange={(event) => updateAddressForm('addressLine', event.target.value)}
+              placeholder="Apartment, suite, unit, etc."
+              multiline
+              rows={3}
+            />
+            <div className="row-gap">
+              <Button variant="primary" onClick={handleSaveDefaultAddress}>Save address</Button>
+              {savedAddress ? <Button variant="secondary" onClick={handleCancelAddressEdit}>Cancel</Button> : null}
+            </div>
+          </div>
+        )}
+
+        {addressMessage ? <p className="wishlist-message">{addressMessage}</p> : null}
+      </section>
+
       {/* Payment Methods Section */}
       <section className="section-card panel-stack">
         <div className="section-head">
@@ -246,7 +437,7 @@ export default function Profile() {
             <Input
               label="Nickname (optional)"
               value={formData.nickname}
-              onChange={(value) => setFormData({ ...formData, nickname: value })}
+              onChange={(event) => setFormData({ ...formData, nickname: event.target.value })}
               placeholder="e.g., My UPI, Office Card"
             />
 
@@ -254,7 +445,7 @@ export default function Profile() {
               <Input
                 label="UPI ID"
                 value={formData.upi_id}
-                onChange={(value) => setFormData({ ...formData, upi_id: value })}
+                onChange={(event) => setFormData({ ...formData, upi_id: event.target.value })}
                 placeholder="name@bankname"
                 required
               />
@@ -265,7 +456,7 @@ export default function Profile() {
                 <Input
                   label="Card Number"
                   value={formData.card_number}
-                  onChange={(value) => setFormData({ ...formData, card_number: value.replace(/\D/g, '') })}
+                  onChange={(event) => setFormData({ ...formData, card_number: event.target.value.replace(/\D/g, '') })}
                   placeholder="1234 5678 9012 3456"
                   maxLength="19"
                   required
@@ -273,14 +464,14 @@ export default function Profile() {
                 <Input
                   label="Card Holder Name"
                   value={formData.card_holder_name}
-                  onChange={(value) => setFormData({ ...formData, card_holder_name: value })}
+                  onChange={(event) => setFormData({ ...formData, card_holder_name: event.target.value })}
                   placeholder="John Doe"
                   required
                 />
                 <Input
                   label="Expiry (MM/YY)"
                   value={formData.card_expiry}
-                  onChange={(value) => setFormData({ ...formData, card_expiry: value })}
+                  onChange={(event) => setFormData({ ...formData, card_expiry: event.target.value })}
                   placeholder="12/25"
                   maxLength="5"
                   required
@@ -292,7 +483,7 @@ export default function Profile() {
               <Input
                 label="Bank Name"
                 value={formData.bank_name}
-                onChange={(value) => setFormData({ ...formData, bank_name: value })}
+                onChange={(event) => setFormData({ ...formData, bank_name: event.target.value })}
                 placeholder="HDFC Bank"
                 required
               />
