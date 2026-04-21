@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { getFinalDeliveryCharge } from '../utils/shipping'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const PINCODE_STORAGE_KEY = 'delivery-pincode'
@@ -32,7 +33,7 @@ const writeCache = (cacheMap) => {
   }
 }
 
-export default function DeliveryEstimate({ productId, currentUser }) {
+export default function DeliveryEstimate({ productId, currentUser, orderTotal = 0 }) {
   const userSavedPincode = sanitizePincode(currentUser?.pincode || '')
   const localSavedPincode = sanitizePincode(localStorage.getItem(PINCODE_STORAGE_KEY) || '')
   const initialPincode = userSavedPincode || localSavedPincode
@@ -72,6 +73,7 @@ export default function DeliveryEstimate({ productId, currentUser }) {
     validationError || (requestError?.requestKey === currentRequestKey ? requestError.message : '')
   const showDelivery = !validationError && Boolean(effectiveDelivery)
   const isDeliverable = showDelivery ? effectiveDelivery.delivery_available !== false : false
+  const finalDeliveryCharge = getFinalDeliveryCharge(orderTotal)
 
   useEffect(() => {
     if (!productId) {
@@ -166,7 +168,13 @@ export default function DeliveryEstimate({ productId, currentUser }) {
           </p>
           <p className="detail-delivery-line">📍 {effectiveDelivery.location_text || `Delivering to ${pincodeInput}`}</p>
           {isDeliverable ? <p className="detail-delivery-line">🚚 {effectiveDelivery.delivery_hint || effectiveDelivery.delivery_text}</p> : null}
-          {isDeliverable ? <p className="detail-delivery-line">✔ Free Delivery</p> : null}
+          {isDeliverable ? (
+            <>
+              <p className="detail-delivery-line">
+                {finalDeliveryCharge === 0 ? 'Delivery: FREE' : 'Delivery ₹49'}
+              </p>
+            </>
+          ) : null}
           {isDeliverable && effectiveDelivery.order_within_text ? <p className="detail-delivery-meta">{effectiveDelivery.order_within_text}</p> : null}
         </div>
       ) : null}

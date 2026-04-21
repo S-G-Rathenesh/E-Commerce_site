@@ -172,6 +172,14 @@ textarea {
   align-items: center;
 }
 
+.nav-staff-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+  text-transform: uppercase;
+}
+
 .navbar-retail {
   gap: 18px;
   flex-wrap: nowrap;
@@ -425,6 +433,66 @@ textarea {
   gap: 12px;
 }
 
+.nav-staff-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.staff-notification-wrap {
+  position: relative;
+}
+
+.staff-icon-button {
+  min-width: 146px;
+  justify-content: center;
+}
+
+.staff-dropdown {
+  min-width: 320px;
+  max-width: 360px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.staff-dropdown-open {
+  display: block !important;
+}
+
+.staff-notification-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.staff-notification-item:last-child {
+  border-bottom: 0;
+}
+
+.staff-notification-item p {
+  color: var(--ink);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.staff-notification-item small {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.staff-notification-unread {
+  background: rgba(15, 98, 254, 0.05);
+}
+
+.staff-notification-read {
+  opacity: 0.72;
+}
+
+.staff-dropdown-empty {
+  padding: 16px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
 .profile-menu {
   position: relative;
   cursor: pointer;
@@ -466,6 +534,19 @@ textarea {
   white-space: nowrap;
 }
 
+.profile-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(15, 98, 254, 0.1);
+  color: var(--brand-dark);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .dropdown-icon {
   font-size: 11px;
   line-height: 1;
@@ -484,6 +565,10 @@ textarea {
   border: 1px solid var(--border-soft);
   display: none;
   z-index: 1000;
+}
+
+.nav-staff-actions .dropdown-menu {
+  min-width: 180px;
 }
 
 .profile-menu:hover .dropdown-menu,
@@ -3070,6 +3155,18 @@ textarea {
 
   .nav-search,
   .nav-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .nav-staff-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .staff-icon-button {
+    min-width: 0;
     width: 100%;
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { products as seedProducts } from '../data/products'
-import { buildAuthHeaders, clearStoredUser, getStoredUser } from '../utils/auth'
+import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -42,10 +42,16 @@ export default function Navbar() {
   const [isCartPulse, setIsCartPulse] = useState(false)
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0)
   const [pendingReturnsCount, setPendingReturnsCount] = useState(0)
+  const [notifications, setNotifications] = useState([])
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [staffStatus, setStaffStatus] = useState(String(getStoredUser()?.staff_status || 'ONLINE').toUpperCase())
   const navigate = useNavigate()
   const location = useLocation()
   const closeMenuTimerRef = useRef(null)
   const cartPulseTimerRef = useRef(null)
+  const notificationsMenuRef = useRef(null)
+  const profileMenuRef = useRef(null)
 
   const loadApprovalsCount = async () => {
     const role = normalizeRole(getStoredUser()?.role)
@@ -92,6 +98,23 @@ export default function Navbar() {
       setPendingReturnsCount(returns.length)
     } catch {
       setPendingReturnsCount(0)
+    }
+  }
+
+  const loadNotifications = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/notifications/my`, {
+        headers: buildAuthHeaders(),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setNotifications([])
+        return
+      }
+
+      setNotifications(Array.isArray(data?.notifications) ? data.notifications : [])
+    } catch {
+      setNotifications([])
     }
   }
 
@@ -191,11 +214,16 @@ export default function Navbar() {
       loadReturnsCount()
     }
 
+    const onNotificationsChanged = () => {
+      loadNotifications()
+    }
+
     window.addEventListener('auth-changed', syncAuth)
     window.addEventListener('storage', syncAuth)
     window.addEventListener('cart-changed', onCartChanged)
     window.addEventListener('approvals-changed', onApprovalsChanged)
     window.addEventListener('returns-changed', onReturnsChanged)
+    window.addEventListener('notifications-changed', onNotificationsChanged)
 
     return () => {
       window.removeEventListener('auth-changed', syncAuth)
@@ -203,20 +231,38 @@ export default function Navbar() {
       window.removeEventListener('cart-changed', onCartChanged)
       window.removeEventListener('approvals-changed', onApprovalsChanged)
       window.removeEventListener('returns-changed', onReturnsChanged)
+      window.removeEventListener('notifications-changed', onNotificationsChanged)
     }
   }, [])
 
   useEffect(() => {
     loadApprovalsCount()
     loadReturnsCount()
+    loadNotifications()
   }, [currentUser])
 
   const pendingCustomersAttentionCount = pendingApprovalsCount + pendingReturnsCount
+  const unreadNotifications = notifications.filter((note) => !note.is_read).length
+  const staffStatusLabel = staffStatus === 'OFFLINE' ? 'Offline' : 'Online'
 
   useEffect(() => {
     closeMegaMenu()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.search])
+
+  useEffect(() => {
+    const handlePointerDown = (event) => {
+      if (notificationsMenuRef.current && !notificationsMenuRef.current.contains(event.target)) {
+        setNotificationsOpen(false)
+      }
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) {
+        setProfileMenuOpen(false)
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    return () => window.removeEventListener('pointerdown', handlePointerDown)
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -243,6 +289,29 @@ export default function Navbar() {
   const handleLogout = () => {
     clearStoredUser()
     navigate('/login')
+  }
+
+  const handleStaffStatusChange = (value) => {
+    const nextStatus = String(value || 'ONLINE').toUpperCase()
+    setStaffStatus(nextStatus)
+    const nextUser = {
+      ...(currentUser || {}),
+      staff_status: nextStatus,
+    }
+    setCurrentUser(nextUser)
+    setStoredUser(nextUser)
+  }
+
+  const markNotificationsRead = async () => {
+    try {
+      await fetch(`${API_BASE}/notifications/mark-all-read`, {
+        method: 'PUT',
+        headers: buildAuthHeaders(),
+      })
+      window.dispatchEvent(new Event('notifications-changed'))
+    } catch {
+      // ignore notification read sync failures
+    }
   }
 
   const handleProtectedNav = (path) => {
@@ -330,14 +399,8 @@ export default function Navbar() {
               </button>
             </div>
           ) : isOperations ? (
-            <div className="nav-links nav-links-retail">
-              <button
-                type="button"
-                className={`nav-link nav-link-retail nav-link-button ${location.pathname === '/operations/dashboard' ? 'active-link' : ''}`}
-                onClick={() => navigate('/operations')}
-              >
-                OPERATIONS DASHBOARD
-              </button>
+            <div className="nav-links nav-links-retail nav-links-operations">
+              <div className="nav-staff-title">OPERATIONS DASHBOARD</div>
             </div>
           ) : (
             <div
@@ -451,7 +514,72 @@ export default function Navbar() {
           )}
 
           <div className="nav-actions">
-            {currentUser && isCustomer ? (
+            {currentUser && isOperations ? (
+              <div className="nav-staff-actions">
+                <div className="staff-notification-wrap" ref={notificationsMenuRef}>
+                  <button
+                    type="button"
+                    className="nav-action staff-icon-button"
+                    onClick={() => {
+                      setNotificationsOpen((current) => !current)
+                      setProfileMenuOpen(false)
+                      void markNotificationsRead()
+                    }}
+                    aria-label="View notifications"
+                    aria-expanded={notificationsOpen}
+                  >
+                    <span>🔔</span>
+                    <small>Notifications</small>
+                    {unreadNotifications > 0 ? <span className="nav-badge">{unreadNotifications}</span> : null}
+                  </button>
+
+                  <div className={`dropdown-menu staff-dropdown ${notificationsOpen ? 'staff-dropdown-open' : ''}`} role="menu" aria-label="Notifications">
+                    {notifications.length > 0 ? (
+                      notifications.slice(0, 5).map((note) => (
+                        <div key={note.id} className={`staff-notification-item ${note.is_read ? 'staff-notification-read' : 'staff-notification-unread'}`}>
+                          <p>{note.message}</p>
+                          <small>{note.created_at ? new Date(note.created_at).toLocaleString() : 'Just now'}</small>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="staff-dropdown-empty">No notifications</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="profile-menu" ref={profileMenuRef}>
+                  <button
+                    type="button"
+                    className="nav-action profile-trigger"
+                    aria-haspopup="menu"
+                    aria-label="Open operations profile menu"
+                    onClick={() => {
+                      setProfileMenuOpen((current) => !current)
+                      setNotificationsOpen(false)
+                    }}
+                  >
+                    <span className="profile-name">👤 {displayName}</span>
+                    <span className="profile-status">{staffStatusLabel}</span>
+                    <span className="dropdown-icon" aria-hidden="true">▼</span>
+                  </button>
+
+                  <div className={`dropdown-menu ${profileMenuOpen ? 'staff-dropdown-open' : ''}`} role="menu" aria-label="Operations profile menu">
+                    <button type="button" role="menuitem" onClick={() => navigate('/operations/dashboard')}>
+                      Profile
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => handleStaffStatusChange('ONLINE')}>
+                      Set status: Online
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => handleStaffStatusChange('OFFLINE')}>
+                      Set status: Offline
+                    </button>
+                    <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                      Logout
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : currentUser && isCustomer ? (
               <div className="profile-menu">
                 <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open profile menu">
                   <span className="profile-name">👤 {displayName}</span>
@@ -492,16 +620,27 @@ export default function Navbar() {
                   </button>
                 </div>
               </div>
+            ) : currentUser && isDelivery ? (
+              <div className="profile-menu">
+                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open delivery profile menu">
+                  <span className="profile-name">👤 {displayName}</span>
+                  <span className="dropdown-icon" aria-hidden="true">▼</span>
+                </button>
+
+                <div className="dropdown-menu" role="menu" aria-label="Delivery profile menu">
+                  <button type="button" role="menuitem" onClick={() => navigate('/delivery/dashboard')}>
+                    Dashboard
+                  </button>
+                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                    Logout
+                  </button>
+                </div>
+              </div>
             ) : currentUser ? (
               <>
                 <span className="nav-user-name" title={currentUser.email}>
                   {displayName}
                 </span>
-                {isDelivery ? (
-                  <button type="button" className="nav-action" onClick={() => handleProtectedNav('/delivery/dashboard')}>
-                    <small>Dashboard</small>
-                  </button>
-                ) : null}
                 <button type="button" className="nav-action" onClick={handleLogout}>
                   <small>Logout</small>
                 </button>
@@ -516,7 +655,7 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            {isAdmin || isDelivery ? null : (
+            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <>
                 <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>

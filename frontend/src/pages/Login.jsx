@@ -53,7 +53,6 @@ export default function Login() {
   const [message, setMessage] = useState('')
   const [needsSignup, setNeedsSignup] = useState(false)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
-  const [selectedDemoRole, setSelectedDemoRole] = useState('')
   const [isAutofillAnimating, setIsAutofillAnimating] = useState(false)
   const autofillTimerRef = useRef(null)
   const navigate = useNavigate()
@@ -143,14 +142,7 @@ export default function Login() {
     await loginWithCredentials(email, password)
   }
 
-  function handleDemoRoleChange(event) {
-    const nextRole = event.target.value
-    setSelectedDemoRole(nextRole)
-    applyDemoCredentials(getDemoAccountByRole(nextRole))
-  }
-
   function handleDemoRoleClick(role) {
-    setSelectedDemoRole(role)
     applyDemoCredentials(getDemoAccountByRole(role))
   }
 
@@ -216,24 +208,6 @@ export default function Login() {
           <div className="login-demo-accounts" aria-label="Demo testing accounts">
             <p className="eyebrow">Demo Accounts (Testing)</p>
             <div className="login-demo-controls">
-              <label htmlFor="quick-demo-access" className="field-label">
-                Quick Demo Access
-              </label>
-              <select
-                id="quick-demo-access"
-                className="field"
-                value={selectedDemoRole}
-                onChange={handleDemoRoleChange}
-                aria-label="Quick Demo Access"
-              >
-                <option value="">Select a role</option>
-                {DEMO_LOGIN_ACCOUNTS.map((account) => (
-                  <option key={account.role} value={account.role}>
-                    {account.label}
-                  </option>
-                ))}
-              </select>
-
               <p className="auth-switch-text">
                 Quick fill:{' '}
                 {DEMO_LOGIN_ACCOUNTS.map((account, index) => (
