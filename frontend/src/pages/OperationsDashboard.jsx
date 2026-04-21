@@ -61,6 +61,7 @@ export default function OperationsDashboard() {
 
   return (
     <PageWrapper
+      className="page-operations"
       eyebrow="Operations"
       title="Operations dashboard"
       description="Monitor operational workflows and support teams from a centralized staff view."

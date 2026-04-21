@@ -284,7 +284,7 @@ export default function MerchantRegister() {
   const isLastSection = activeSection === merchantSections.length - 1
 
   return (
-    <div className="auth-shell">
+    <div className="auth-shell auth-shell-merchant">
       <section className="auth-portal auth-portal-long" aria-label="Merchant account registration portal">
         <aside className="auth-portal-hero auth-portal-hero-signup">
           <div className="auth-hero-head">

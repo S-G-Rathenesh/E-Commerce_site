@@ -147,7 +147,7 @@ export default function Login() {
   }
 
   return (
-    <div className="auth-shell">
+    <div className="auth-shell auth-shell-customer">
       <section className="auth-portal" aria-label="Account login portal">
         <aside className="auth-portal-hero">
           <div className="auth-hero-head">

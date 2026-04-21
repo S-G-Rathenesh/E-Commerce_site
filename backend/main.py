@@ -6,12 +6,13 @@ from typing import Callable
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+import json
 import mongomock
 from pymongo import MongoClient
 from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
@@ -19,6 +20,43 @@ from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
 load_dotenv()
 
 app = FastAPI(title='Digital Atelier API')
+
+# WebSocket Manager for Real-Time Order Updates
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
+    
+    async def connect(self, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
+    
+    async def disconnect(self, user_id: str, websocket: WebSocket):
+        if user_id in self.active_connections:
+            self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+    
+    async def broadcast_to_user(self, user_id: str, message: dict):
+        if user_id in self.active_connections:
+            disconnected = []
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    disconnected.append(connection)
+            
+            for conn in disconnected:
+                await self.disconnect(user_id, conn)
+    
+    async def broadcast_to_role(self, role: str, message: dict):
+        """Broadcast to all users with a specific role"""
+        from pymongo import MongoClient
+        # This will be implemented after mongo_client is available
+        pass
+
+manager = ConnectionManager()
 
 app.add_middleware(
     CORSMiddleware,
@@ -205,6 +243,40 @@ class UpdateOrderStatusRequest(BaseModel):
     current_location: str | None = None
 
 
+class OrderStatusHistoryEntry(BaseModel):
+    status: str
+    timestamp: str
+    performed_by: str
+    performer_role: str
+    performer_email: str
+    location: str | None = None
+
+
+class OrderStatusUpdateEvent(BaseModel):
+    event_type: str = "order_status_updated"
+    order_id: str
+    new_status: str
+    previous_status: str
+    timestamp: str
+    performed_by: str
+    performer_role: str
+    performer_email: str
+    location: str | None = None
+    message: str | None = None
+
+
+class NotificationPayload(BaseModel):
+    id: str
+    event_type: str
+    order_id: str
+    user_id: str | None
+    message: str
+    is_read: bool
+    created_at: str
+    title: str | None = None
+    timestamp: str | None = None
+
+
 class PaymentUpdateRequest(BaseModel):
     status: str
 
@@ -227,6 +299,11 @@ class ReturnDecisionRequest(BaseModel):
 
 class CancelOrderRequest(BaseModel):
     reason: str | None = None
+
+
+class PurgeOrdersRequest(BaseModel):
+    delete_all: bool = False
+    statuses: list[str] | None = None
 
 
 class CreateShipmentRequest(BaseModel):
@@ -760,14 +837,16 @@ def can_progress_order(current_status: str, next_status: str) -> bool:
     return next_index == current_index + 1
 
 
-def append_delivery_log(order_id: str, status_value: str, updated_by: str, location: str = '') -> None:
+def append_delivery_log(order_id: str, status_value: str, updated_by: str, location: str = "", performer_role: str = "SYSTEM", performer_email: str = "system@local") -> None:
     delivery_logs_collection.insert_one(
         {
             'id': f"DLOG-{uuid4().hex[:12].upper()}",
             'order_id': order_id,
             'status': normalize_order_status(status_value),
             'updated_by': updated_by,
-            'location': location,
+            'performer_role': performer_role,
+            'performer_email': performer_email,
+            'location': location.strip() if location else "",
             'timestamp': now_utc(),
         }
     )
@@ -887,26 +966,77 @@ def build_initial_status_timestamps(initial_status: str) -> dict:
     return {normalized: now_utc().isoformat()}
 
 
-def append_status_timestamp(order_id: str, status_value: str) -> None:
+def append_status_timestamp(order_id: str, status_value: str, performed_by: str = "system", performer_role: str = "SYSTEM", performer_email: str = "system@local", location: str = "") -> None:
     normalized = normalize_order_status(status_value)
+    timestamp_entry = {
+        'status': normalized,
+        'timestamp': now_utc().isoformat(),
+        'performed_by': performed_by,
+        'performer_role': performer_role,
+        'performer_email': performer_email,
+        'location': location.strip() if location else "",
+    }
+    
     orders_collection.update_one(
         {'order_id': order_id},
-        {'$set': {f'status_timestamps.{normalized}': now_utc().isoformat()}},
-    )
-
-
-def create_notification(event_type: str, order_id: str, message: str, user_id: str | None = None) -> None:
-    notifications_collection.insert_one(
         {
-            'id': f"NOTIF-{uuid4().hex[:12].upper()}",
-            'event_type': str(event_type or '').strip().upper(),
-            'order_id': order_id,
-            'user_id': user_id,
-            'message': message,
-            'is_read': False,
-            'created_at': now_utc(),
-        }
+            '$set': {f'status_timestamps.{normalized}': now_utc().isoformat()},
+            '$push': {'status_history': timestamp_entry}
+        },
     )
+
+
+def create_notification(
+    event_type: str, 
+    order_id: str, 
+    message: str, 
+    user_id: str | None = None,
+    title: str | None = None
+) -> None:
+    """Create notification and emit WebSocket event"""
+    notification = {
+        'id': f"NOTIF-{uuid4().hex[:12].upper()}",
+        'event_type': str(event_type or '').strip().upper(),
+        'order_id': order_id,
+        'user_id': user_id,
+        'message': message,
+        'title': title or generate_notification_title(event_type),
+        'is_read': False,
+        'created_at': now_utc().isoformat(),
+    }
+    
+    notifications_collection.insert_one(notification)
+    
+    # Emit WebSocket event if user is connected
+    if user_id:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(manager.broadcast_to_user(user_id, {
+                    "type": "notification",
+                    "data": notification
+                }))
+        except:
+            pass
+
+
+def generate_notification_title(event_type: str) -> str:
+    """Generate notification title based on event type"""
+    titles = {
+        'PLACED': '✅ Order Confirmed',
+        'CONFIRMED': '📦 Order Confirmed',
+        'PACKED': '📦 Order Packed',
+        'SHIPPED': '🚚 Order Shipped',
+        'OUT_FOR_DELIVERY': '🚚 Out for Delivery',
+        'DELIVERED': '✅ Order Delivered',
+        'CANCELLED': '❌ Order Cancelled',
+        'DELIVERY_FAILED': '⚠️ Delivery Failed',
+        'ORDER_PLACED': '📝 Order Placed',
+        'PAYMENT_FAILED': '💳 Payment Failed',
+        'RETURN_REQUESTED': '🔄 Return Requested',
+    }
+    return titles.get(event_type, 'Order Update')
 
 
 def serialize_payment_for_order(order_id: str) -> dict | None:
@@ -2458,7 +2588,14 @@ def check_delivery_serviceability(
     }
 
 
-def apply_order_status_update(order: dict, next_status: str, actor_id: str, location: str = '') -> dict:
+def apply_order_status_update(
+    order: dict, 
+    next_status: str, 
+    actor_id: str, 
+    location: str = '',
+    performer_role: str = 'SYSTEM',
+    performer_email: str = 'system@local'
+) -> dict:
     current_status = normalize_order_status(order.get('status', 'PLACED'))
     target_status = normalize_order_status(next_status)
 
@@ -2477,16 +2614,56 @@ def apply_order_status_update(order: dict, next_status: str, actor_id: str, loca
             }
         },
     )
-    append_status_timestamp(order['order_id'], target_status)
-    append_delivery_log(order['order_id'], target_status, actor_id, location=location)
+    append_status_timestamp(
+        order['order_id'], 
+        target_status,
+        performed_by=actor_id,
+        performer_role=performer_role,
+        performer_email=performer_email,
+        location=location
+    )
+    append_delivery_log(
+        order['order_id'], 
+        target_status, 
+        actor_id,
+        location=location,
+        performer_role=performer_role,
+        performer_email=performer_email
+    )
 
     customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip() or None
+    
+    # Create notification with title
+    message = get_status_message(target_status)
     create_notification(
         event_type=target_status,
         order_id=order['order_id'],
-        message=f"Order {order['order_id']} moved to {target_status.replace('_', ' ')}.",
+        message=message,
         user_id=customer_id,
     )
+    
+    # Emit WebSocket event for real-time update
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running() and customer_id:
+            event_data = {
+                "type": "order_status_updated",
+                "data": {
+                    "order_id": order['order_id'],
+                    "previous_status": current_status,
+                    "new_status": target_status,
+                    "timestamp": now_utc().isoformat(),
+                    "performed_by": actor_id,
+                    "performer_role": performer_role,
+                    "performer_email": performer_email,
+                    "location": location,
+                    "message": message,
+                }
+            }
+            asyncio.create_task(manager.broadcast_to_user(customer_id, event_data))
+    except:
+        pass
 
     if target_status == 'PACKED':
         # Real-world style automation: packed orders are eligible for immediate shipment generation.
@@ -2513,6 +2690,21 @@ def apply_order_status_update(order: dict, next_status: str, actor_id: str, loca
 
     latest = orders_collection.find_one({'order_id': order['order_id']})
     return latest
+
+
+def get_status_message(status: str) -> str:
+    """Get customer-friendly message for status"""
+    messages = {
+        'PLACED': 'Your order has been placed successfully! 📝',
+        'CONFIRMED': 'Your order is confirmed! ✅',
+        'PACKED': 'Your order is being packed. 📦',
+        'SHIPPED': 'Your order has been shipped! 🚚',
+        'OUT_FOR_DELIVERY': 'Your order is out for delivery! 📍',
+        'DELIVERED': 'Your order has been delivered successfully! 🎉',
+        'CANCELLED': 'Your order has been cancelled.',
+        'DELIVERY_FAILED': 'Delivery attempt failed. We will try again soon.',
+    }
+    return messages.get(status, f'Order status updated to {status.replace("_", " ")}')
 
 
 @app.post('/orders')
@@ -2621,6 +2813,8 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                     'CONFIRMED',
                     str(current_user.get('id') or current_user.get('email', 'customer')),
                     location='Payment gateway confirmation',
+                    performer_role='CUSTOMER',
+                    performer_email=current_user.get('email', 'system@local').strip().lower(),
                 )
         else:
             create_notification(
@@ -2638,6 +2832,8 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                 'CONFIRMED',
                 str(current_user.get('id') or current_user.get('email', 'customer')),
                 location='Order confirmation',
+                performer_role='CUSTOMER',
+                performer_email=current_user.get('email', 'system@local').strip().lower(),
             )
 
     latest = orders_collection.find_one({'order_id': order_id})
@@ -2676,6 +2872,85 @@ def get_order_by_id(order_id: str, current_user: dict = Depends(get_current_user
     return {'order': serialize_order(order, include_shipment=True)}
 
 
+@app.websocket('/ws/orders/{user_id}')
+async def websocket_order_updates(websocket: WebSocket, user_id: str):
+    """WebSocket endpoint for real-time order status updates"""
+    try:
+        await manager.connect(user_id, websocket)
+        # Keep connection open and listen for client messages
+        while True:
+            data = await websocket.receive_text()
+            # Optional: handle ping/pong or custom messages from client
+            if data == 'ping':
+                await websocket.send_json({'type': 'pong'})
+    except WebSocketDisconnect:
+        await manager.disconnect(user_id, websocket)
+    except Exception as e:
+        try:
+            await manager.disconnect(user_id, websocket)
+        except:
+            pass
+
+
+@app.get('/orders/{order_id}/tracking-status')
+def get_order_tracking_status(order_id: str, current_user: dict = Depends(get_current_user)):
+    """Get detailed order tracking information with status history"""
+    order = orders_collection.find_one({'order_id': order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+    
+    # Verify access
+    actor_email = str(current_user.get('email', '')).strip().lower()
+    actor_id = str(current_user.get('id', '')).strip()
+    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    
+    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
+    is_delivery_assignee = order.get('assigned_delivery_partner') == actor_email or order.get('assigned_delivery_id') == actor_id
+    is_staff = actor_role in {'ADMIN', 'OPERATIONS_STAFF', 'MERCHANT'}
+    
+    if actor_role == 'CUSTOMER' and not is_owner:
+        raise HTTPException(status_code=403, detail='Access denied.')
+    if actor_role == 'DELIVERY_ASSOCIATE' and not is_delivery_assignee and not is_staff:
+        raise HTTPException(status_code=403, detail='Access denied.')
+    
+    # Get status history
+    status_history = order.get('status_history', [])
+    
+    # Get delivery logs
+    delivery_logs = list(delivery_logs_collection.find({'order_id': order_id}).sort('timestamp', 1))
+    
+    return {
+        'order_id': order_id,
+        'current_status': normalize_order_status(order.get('status', 'PLACED')),
+        'status_history': [
+            {
+                'status': h.get('status'),
+                'timestamp': h.get('timestamp'),
+                'performed_by': h.get('performed_by'),
+                'performer_role': h.get('performer_role'),
+                'performer_email': h.get('performer_email'),
+                'location': h.get('location'),
+            }
+            for h in status_history
+        ],
+        'delivery_logs': [
+            {
+                'id': log.get('id'),
+                'status': log.get('status'),
+                'timestamp': log.get('timestamp').isoformat() if isinstance(log.get('timestamp'), datetime) else log.get('timestamp'),
+                'updated_by': log.get('updated_by'),
+                'performer_role': log.get('performer_role'),
+                'performer_email': log.get('performer_email'),
+                'location': log.get('location'),
+            }
+            for log in delivery_logs
+        ],
+        'status_timeline_steps': ORDER_STATUS_FLOW,
+        'created_at': order.get('created_at').isoformat() if isinstance(order.get('created_at'), datetime) else order.get('created_at'),
+        'updated_at': order.get('updated_at').isoformat() if isinstance(order.get('updated_at'), datetime) else order.get('updated_at'),
+    }
+
+
 @app.put('/orders/{order_id}/status')
 def update_order_status(
     order_id: str,
@@ -2689,6 +2964,7 @@ def update_order_status(
     actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
     target_status = normalize_order_status(payload.status)
     actor_id = current_user.get('id') or current_user.get('email', 'system')
+    performer_email = current_user.get('email', 'system@local').strip().lower()
 
     if actor_role == 'OPERATIONS_STAFF':
         if target_status not in OPERATIONS_ALLOWED_STATES:
@@ -2704,7 +2980,14 @@ def update_order_status(
     else:
         raise HTTPException(status_code=403, detail='Only staff can update order statuses.')
 
-    latest = apply_order_status_update(order, target_status, str(actor_id), location=(payload.current_location or '').strip())
+    latest = apply_order_status_update(
+        order, 
+        target_status, 
+        str(actor_id),
+        location=(payload.current_location or '').strip(),
+        performer_role=actor_role,
+        performer_email=performer_email
+    )
     return {'message': f'Order moved to {target_status}.', 'order': serialize_order(latest, include_shipment=True)}
 
 
@@ -2713,6 +2996,71 @@ def get_admin_orders(current_user: dict = Depends(require_roles('admin', 'mercha
     _ = current_user
     orders = list(orders_collection.find().sort('created_at', -1))
     return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+
+
+@app.post('/admin/orders/purge')
+def purge_orders(
+    payload: PurgeOrdersRequest,
+    current_user: dict = Depends(require_roles('admin', 'merchant')),
+):
+    _ = current_user
+
+    requested_statuses = [str(value or '').strip().upper() for value in (payload.statuses or []) if str(value or '').strip()]
+    normalized_statuses = []
+    for status_value in requested_statuses:
+        if status_value == 'COMPLETED':
+            normalized_statuses.append('DELIVERED')
+            continue
+        normalized_statuses.append(normalize_order_status(status_value, fallback=status_value))
+    normalized_statuses = sorted(set(normalized_statuses))
+
+    delete_all = bool(payload.delete_all)
+    if not delete_all and not normalized_statuses:
+        raise HTTPException(status_code=400, detail='Provide statuses or set delete_all=true.')
+
+    query = {} if delete_all else {'status': {'$in': normalized_statuses}}
+    orders = list(orders_collection.find(query, {'_id': 0, 'order_id': 1, 'shipment_id': 1, 'status': 1}))
+    order_ids = [order.get('order_id') for order in orders if order.get('order_id')]
+
+    deleted = {
+        'orders': 0,
+        'order_items': 0,
+        'delivery_logs': 0,
+        'payments': 0,
+        'returns': 0,
+        'notifications': 0,
+        'shipment_items': 0,
+        'shipments': 0,
+    }
+
+    if order_ids:
+        deleted['order_items'] = order_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['delivery_logs'] = delivery_logs_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['payments'] = payments_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['returns'] = returns_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['notifications'] = notifications_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['shipment_items'] = shipment_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['orders'] = orders_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+
+    orphaned_shipments = []
+    for shipment in shipments_collection.find({}, {'_id': 0, 'shipment_id': 1}):
+        shipment_id = shipment.get('shipment_id')
+        if not shipment_id:
+            continue
+        if shipment_items_collection.count_documents({'shipment_id': shipment_id}) == 0:
+            orphaned_shipments.append(shipment_id)
+
+    if orphaned_shipments:
+        deleted['shipments'] = shipments_collection.delete_many({'shipment_id': {'$in': orphaned_shipments}}).deleted_count
+
+    return {
+        'message': 'Orders purged successfully.',
+        'delete_all': delete_all,
+        'requested_statuses': requested_statuses,
+        'normalized_statuses': normalized_statuses,
+        'matched_orders': len(order_ids),
+        'deleted': deleted,
+    }
 
 
 @app.get('/operations/orders')
@@ -2836,6 +3184,8 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
                     'SHIPPED',
                     str(current_user.get('id') or current_user.get('email', 'admin')),
                     location='Warehouse dispatch',
+                    performer_role=normalize_role(current_user.get('role', 'ADMIN')),
+                    performer_email=current_user.get('email', 'system@local').strip().lower(),
                 )
 
             orders_collection.update_one(
@@ -2930,6 +3280,8 @@ def update_shipment_by_admin(
         status_value,
         str(current_user.get('id') or current_user.get('email', 'admin')),
         location=(payload.current_location or '').strip() or 'Shipment update',
+        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
+        performer_email=current_user.get('email', 'system@local').strip().lower(),
     )
 
     orders_collection.update_one(
@@ -3174,6 +3526,8 @@ def update_delivery_status(
         status_value,
         actor,
         location=location_value,
+        performer_role='DELIVERY_ASSOCIATE',
+        performer_email=email,
     )
 
     orders_collection.update_one(

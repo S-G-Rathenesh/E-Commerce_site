@@ -225,9 +225,9 @@ export default function Checkout() {
   }
 
   return (
-    <PageWrapper eyebrow="Checkout" title="Secure checkout" description="A centered, consistent checkout experience with structured sections and one primary action style.">
+    <PageWrapper className="page-customer page-checkout" eyebrow="Checkout" title="Secure checkout" description="A centered, consistent checkout experience with structured sections and one primary action style.">
       <div className="checkout-grid">
-        <section className="panel panel-stack">
+        <section className="panel panel-stack checkout-form-card">
           <h2>Shipping details</h2>
           <div className="form-grid">
             <Input label="Full name" value={fullName} onChange={(event) => setFullName(event.target.value)} placeholder="e.g. Julianne Moore" />
@@ -236,29 +236,21 @@ export default function Checkout() {
             <Input label="Postal code" value={postalCode} onChange={(event) => setPostalCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="560001" />
 
             {postalCode ? (
-              <div style={{ gridColumn: '1 / -1', marginTop: '-12px' }}>
+              <div className="checkout-delivery-availability">
                 <DeliveryInfo customerPincode={postalCode} orderTotal={total} showDetails={true} />
               </div>
             ) : null}
 
             {savedMethods.length > 0 ? (
-              <div style={{ gridColumn: '1 / -1', marginTop: '12px' }}>
-                <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500', fontSize: '14px' }}>
+              <div className="checkout-saved-methods">
+                <label className="checkout-section-label">
                   Saved Payment Methods
                 </label>
-                <div style={{ display: 'grid', gap: '8px' }}>
+                <div className="checkout-saved-method-list">
                   {savedMethods.map((method) => (
                     <label
                       key={method.id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        padding: '10px',
-                        border: '1px solid #ddd',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        backgroundColor: selectedSavedMethod?.id === method.id ? '#e7f3ff' : '#fff',
-                      }}
+                      className={`checkout-saved-method ${selectedSavedMethod?.id === method.id ? 'checkout-saved-method-active' : ''}`}
                     >
                       <input
                         type="radio"
@@ -268,11 +260,11 @@ export default function Checkout() {
                           setUsingSaved(true)
                           setSelectedSavedMethod(method)
                         }}
-                        style={{ marginRight: '12px', cursor: 'pointer' }}
+                        className="checkout-saved-method-radio"
                       />
-                      <div>
-                        <p style={{ fontWeight: '500', margin: '0 0 4px 0', fontSize: '14px' }}>{method.nickname}</p>
-                        <p style={{ fontSize: '12px', color: '#666', margin: '0' }}>
+                      <div className="checkout-saved-method-details">
+                        <p>{method.nickname}</p>
+                        <p>
                           {method.method_type === 'UPI' && `UPI: ${method.upi_id}`}
                           {method.method_type === 'CARD' && `Card ending in ${method.card_last4}`}
                           {method.method_type === 'NETBANKING' && `${method.bank_name}`}
@@ -282,16 +274,16 @@ export default function Checkout() {
                     </label>
                   ))}
                 </div>
-                <div style={{ borderTop: '1px solid #ddd', marginTop: '8px', paddingTop: '8px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                <div className="checkout-saved-methods-footer">
+                  <label className="checkout-saved-method-toggle">
                     <input
                       type="radio"
                       name="savedMethod"
                       checked={!usingSaved}
                       onChange={() => setUsingSaved(false)}
-                      style={{ marginRight: '12px', cursor: 'pointer' }}
+                      className="checkout-saved-method-radio"
                     />
-                    <span style={{ fontSize: '14px' }}>Use a different payment method</span>
+                    <span>Use a different payment method</span>
                   </label>
                 </div>
               </div>
@@ -348,7 +340,7 @@ export default function Checkout() {
                 ) : null}
 
                 {paymentMethod === 'COD' ? (
-                  <p className="wishlist-message" style={{ marginTop: '-6px' }}>
+                  <p className="wishlist-message checkout-cod-note">
                     You will pay at delivery time.
                   </p>
                 ) : null}
@@ -359,13 +351,25 @@ export default function Checkout() {
           </div>
         </section>
 
-        <aside className="panel panel-stack">
+        <aside className="panel panel-stack checkout-summary-card">
           <h2>Order summary</h2>
-          <div className="summary-row">
-            <p>Subtotal: Rs. {subtotal.toFixed(2)}</p>
-            <p>Discount: -Rs. {discount.toFixed(2)}</p>
-            <p>Shipping: {shippingCharge === 0 ? 'Free' : '₹49'}</p>
-            <p className="detail-price">Total: Rs. {finalTotal.toFixed(2)}</p>
+          <div className="checkout-summary-breakdown">
+            <div>
+              <span>Subtotal</span>
+              <strong>Rs. {subtotal.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span>Discount</span>
+              <strong>-Rs. {discount.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span>Shipping</span>
+              <strong>{shippingCharge === 0 ? 'Free' : '₹49'}</strong>
+            </div>
+            <div className="checkout-summary-total">
+              <span>Total</span>
+              <strong>Rs. {finalTotal.toFixed(2)}</strong>
+            </div>
           </div>
           <Button variant="primary" className="btn-wide" onClick={handlePlaceOrder} disabled={placing}>
             {placing ? 'Placing Order...' : 'Complete Order'}

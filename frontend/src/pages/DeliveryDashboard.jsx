@@ -277,6 +277,7 @@ export default function DeliveryDashboard() {
 
   return (
     <PageWrapper
+      className="page-delivery"
       eyebrow="Delivery"
       title="Delivery dashboard"
       description="Accept tasks, navigate fast, update real-time delivery status, and track your earnings."
@@ -349,7 +350,7 @@ export default function DeliveryDashboard() {
             const rawStatus = String(order.status || '').toUpperCase()
 
             return (
-              <article key={order.order_id} className="section-card panel-stack">
+              <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${String(order.status || '').toUpperCase() === 'OUT_FOR_DELIVERY' ? 'delivery-order-card-active' : ''}`}>
                 <div className="section-head">
                   <div>
                     <h3>{order.order_id}</h3>

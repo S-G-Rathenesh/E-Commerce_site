@@ -9,7 +9,7 @@ import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders } from '../utils/auth'
 import { products } from '../data/products'
 import StatusBadge from '../components/StatusBadge'
-import { generateStock } from '../utils/adminUi'
+import { generateStock, getSlaState } from '../utils/adminUi'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -69,6 +69,7 @@ export default function AdminDashboard() {
     .map((product) => ({ ...product, stock: generateStock(product.id) }))
     .filter((item) => item.stock < 8)
     .slice(0, 3)
+  const delayedOrders = recentOrders.filter((order) => getSlaState(order).label === 'Delayed')
 
   const renderSparkline = (values) => {
     const max = Math.max(...values)
@@ -124,6 +125,7 @@ export default function AdminDashboard() {
 
   return (
     <PageWrapper
+      className="page-admin"
       eyebrow={page.eyebrow}
       title={page.title}
       description={page.description}
@@ -154,7 +156,7 @@ export default function AdminDashboard() {
             {statsByRange[range].map((stat, index) => (
               <MotionArticle
                 key={stat.label}
-                className="panel stat-card card"
+                className={`panel stat-card card stat-card-${['blue', 'green', 'orange'][index] || 'blue'}`}
                 whileHover={{
                   y: -4,
                   scale: 1.03,
@@ -177,15 +179,24 @@ export default function AdminDashboard() {
           </div>
         </section>
 
-        {lowStockItems.length > 0 ? (
-          <section className="section low-stock-banner">
-            <p>
-              Low stock alert: {lowStockItems.map((item) => `${item.name} (${item.stock})`).join(', ')}
-            </p>
+        {lowStockItems.length > 0 || delayedOrders.length > 0 ? (
+          <section className="section dashboard-alerts">
+            {lowStockItems.length > 0 ? (
+              <div className="dashboard-alert-card dashboard-alert-card-warning">
+                <p className="eyebrow">Low stock</p>
+                <p>{lowStockItems.map((item) => `${item.name} (${item.stock})`).join(', ')}</p>
+              </div>
+            ) : null}
+            {delayedOrders.length > 0 ? (
+              <div className="dashboard-alert-card dashboard-alert-card-danger">
+                <p className="eyebrow">Delayed orders</p>
+                <p>{delayedOrders.map((order) => order.order_id).join(', ')}</p>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
-        <AnimatedSection as="section" className="panel panel-stack section card">
+        <AnimatedSection as="section" className="panel panel-stack section card dashboard-chart-card">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Performance</p>
@@ -205,7 +216,7 @@ export default function AdminDashboard() {
             <OrdersBarChart />
         </AnimatedSection>
 
-        <AnimatedSection as="section" delay={0.04} className="panel panel-stack section card">
+        <AnimatedSection as="section" delay={0.04} className="panel panel-stack section card dashboard-table-card">
           <div className="section-head">
             <div>
               <p className="eyebrow">Orders</p>

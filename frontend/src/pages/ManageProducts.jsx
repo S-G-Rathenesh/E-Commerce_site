@@ -76,6 +76,7 @@ export default function ManageProducts() {
 
   return (
     <PageWrapper
+      className="page-merchant"
       eyebrow="Inventory"
       title="Manage products"
       description="A consistent management surface for maintaining product data inside the same design system as the storefront."

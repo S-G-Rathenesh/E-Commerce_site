@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import PageLayout from './components/PageLayout'
 import Home from './pages/Home'
 import Products from './pages/Products'
@@ -79,8 +79,51 @@ function RequireRole({ user, allowedRoles, children }) {
 
 function App() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const location = useLocation()
   const role = normalizeRole(currentUser?.role)
   const isCustomerUser = role === 'user'
+
+  const resolveUiTheme = () => {
+    const pathname = String(location.pathname || '').toLowerCase()
+
+    if (
+      pathname === '/login' ||
+      pathname === '/signup' ||
+      pathname === '/merchant-register' ||
+      pathname === '/delivery-register' ||
+      pathname === '/operations-register'
+    ) {
+      return 'auth'
+    }
+
+    if (pathname.startsWith('/delivery')) {
+      return 'delivery'
+    }
+
+    if (pathname.startsWith('/operations')) {
+      return 'operations'
+    }
+
+    if (
+      pathname.startsWith('/admin/dashboard') ||
+      pathname.startsWith('/admin/orders') ||
+      pathname.startsWith('/admin/customers') ||
+      pathname.startsWith('/admin/analytics')
+    ) {
+      return 'admin'
+    }
+
+    if (
+      pathname.startsWith('/admin/products') ||
+      pathname.startsWith('/admin/profile') ||
+      pathname.startsWith('/admin/shipping') ||
+      pathname.startsWith('/admin/settings')
+    ) {
+      return 'merchant'
+    }
+
+    return 'customer'
+  }
 
   useEffect(() => {
     const syncAuthState = () => {
@@ -95,6 +138,21 @@ function App() {
       window.removeEventListener('storage', syncAuthState)
     }
   }, [])
+
+  useEffect(() => {
+    const nextTheme = resolveUiTheme()
+    document.body.dataset.uiTheme = nextTheme
+    document.documentElement.dataset.uiTheme = nextTheme
+    document.body.classList.remove(
+      'ui-theme-auth',
+      'ui-theme-customer',
+      'ui-theme-merchant',
+      'ui-theme-admin',
+      'ui-theme-delivery',
+      'ui-theme-operations',
+    )
+    document.body.classList.add(`ui-theme-${nextTheme}`)
+  }, [location.pathname, currentUser?.role])
 
   return (
     <PageLayout>
