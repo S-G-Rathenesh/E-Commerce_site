@@ -206,7 +206,7 @@ export default function ProductDetails() {
             <h1>{product.name}</h1>
             <p className="detail-price">Rs. {Number(product.price).toFixed(2)}</p>
             <p className="detail-copy">{product.description}</p>
-            <DeliveryEstimate productId={product.id} currentUser={currentUser} />
+            <DeliveryEstimate productId={product.id} currentUser={currentUser} orderTotal={Number(product.price) || 0} />
           </div>
 
           <div className="detail-purchase-block">

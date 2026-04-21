@@ -34,6 +34,8 @@ function resolveStepState(step, currentStatus, completedSet) {
 export default function OrdersTracking() {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
+  const [liveEnabled, setLiveEnabled] = useState(true)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState('')
   const [message, setMessage] = useState('')
   const [activeReturnFormOrderId, setActiveReturnFormOrderId] = useState('')
   const [returnDrafts, setReturnDrafts] = useState({})
@@ -63,6 +65,7 @@ export default function OrdersTracking() {
       }
 
       setOrders(Array.isArray(data?.orders) ? data.orders : [])
+      setLastUpdatedAt(new Date().toISOString())
       setMessage('')
     } catch {
       setMessage('Unable to load orders right now.')
@@ -154,6 +157,17 @@ export default function OrdersTracking() {
     loadOrders()
   }, [])
 
+  useEffect(() => {
+    if (!liveEnabled) {
+      return undefined
+    }
+    const intervalId = setInterval(() => {
+      loadOrders()
+    }, 10000)
+    return () => clearInterval(intervalId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEnabled])
+
   const trackedOrders = useMemo(() => {
     return orders.map((order) => ({
       ...order,
@@ -183,10 +197,17 @@ export default function OrdersTracking() {
       <section className="panel panel-stack">
         <div className="section-head">
           <h2>My orders</h2>
-          <button type="button" className="btn btn-secondary" onClick={loadOrders}>
-            Refresh
-          </button>
+          <div className="admin-controls-row">
+            <button type="button" className="btn btn-secondary" onClick={() => setLiveEnabled((value) => !value)}>
+              {liveEnabled ? 'Live: ON' : 'Live: OFF'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={loadOrders}>
+              Refresh
+            </button>
+          </div>
         </div>
+
+        {lastUpdatedAt ? <p style={{ fontSize: '13px', color: '#6b7280' }}>Last synced: {new Date(lastUpdatedAt).toLocaleTimeString()}</p> : null}
 
         {message ? <p className="wishlist-message">{message}</p> : null}
         {loading ? <p>Loading your orders...</p> : null}
@@ -208,6 +229,13 @@ export default function OrdersTracking() {
                   Tracking ID: <strong>{order.tracking_id}</strong>
                 </p>
               ) : null}
+
+              <section className="section-card panel-stack" style={{ marginTop: '10px' }}>
+                <p className="field-label">Payment</p>
+                <p>Method: {String(order?.payment?.method || order.payment_method || 'COD').replaceAll('_', ' ')}</p>
+                <p>Status: {String(order?.payment?.status || 'PENDING').replaceAll('_', ' ')}</p>
+                {order?.payment?.payment_id ? <p>Payment ID: {order.payment.payment_id}</p> : null}
+              </section>
 
               <div className="tracking-timeline" role="list" aria-label={`Tracking timeline ${order.order_id}`}>
                 {order.timeline.map((entry) => (

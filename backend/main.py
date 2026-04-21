@@ -14,7 +14,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 import mongomock
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
 
 load_dotenv()
 
@@ -31,6 +31,7 @@ app.add_middleware(
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'veloura-dev-secret-change-me')
 JWT_ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv('JWT_ACCESS_TOKEN_EXPIRE_HOURS', '12'))
+REFRESH_TOKEN_EXPIRE_HOURS = int(os.getenv('JWT_REFRESH_TOKEN_EXPIRE_HOURS', '168'))
 
 PASSWORD_CONTEXT = CryptContext(schemes=['bcrypt'], deprecated='auto')
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/auth/login')
@@ -50,8 +51,10 @@ ADMIN_ALLOWED_STATES = {'CONFIRMED', 'SHIPPED'}
 OPERATIONS_ALLOWED_STATES = {'PACKED'}
 DELIVERY_ALLOWED_STATES = {'OUT_FOR_DELIVERY', 'DELIVERED'}
 PAYMENT_STATUSES = {'PENDING', 'SUCCESS', 'FAILED', 'REFUNDED'}
+PAYMENT_METHODS = {'COD', 'UPI', 'CARD', 'NETBANKING', 'WALLET'}
+ONLINE_PAYMENT_METHODS = {'UPI', 'CARD', 'NETBANKING', 'WALLET'}
 RETURN_STATUS_FLOW = ['RETURN_REQUESTED', 'PICKUP', 'RETURNED', 'REFUNDED', 'RETURN_REJECTED']
-SPECIAL_ORDER_STATUSES = {'CANCELLED'}
+SPECIAL_ORDER_STATUSES = {'CANCELLED', 'DELIVERY_FAILED'}
 INDIA_PINCODE_REGEX = re.compile(r'^[1-9][0-9]{5}$')
 DELIVERY_SCOPE_VALUES = {'NATIONWIDE', 'STATE', 'CITY'}
 DEFAULT_MAX_ORDERS_PER_SHIPMENT = 10
@@ -161,6 +164,10 @@ class GoogleAuthRequest(BaseModel):
     full_name: str | None = None
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
 class AssignDeliveryRequest(BaseModel):
     delivery_partner_email: str
 
@@ -181,12 +188,16 @@ class DeliveryStatusUpdateRequest(BaseModel):
 class OrderItemCreateRequest(BaseModel):
     product_id: int
     quantity: int
+    name: str | None = None
+    price: float | None = None
 
 
 class CreateOrderRequest(BaseModel):
     items: list[OrderItemCreateRequest]
     pincode: str
     payment_method: str = 'COD'
+    payment_details: dict | None = None
+    shipping_details: dict | None = None
 
 
 class UpdateOrderStatusRequest(BaseModel):
@@ -289,6 +300,23 @@ class MerchantShippingSettingsRequest(BaseModel):
     allow_all_india: bool = True
     serviceable_pincodes: list[str] | None = None  # CSV or list
     blocked_pincodes: list[str] | None = None
+
+
+class SavePaymentMethodRequest(BaseModel):
+    method_type: str  # UPI, CARD, NETBANKING, WALLET
+    nickname: str | None = None
+    upi_id: str | None = None
+    card_number: str | None = None
+    card_holder_name: str | None = None
+    card_expiry: str | None = None
+    bank_name: str | None = None
+    wallet_provider: str | None = None
+    is_default: bool = False
+
+
+class UpdatePaymentMethodRequest(BaseModel):
+    nickname: str | None = None
+    is_default: bool | None = None
 
 
 SEED_PRODUCTS = [
@@ -531,8 +559,20 @@ mongo_client_options = {'serverSelectionTimeoutMS': 12000}
 if mongo_tls_allow_invalid_certs:
     mongo_client_options['tlsAllowInvalidCertificates'] = True
 
-mongo_client = MongoClient(mongo_uri, **mongo_client_options)
-database = mongo_client[mongo_db_name]
+try:
+    mongo_client = MongoClient(mongo_uri, **mongo_client_options)
+    database = mongo_client[mongo_db_name]
+except (ConfigurationError, PyMongoError) as exc:
+    if not mongo_enable_fallback:
+        raise
+    mocked_version = str(os.getenv('MONGOMOCK_SERVER_VERSION', '5.0.5') or '').strip()
+    if not re.fullmatch(r'\d+(\.\d+){1,2}', mocked_version):
+        os.environ['MONGOMOCK_SERVER_VERSION'] = '5.0.5'
+    os.environ['MONGODB'] = '5.0.5'
+    mongomock.SERVER_VERSION = '5.0.5'
+    print(f'[WARN] MongoDB client setup failed, using in-memory database: {exc}')
+    mongo_client = mongomock.MongoClient()
+    database = mongo_client[mongo_db_name]
 products_collection = database['products']
 users_collection = database['users']
 orders_collection = database['orders']
@@ -573,6 +613,13 @@ def activate_in_memory_database(reason: str) -> None:
     global blocked_pincodes_collection
     global pincode_distance_cache_collection
     global database_mode
+
+    # Guard against malformed MONGOMOCK_SERVER_VERSION values that can crash mongomock internals.
+    mocked_version = str(os.getenv('MONGOMOCK_SERVER_VERSION', '5.0.5') or '').strip()
+    if not re.fullmatch(r'\d+(\.\d+){1,2}', mocked_version):
+        os.environ['MONGOMOCK_SERVER_VERSION'] = '5.0.5'
+    os.environ['MONGODB'] = '5.0.5'
+    mongomock.SERVER_VERSION = '5.0.5'
 
     mongo_client = mongomock.MongoClient()
     database = mongo_client[mongo_db_name]
@@ -631,15 +678,24 @@ def verify_password(plain: str, hashed: str) -> bool:
     return PASSWORD_CONTEXT.verify(plain, hashed)
 
 
-def create_access_token(subject_email: str, role: str) -> str:
-    expires_at = now_utc() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+def create_auth_token(subject_email: str, role: str, token_type: str, expires_hours: int) -> str:
+    expires_at = now_utc() + timedelta(hours=expires_hours)
     payload = {
         'sub': subject_email,
         'role': normalize_role(role),
+        'token_type': token_type,
         'exp': expires_at,
         'iat': now_utc(),
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def create_access_token(subject_email: str, role: str) -> str:
+    return create_auth_token(subject_email, role, token_type='access', expires_hours=ACCESS_TOKEN_EXPIRE_HOURS)
+
+
+def create_refresh_token(subject_email: str, role: str) -> str:
+    return create_auth_token(subject_email, role, token_type='refresh', expires_hours=REFRESH_TOKEN_EXPIRE_HOURS)
 
 
 def serialize_product(document: dict) -> dict:
@@ -767,6 +823,39 @@ def normalize_payment_status(value: str, fallback: str = 'PENDING') -> str:
     return fallback
 
 
+def normalize_payment_method(value: str, fallback: str = 'COD') -> str:
+    candidate = str(value or fallback).strip().upper()
+    if candidate in PAYMENT_METHODS:
+        return candidate
+    return fallback
+
+
+def sanitize_payment_details(method: str, details: dict | None) -> dict:
+    source = details if isinstance(details, dict) else {}
+    normalized_method = normalize_payment_method(method)
+
+    if normalized_method == 'UPI':
+        return {
+            'upi_id': str(source.get('upi_id') or '').strip().lower(),
+        }
+    if normalized_method == 'CARD':
+        card_number = ''.join(ch for ch in str(source.get('card_number') or '') if ch.isdigit())
+        return {
+            'card_last4': card_number[-4:] if len(card_number) >= 4 else '',
+            'card_holder': str(source.get('card_holder') or '').strip(),
+            'expiry': str(source.get('expiry') or '').strip(),
+        }
+    if normalized_method == 'NETBANKING':
+        return {
+            'bank_name': str(source.get('bank_name') or '').strip(),
+        }
+    if normalized_method == 'WALLET':
+        return {
+            'wallet_provider': str(source.get('wallet_provider') or '').strip(),
+        }
+    return {}
+
+
 def normalize_return_status(value: str, fallback: str = 'RETURN_REQUESTED') -> str:
     candidate = str(value or fallback).strip().upper()
     if candidate in RETURN_STATUS_FLOW:
@@ -814,6 +903,7 @@ def create_notification(event_type: str, order_id: str, message: str, user_id: s
             'order_id': order_id,
             'user_id': user_id,
             'message': message,
+            'is_read': False,
             'created_at': now_utc(),
         }
     )
@@ -843,15 +933,23 @@ def serialize_return_for_order(order_id: str) -> dict | None:
     return request
 
 
-def set_payment_status(order_id: str, status_value: str, method: str | None = None, reason: str | None = None) -> dict:
+def set_payment_status(
+    order_id: str,
+    status_value: str,
+    method: str | None = None,
+    reason: str | None = None,
+    payment_details: dict | None = None,
+) -> dict:
     normalized = normalize_payment_status(status_value)
     existing = payments_collection.find_one({'order_id': order_id})
-    payment_method = str(method or (existing or {}).get('method') or 'COD').strip().upper()
+    payment_method = normalize_payment_method(method or (existing or {}).get('method') or 'COD')
+    details_payload = sanitize_payment_details(payment_method, payment_details or (existing or {}).get('details'))
     payload = {
         'order_id': order_id,
         'payment_id': (existing or {}).get('payment_id') or f"PAY-{uuid4().hex[:12].upper()}",
         'method': payment_method,
         'status': normalized,
+        'details': details_payload,
         'reason': str(reason or '').strip(),
         'updated_at': now_utc(),
     }
@@ -1281,22 +1379,39 @@ def build_tracking_id_for_batch(base_tracking_id: str, index: int) -> str:
 
 
 def ensure_indexes() -> None:
-    users_collection.create_index('email', unique=True)
-    users_collection.create_index([('role', 1), ('status', 1)])
-    orders_collection.create_index('order_id', unique=True)
-    orders_collection.create_index([('user_id', 1), ('created_at', -1)])
-    orders_collection.create_index([('status', 1), ('updated_at', -1)])
-    shipments_collection.create_index('shipment_id', unique=True)
-    shipments_collection.create_index('tracking_id', unique=True)
-    order_items_collection.create_index([('order_id', 1), ('product_id', 1)])
-    shipment_items_collection.create_index([('shipment_id', 1), ('order_id', 1)], unique=True)
-    delivery_logs_collection.create_index([('order_id', 1), ('timestamp', 1)])
-    warehouses_collection.create_index('warehouse_id', unique=True)
-    warehouses_collection.create_index([('product_id', 1), ('pincode', 1)])
-    delivery_coverage_collection.create_index('merchant_id', unique=True)
-    payments_collection.create_index('order_id', unique=True)
-    returns_collection.create_index('order_id', unique=True)
-    notifications_collection.create_index([('order_id', 1), ('created_at', -1)])
+    def create_index_safe(collection, keys, **kwargs):
+        try:
+            collection.create_index(keys, **kwargs)
+        except OperationFailure as exc:
+            # Existing indexes in live DB can differ by options (e.g., unique). Ignore conflict and continue.
+            if getattr(exc, 'code', None) == 86:
+                return
+            raise
+
+    create_index_safe(users_collection, 'email', unique=True)
+    create_index_safe(users_collection, [('role', 1), ('status', 1)])
+    create_index_safe(orders_collection, 'order_id', unique=True)
+    create_index_safe(orders_collection, [('user_id', 1), ('created_at', -1)])
+    create_index_safe(orders_collection, [('customer_email', 1), ('created_at', -1)])
+    create_index_safe(orders_collection, [('status', 1), ('updated_at', -1)])
+    create_index_safe(orders_collection, [('assigned_delivery_id', 1), ('updated_at', -1)])
+    create_index_safe(orders_collection, [('assigned_delivery_partner', 1), ('updated_at', -1)])
+    create_index_safe(shipments_collection, 'shipment_id', unique=True)
+    create_index_safe(shipments_collection, 'tracking_id', unique=True)
+    create_index_safe(order_items_collection, [('order_id', 1), ('product_id', 1)])
+    create_index_safe(shipment_items_collection, [('shipment_id', 1), ('order_id', 1)], unique=True)
+    create_index_safe(delivery_logs_collection, [('order_id', 1), ('timestamp', 1)])
+    create_index_safe(warehouses_collection, 'warehouse_id', unique=True)
+    create_index_safe(warehouses_collection, [('product_id', 1), ('pincode', 1)])
+    create_index_safe(delivery_coverage_collection, 'merchant_id', unique=True)
+    create_index_safe(payments_collection, 'order_id', unique=True)
+    create_index_safe(returns_collection, 'order_id', unique=True)
+    create_index_safe(merchant_shipping_settings_collection, 'merchant_id', unique=True)
+    create_index_safe(serviceable_pincodes_collection, [('merchant_id', 1), ('pincode', 1)], unique=True)
+    create_index_safe(blocked_pincodes_collection, [('merchant_id', 1), ('pincode', 1)], unique=True)
+    create_index_safe(pincode_distance_cache_collection, [('from_pincode', 1), ('to_pincode', 1)], unique=True)
+    create_index_safe(notifications_collection, [('user_id', 1), ('created_at', -1)])
+    create_index_safe(notifications_collection, [('order_id', 1), ('created_at', -1)])
 
 
 def seed_products() -> None:
@@ -1417,9 +1532,7 @@ def backfill_orders_workflow_state() -> None:
         if normalized_status not in existing_timestamps:
             existing_timestamps[normalized_status] = now_utc().isoformat()
 
-        payment_method = str(order.get('payment_method') or 'COD').strip().upper()
-        if payment_method not in {'COD', 'ONLINE'}:
-            payment_method = 'COD'
+        payment_method = normalize_payment_method(order.get('payment_method') or 'COD')
 
         orders_collection.update_one(
             {'_id': order['_id']},
@@ -1626,16 +1739,10 @@ def calculate_distance(pincode1: str, pincode2: str) -> float:
 
 def calculate_delivery_charge(
     distance_km: float,
-    base_charge: float,
-    per_km_rate: float,
-    min_charge: float,
-    max_charge: float,
+    order_total: float,
 ) -> float:
-    """Calculate delivery charge based on distance and pricing rules."""
-    charge = base_charge + (distance_km * per_km_rate)
-    charge = max(charge, min_charge)
-    charge = min(charge, max_charge)
-    return round(charge, 2)
+    """Calculate the final customer-facing delivery charge."""
+    return 0.0 if order_total >= 500 else 49.0
 
 
 def estimate_delivery_timeframe(distance_km: float) -> tuple[int, int]:
@@ -1686,7 +1793,7 @@ def ensure_database_ready() -> None:
         mongo_client.admin.command('ping')
         ensure_indexes()
         seed_collections()
-    except PyMongoError as exc:
+    except (ConfigurationError, PyMongoError) as exc:
         if mongo_enable_fallback:
             activate_in_memory_database(str(exc))
             ensure_indexes()
@@ -1709,6 +1816,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        token_type = str(payload.get('token_type') or 'access').strip().lower()
+        if token_type != 'access':
+            raise credentials_error
         email = str(payload.get('sub') or '').strip().lower()
         if not email:
             raise credentials_error
@@ -1725,6 +1835,40 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
     return account
+
+
+@app.post('/auth/refresh')
+def refresh_auth_token(payload: RefreshTokenRequest):
+    refresh_error = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid or expired refresh token.')
+    try:
+        token_payload = jwt.decode(payload.refresh_token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        token_type = str(token_payload.get('token_type') or '').strip().lower()
+        if token_type != 'refresh':
+            raise refresh_error
+
+        email = str(token_payload.get('sub') or '').strip().lower()
+        if not email:
+            raise refresh_error
+    except JWTError as exc:
+        raise refresh_error from exc
+
+    account = users_collection.find_one({'email': email})
+    if not account:
+        raise refresh_error
+
+    account_status = normalize_account_status(account.get('status', 'ACTIVE'))
+    if account_status != 'ACTIVE':
+        detail = 'Your account is pending approval' if account_status == 'PENDING' else 'Account is blocked. Please contact support.'
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+    role = normalize_role(account.get('role', 'CUSTOMER'))
+    return {
+        'token': create_access_token(email, role),
+        'refresh_token': create_refresh_token(email, role),
+        'role': role,
+        'status': account_status,
+        'user': serialize_user(account),
+    }
 
 
 def require_roles(*roles: str) -> Callable:
@@ -1798,12 +1942,14 @@ def login(payload: AuthLoginRequest):
 
     role = normalize_role(account.get('role', 'CUSTOMER'))
     token = create_access_token(email, role)
+    refresh_token = create_refresh_token(email, role)
 
     return {
         'message': f"Welcome back, {account['full_name']}!",
         'role': role,
         'status': account_status,
         'token': token,
+        'refresh_token': refresh_token,
         'user': serialize_user(account),
     }
 
@@ -1944,12 +2090,15 @@ def google_auth(payload: GoogleAuthRequest):
         }
         users_collection.insert_one(account)
 
-    token = create_access_token(email, normalize_role(account.get('role', 'CUSTOMER')))
+    role = normalize_role(account.get('role', 'CUSTOMER'))
+    token = create_access_token(email, role)
+    refresh_token = create_refresh_token(email, role)
     return {
         'message': f"Signed in with Google as {account['full_name']}.",
-        'role': normalize_role(account.get('role', 'CUSTOMER')),
+        'role': role,
         'status': normalize_account_status(account.get('status', 'ACTIVE')),
         'token': token,
+        'refresh_token': refresh_token,
         'user': serialize_user(account),
     }
 
@@ -2228,9 +2377,11 @@ def update_merchant_shipping_config(
     }
 
 
+@app.get('/check-delivery')
 @app.post('/check-delivery')
 def check_delivery_serviceability(
     customer_pincode: str,
+    order_total: float = 0,
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -2242,7 +2393,8 @@ def check_delivery_serviceability(
     - delivery_charge: float
     - cod_available: bool
     """
-    merchant_id = str(current_user.get('id') or '').strip()
+    role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    merchant_id = str(current_user.get('id') or '').strip() if role in {'ADMIN', 'MERCHANT'} else ''
     if not merchant_id:
         merchant_id = get_default_merchant_id()
     
@@ -2285,10 +2437,7 @@ def check_delivery_serviceability(
     
     delivery_charge = calculate_delivery_charge(
         distance,
-        settings['distance_pricing']['base_charge'],
-        settings['distance_pricing']['per_km_rate'],
-        settings['distance_pricing']['min_charge'],
-        settings['distance_pricing']['max_charge'],
+        float(order_total or 0),
     )
     
     # Estimate delivery timeframe
@@ -2302,6 +2451,8 @@ def check_delivery_serviceability(
         'is_serviceable': True,
         'estimated_days': estimated_days,
         'delivery_charge': delivery_charge,
+        'free_delivery_threshold': 500,
+        'standard_delivery_charge': 49,
         'cod_available': cod_available,
         'distance_km': round(distance, 2),
     }
@@ -2379,8 +2530,13 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
         if request_item.quantity <= 0:
             raise HTTPException(status_code=400, detail='Quantity must be greater than 0.')
         product = products_collection.find_one({'id': request_item.product_id}, {'_id': 0})
+        product_exists = bool(product)
         if not product:
-            raise HTTPException(status_code=404, detail=f'Product {request_item.product_id} not found.')
+            product = {
+                'id': request_item.product_id,
+                'name': request_item.name or f'Product {request_item.product_id}',
+                'price': float(request_item.price or 0),
+            }
 
         line_total = float(product.get('price', 0)) * int(request_item.quantity)
         total_amount += line_total
@@ -2390,17 +2546,30 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                 'quantity': int(request_item.quantity),
                 'name': product.get('name', 'Product'),
                 'price': float(product.get('price', 0)),
+                'product_exists': product_exists,
             }
         )
 
-    first_product_id = materialized_items[0]['product_id']
+    first_product_id = next((item['product_id'] for item in materialized_items if item.get('product_exists')), materialized_items[0]['product_id'])
     user_location = get_location_for_pincode(cleaned_pincode)
     selected_warehouse = choose_best_warehouse(first_product_id, user_location)
 
+    shipping_payload = payload.shipping_details or {}
+    shipping_details = {
+        'full_name': str(shipping_payload.get('full_name') or current_user.get('full_name') or current_user.get('name') or '').strip(),
+        'phone': sanitize_phone_number(str(shipping_payload.get('phone') or current_user.get('phone_number') or '').strip()),
+        'city': str(shipping_payload.get('city') or user_location.get('city') or '').strip(),
+        'address': str(shipping_payload.get('address') or '').strip(),
+        'pincode': cleaned_pincode,
+    }
+
     order_id = f"ORD-{uuid4().hex[:10].upper()}"
-    payment_method = str(payload.payment_method or 'COD').strip().upper()
-    if payment_method not in {'COD', 'ONLINE'}:
-        raise HTTPException(status_code=400, detail='Payment method must be COD or ONLINE.')
+    raw_payment_method = str(payload.payment_method or 'COD').strip().upper()
+    if raw_payment_method not in PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail='Unsupported payment method.')
+    payment_method = normalize_payment_method(raw_payment_method)
+
+    payment_details = sanitize_payment_details(payment_method, payload.payment_details)
 
     order_document = {
         'id': order_id,
@@ -2415,6 +2584,7 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
         'warehouse_id': selected_warehouse.get('warehouse_id'),
         'shipment_id': None,
         'destination_pincode': cleaned_pincode,
+        'shipping_details': shipping_details,
         'payment_method': payment_method,
         'created_at': now_utc(),
         'updated_at': now_utc(),
@@ -2440,9 +2610,9 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
         user_id=str(current_user.get('id') or current_user.get('email') or ''),
     )
 
-    if payment_method == 'ONLINE':
+    if payment_method in ONLINE_PAYMENT_METHODS:
         online_status = 'SUCCESS' if random.random() >= 0.15 else 'FAILED'
-        set_payment_status(order_id, online_status, method='ONLINE')
+        set_payment_status(order_id, online_status, method=payment_method, payment_details=payment_details)
         if online_status == 'SUCCESS':
             latest_for_confirm = orders_collection.find_one({'order_id': order_id})
             if latest_for_confirm:
@@ -2460,7 +2630,7 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                 user_id=str(current_user.get('id') or current_user.get('email') or ''),
             )
     else:
-        set_payment_status(order_id, 'PENDING', method='COD')
+        set_payment_status(order_id, 'PENDING', method='COD', payment_details=payment_details)
         latest_for_confirm = orders_collection.find_one({'order_id': order_id})
         if latest_for_confirm:
             apply_order_status_update(
@@ -2472,6 +2642,19 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
 
     latest = orders_collection.find_one({'order_id': order_id})
     return {'message': 'Order placed successfully.', 'order': serialize_order(latest, include_shipment=True)}
+
+
+@app.get('/orders/my')
+def get_my_orders(current_user: dict = Depends(require_roles('CUSTOMER'))):
+    user_id = current_user.get('id')
+    email = current_user['email'].strip().lower()
+    orders = list(
+        orders_collection.find(
+            {'$or': [{'user_id': user_id}, {'user_id': email}, {'customer_email': email}]}
+        ).sort('created_at', -1)
+    )
+    payload = [serialize_order(order, include_shipment=True) for order in orders]
+    return {'orders': payload, 'timeline_steps': ORDER_STATUS_FLOW}
 
 
 @app.get('/orders/{order_id}')
@@ -2772,7 +2955,39 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
             }
         ).sort('updated_at', -1)
     )
-    return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+    enriched_orders = []
+    for order in orders:
+        payload = serialize_order(order, include_shipment=True)
+        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
+        customer = users_collection.find_one({'email': str(payload.get('customer_email') or '').strip().lower()}, {'_id': 0}) or {}
+        customer_profile = customer.get('profile_details') if isinstance(customer.get('profile_details'), dict) else {}
+
+        customer_name = str(shipping.get('full_name') or customer.get('full_name') or customer.get('name') or '').strip()
+        customer_phone = sanitize_phone_number(str(shipping.get('phone') or customer.get('phone_number') or customer_profile.get('phone_number') or '').strip())
+        delivery_address = ', '.join(
+            [
+                str(shipping.get('address') or '').strip(),
+                str(shipping.get('city') or '').strip(),
+                str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
+            ]
+        ).strip(', ').strip()
+
+        payload['customer_name'] = customer_name or str(payload.get('customer_email') or 'Customer').split('@')[0]
+        payload['customer_phone'] = customer_phone
+        payload['delivery_address'] = delivery_address
+        payload['order_value'] = float(payload.get('total_amount') or 0)
+
+        delivery_meta = payload.get('delivery_meta') if isinstance(payload.get('delivery_meta'), dict) else {}
+        payload['delivery_meta'] = {
+            'accepted_at': delivery_meta.get('accepted_at'),
+            'picked_at': delivery_meta.get('picked_at'),
+            'out_for_delivery_at': delivery_meta.get('out_for_delivery_at'),
+            'delivered_at': delivery_meta.get('delivered_at'),
+            'failed_at': delivery_meta.get('failed_at'),
+        }
+        enriched_orders.append(payload)
+
+    return {'orders': enriched_orders}
 
 
 @app.get('/delivery/estimate')
@@ -2834,6 +3049,9 @@ def get_delivery_estimate(product_id: int, pincode: str | None = None, user_pinc
         'delivery_text': f"Delivery by {format_delivery_date(delivery_datetime)}",
         'availability_text': 'Delivery available in your area',
         'location_text': f'Delivering to {cleaned_pincode}',
+        'delivery_charge': 49,
+        'standard_delivery_charge': 49,
+        'free_delivery_threshold': 500,
         'warehouse': {
             'warehouse_id': warehouse.get('warehouse_id'),
             'pincode': warehouse.get('pincode'),
@@ -2856,15 +3074,18 @@ def get_delivery_estimate(product_id: int, pincode: str | None = None, user_pinc
 
 
 @app.put('/delivery/update-status')
+@app.post('/delivery/update-status')
 def update_delivery_status(
     payload: DeliveryStatusUpdateRequest,
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
     email = current_user['email'].strip().lower()
-    status_value = normalize_order_status(payload.status)
+    requested_status = str(payload.status or '').strip().upper()
+    delivery_actions = {'ACCEPTED', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED'}
+    if requested_status not in delivery_actions:
+        raise HTTPException(status_code=400, detail='Delivery status must be one of ACCEPTED, PICKED_UP, OUT_FOR_DELIVERY, DELIVERED, FAILED.')
 
-    if status_value not in DELIVERY_FINAL_STATES:
-        raise HTTPException(status_code=400, detail='Delivery status must be OUT_FOR_DELIVERY or DELIVERED.')
+    status_value = normalize_order_status('DELIVERY_FAILED' if requested_status == 'FAILED' else requested_status)
 
     order = orders_collection.find_one({'order_id': payload.order_id})
     if not order:
@@ -2898,13 +3119,126 @@ def update_delivery_status(
         upsert=True,
     )
 
+    actor = str(current_user.get('id') or current_user.get('email', 'delivery'))
+    location_value = (payload.current_location or '').strip() or 'Last mile route'
+
+    if requested_status == 'ACCEPTED':
+        orders_collection.update_one(
+            {'order_id': payload.order_id},
+            {
+                '$set': {
+                    'delivery_meta.accepted_at': now_utc().isoformat(),
+                    'delivery_meta.last_action': 'ACCEPTED',
+                    'updated_at': now_utc(),
+                }
+            },
+        )
+        append_delivery_log(payload.order_id, order.get('status', 'SHIPPED'), actor, location='Order accepted by delivery partner')
+        latest = orders_collection.find_one({'order_id': payload.order_id})
+        return {'message': 'Order accepted successfully.', 'order': serialize_order(latest, include_shipment=True)}
+
+    if requested_status == 'PICKED_UP':
+        orders_collection.update_one(
+            {'order_id': payload.order_id},
+            {
+                '$set': {
+                    'delivery_meta.picked_at': now_utc().isoformat(),
+                    'delivery_meta.last_action': 'PICKED_UP',
+                    'updated_at': now_utc(),
+                }
+            },
+        )
+        append_delivery_log(payload.order_id, order.get('status', 'SHIPPED'), actor, location='Order picked up from warehouse')
+        latest = orders_collection.find_one({'order_id': payload.order_id})
+        return {'message': 'Order marked as picked up.', 'order': serialize_order(latest, include_shipment=True)}
+
+    if requested_status == 'FAILED':
+        orders_collection.update_one(
+            {'order_id': payload.order_id},
+            {
+                '$set': {
+                    'status': 'DELIVERY_FAILED',
+                    'delivery_meta.failed_at': now_utc().isoformat(),
+                    'delivery_meta.last_action': 'FAILED',
+                    'updated_at': now_utc(),
+                }
+            },
+        )
+        append_delivery_log(payload.order_id, 'DELIVERY_FAILED', actor, location=location_value)
+        create_notification('DELIVERY_FAILED', payload.order_id, f'Order {payload.order_id} marked as delivery failed.')
+        latest = orders_collection.find_one({'order_id': payload.order_id})
+        return {'message': 'Order marked as failed.', 'order': serialize_order(latest, include_shipment=True)}
+
     latest = apply_order_status_update(
         order,
         status_value,
-        str(current_user.get('id') or current_user.get('email', 'delivery')),
-        location=(payload.current_location or '').strip() or 'Last mile route',
+        actor,
+        location=location_value,
     )
-    return {'message': 'Delivery status updated.', 'order': serialize_order(latest, include_shipment=True)}
+
+    orders_collection.update_one(
+        {'order_id': payload.order_id},
+        {
+            '$set': {
+                'delivery_meta.last_action': requested_status,
+                'delivery_meta.out_for_delivery_at': now_utc().isoformat() if requested_status == 'OUT_FOR_DELIVERY' else order.get('delivery_meta', {}).get('out_for_delivery_at'),
+                'delivery_meta.delivered_at': now_utc().isoformat() if requested_status == 'DELIVERED' else order.get('delivery_meta', {}).get('delivered_at'),
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    latest = orders_collection.find_one({'order_id': payload.order_id})
+    return {'message': 'Delivery status updated.', 'order': serialize_order(latest or {}, include_shipment=True)}
+
+
+def calculate_delivery_commission(order: dict) -> float:
+    total = float(order.get('total_amount') or 0)
+    return round(max(30.0, total * 0.08), 2)
+
+
+@app.get('/delivery/earnings')
+def get_delivery_earnings(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    email = str(current_user.get('email') or '').strip().lower()
+    user_id = str(current_user.get('id') or '').strip()
+    assigned_filter = {'$or': [{'assigned_delivery_partner': email}, {'assigned_delivery_id': user_id}]}
+    now = now_utc()
+    start_today = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    start_week = start_today - timedelta(days=start_today.weekday())
+
+    delivered_orders = list(
+        orders_collection.find(
+            {
+                **assigned_filter,
+                'status': 'DELIVERED',
+            },
+            {'_id': 0},
+        )
+    )
+
+    today_deliveries = 0
+    total_deliveries_today = 0
+    weekly_earnings = 0.0
+
+    for order in delivered_orders:
+        commission = calculate_delivery_commission(order)
+        delivered_at_iso = str((order.get('delivery_meta') or {}).get('delivered_at') or order.get('updated_at') or '')
+        try:
+            delivered_at = datetime.fromisoformat(delivered_at_iso.replace('Z', '+00:00')) if delivered_at_iso else None
+        except ValueError:
+            delivered_at = None
+
+        if delivered_at and delivered_at >= start_week:
+            weekly_earnings += commission
+
+        if delivered_at and delivered_at >= start_today:
+            total_deliveries_today += 1
+            today_deliveries += commission
+
+    return {
+        'today_earnings': round(today_deliveries, 2),
+        'today_deliveries': total_deliveries_today,
+        'weekly_earnings': round(weekly_earnings, 2),
+    }
 
 
 @app.get('/tracking/{order_id}')
@@ -3157,17 +3491,215 @@ def get_my_notifications(current_user: dict = Depends(get_current_user)):
     for note in notifications:
         if isinstance(note.get('created_at'), datetime):
             note['created_at'] = note['created_at'].isoformat()
+        note['is_read'] = bool(note.get('is_read', False))
     return {'notifications': notifications}
 
 
-@app.get('/orders/my')
-def get_my_orders(current_user: dict = Depends(require_roles('CUSTOMER'))):
-    user_id = current_user.get('id')
-    email = current_user['email'].strip().lower()
-    orders = list(
-        orders_collection.find(
-            {'$or': [{'user_id': user_id}, {'user_id': email}, {'customer_email': email}]}
-        ).sort('created_at', -1)
+@app.put('/notifications/mark-all-read')
+def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
+    actor_id = str(current_user.get('id') or '').strip()
+    actor_email = str(current_user.get('email') or '').strip().lower()
+    notifications_collection.update_many(
+        {'$or': [{'user_id': actor_id}, {'user_id': actor_email}, {'user_id': None}], 'is_read': {'$ne': True}},
+        {'$set': {'is_read': True, 'updated_at': now_utc()}},
     )
-    payload = [serialize_order(order, include_shipment=True) for order in orders]
-    return {'orders': payload, 'timeline_steps': ORDER_STATUS_FLOW}
+    return {'message': 'Notifications marked as read.'}
+
+
+# ============================================================================
+# PAYMENT METHODS MANAGEMENT
+# ============================================================================
+
+@app.get('/payment-methods')
+def get_payment_methods(current_user: dict = Depends(require_roles('CUSTOMER'))):
+    """Get all saved payment methods for the current user."""
+    user_email = current_user['email'].strip().lower()
+    user = users_collection.find_one({'email': user_email}, {'_id': 0})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+    
+    profile_details = user.get('profile_details', {})
+    if not isinstance(profile_details, dict):
+        profile_details = {}
+    
+    saved_methods = profile_details.get('saved_payment_methods', [])
+    if not isinstance(saved_methods, list):
+        saved_methods = []
+    
+    # Return sanitized payment methods (no sensitive data)
+    return {'payment_methods': saved_methods}
+
+
+@app.post('/payment-methods')
+def save_payment_method(
+    payload: SavePaymentMethodRequest,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Save a new payment method for the user."""
+    method_type = str(payload.method_type or '').strip().upper()
+    if method_type not in PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail=f'Invalid payment method type: {method_type}')
+    
+    nickname = str(payload.nickname or '').strip() or f'{method_type} Payment'
+    
+    # Validate and sanitize based on method type
+    method_id = f"PM-{uuid4().hex[:12].upper()}"
+    saved_method = {
+        'id': method_id,
+        'method_type': method_type,
+        'nickname': nickname,
+        'is_default': bool(payload.is_default),
+        'created_at': now_utc().isoformat(),
+    }
+    
+    if method_type == 'UPI':
+        upi_id = str(payload.upi_id or '').strip()
+        if not upi_id:
+            raise HTTPException(status_code=400, detail='UPI ID is required for UPI payments.')
+        if not re.match(r'^[a-zA-Z0-9._-]+@[a-zA-Z]{3,}$', upi_id):
+            raise HTTPException(status_code=400, detail='Invalid UPI ID format.')
+        saved_method['upi_id'] = upi_id
+    
+    elif method_type == 'CARD':
+        card_number = str(payload.card_number or '').strip().replace(' ', '')
+        if not card_number or len(card_number) < 13 or len(card_number) > 19:
+            raise HTTPException(status_code=400, detail='Invalid card number.')
+        if not card_number.isdigit():
+            raise HTTPException(status_code=400, detail='Card number must contain only digits.')
+        
+        card_holder = str(payload.card_holder_name or '').strip()
+        if not card_holder:
+            raise HTTPException(status_code=400, detail='Card holder name is required.')
+        
+        expiry = str(payload.card_expiry or '').strip()
+        if not re.match(r'^\d{2}/\d{2}$', expiry):
+            raise HTTPException(status_code=400, detail='Expiry must be in MM/YY format.')
+        
+        # Store only last 4 digits for security
+        saved_method['card_last4'] = card_number[-4:]
+        saved_method['card_holder_name'] = card_holder
+        saved_method['card_expiry'] = expiry
+    
+    elif method_type == 'NETBANKING':
+        bank_name = str(payload.bank_name or '').strip()
+        if not bank_name:
+            raise HTTPException(status_code=400, detail='Bank name is required for Net Banking.')
+        saved_method['bank_name'] = bank_name
+    
+    elif method_type == 'WALLET':
+        wallet_provider = str(payload.wallet_provider or '').strip()
+        if not wallet_provider:
+            raise HTTPException(status_code=400, detail='Wallet provider is required.')
+        saved_method['wallet_provider'] = wallet_provider
+    
+    # Get current user and update profile
+    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
+    profile_details = user.get('profile_details', {}) if user else {}
+    if not isinstance(profile_details, dict):
+        profile_details = {}
+    
+    saved_methods = profile_details.get('saved_payment_methods', [])
+    if not isinstance(saved_methods, list):
+        saved_methods = []
+    
+    # If marking as default, unmark other defaults
+    if saved_method['is_default']:
+        for method in saved_methods:
+            method['is_default'] = False
+    
+    saved_methods.append(saved_method)
+    profile_details['saved_payment_methods'] = saved_methods
+    
+    users_collection.update_one(
+        {'email': current_user['email'].strip().lower()},
+        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
+    )
+    
+    return {'message': 'Payment method saved successfully.', 'payment_method': saved_method}
+
+
+@app.put('/payment-methods/{method_id}')
+def update_payment_method(
+    method_id: str,
+    payload: UpdatePaymentMethodRequest,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Update a saved payment method."""
+    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+    
+    profile_details = user.get('profile_details', {})
+    if not isinstance(profile_details, dict):
+        profile_details = {}
+    
+    saved_methods = profile_details.get('saved_payment_methods', [])
+    if not isinstance(saved_methods, list):
+        raise HTTPException(status_code=404, detail='Payment method not found.')
+    
+    # Find the payment method
+    method_index = None
+    for idx, method in enumerate(saved_methods):
+        if method.get('id') == method_id:
+            method_index = idx
+            break
+    
+    if method_index is None:
+        raise HTTPException(status_code=404, detail='Payment method not found.')
+    
+    # Update fields
+    if payload.nickname is not None:
+        saved_methods[method_index]['nickname'] = str(payload.nickname or '').strip()
+    
+    if payload.is_default is not None and payload.is_default:
+        # Unmark other defaults
+        for method in saved_methods:
+            method['is_default'] = False
+        saved_methods[method_index]['is_default'] = True
+    elif payload.is_default is False:
+        saved_methods[method_index]['is_default'] = False
+    
+    profile_details['saved_payment_methods'] = saved_methods
+    
+    users_collection.update_one(
+        {'email': current_user['email'].strip().lower()},
+        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
+    )
+    
+    return {'message': 'Payment method updated successfully.', 'payment_method': saved_methods[method_index]}
+
+
+@app.delete('/payment-methods/{method_id}')
+def delete_payment_method(
+    method_id: str,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Delete a saved payment method."""
+    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+    
+    profile_details = user.get('profile_details', {})
+    if not isinstance(profile_details, dict):
+        profile_details = {}
+    
+    saved_methods = profile_details.get('saved_payment_methods', [])
+    if not isinstance(saved_methods, list):
+        raise HTTPException(status_code=404, detail='Payment method not found.')
+    
+    # Find and remove the payment method
+    updated_methods = [m for m in saved_methods if m.get('id') != method_id]
+    
+    if len(updated_methods) == len(saved_methods):
+        raise HTTPException(status_code=404, detail='Payment method not found.')
+    
+    profile_details['saved_payment_methods'] = updated_methods
+    
+    users_collection.update_one(
+        {'email': current_user['email'].strip().lower()},
+        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
+    )
+    
+    return {'message': 'Payment method deleted successfully.'}
+
