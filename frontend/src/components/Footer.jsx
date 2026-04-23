@@ -1,9 +1,43 @@
+import { useEffect, useState } from 'react'
+import { fetchPublicPlatformSettings, getCachedBranding, onBrandingUpdated } from '../utils/platform'
+
 export default function Footer() {
+  const [branding, setBranding] = useState(getCachedBranding())
+
+  useEffect(() => {
+    let mounted = true
+    const syncBranding = async () => {
+      try {
+        const next = await fetchPublicPlatformSettings()
+        if (!mounted) {
+          return
+        }
+        setBranding(next)
+      } catch {
+        if (!mounted) {
+          return
+        }
+        setBranding(getCachedBranding())
+      }
+    }
+
+    const unsubscribe = onBrandingUpdated((event) => {
+      setBranding(event?.detail || getCachedBranding())
+    })
+
+    syncBranding()
+
+    return () => {
+      mounted = false
+      unsubscribe()
+    }
+  }, [])
+
   return (
     <footer className="footer">
       <div className="shell footer-grid">
         <section>
-          <h4>Movi Fashion E-Commerce Platform</h4>
+          <h4>{branding.platform_name} E-Commerce Platform</h4>
           <p>Modern commerce UI with editorial clarity, consistent spacing, and a polished shopping flow.</p>
         </section>
         <section>
@@ -26,7 +60,7 @@ export default function Footer() {
         </section>
       </div>
       <div className="shell">
-        <p className="copyright">Copyright 2026 Movi Fashion E-Commerce Platform. All rights reserved.</p>
+        <p className="copyright">Copyright 2026 {branding.platform_name} E-Commerce Platform. All rights reserved.</p>
       </div>
     </footer>
   )

@@ -11,6 +11,7 @@ import Login from './pages/Login'
 import Signup from './pages/Signup'
 import MerchantRegister from './pages/MerchantRegister'
 import DeliveryRegister from './pages/DeliveryRegister'
+import DeliveryProfile from './pages/DeliveryProfile'
 import OperationsRegister from './pages/OperationsRegister'
 import AdminDashboard from './pages/AdminDashboard'
 import ManageProducts from './pages/ManageProducts'
@@ -23,10 +24,15 @@ import AdminShippingSettings from './pages/AdminShippingSettings'
 import AdminCustomersPage from './pages/AdminCustomersPage'
 import AdminAnalyticsPage from './pages/AdminAnalyticsPage'
 import AdminProfilePage from './pages/AdminProfilePage'
+import SuperAdminDashboard from './pages/SuperAdminDashboard'
 import { getStoredUser } from './utils/auth'
+import { getSuperAdminSecretPath } from './utils/platform'
 
 function normalizeRole(role) {
   const next = String(role || '').trim().toLowerCase()
+  if (next === 'super_admin' || next === 'superadmin') {
+    return 'super_admin'
+  }
   if (next === 'merchant' || next === 'admin') {
     return 'admin'
   }
@@ -44,6 +50,10 @@ function normalizeRole(role) {
 
 function redirectByRole(user) {
   const role = normalizeRole(user?.role)
+  const superAdminSecretPath = getSuperAdminSecretPath()
+  if (role === 'super_admin') {
+    return superAdminSecretPath
+  }
   if (role === 'admin') {
     return '/admin/dashboard'
   }
@@ -80,6 +90,7 @@ function RequireRole({ user, allowedRoles, children }) {
 function App() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const location = useLocation()
+  const superAdminSecretPath = getSuperAdminSecretPath()
   const role = normalizeRole(currentUser?.role)
   const isCustomerUser = role === 'user'
 
@@ -105,6 +116,7 @@ function App() {
     }
 
     if (
+      pathname.startsWith(superAdminSecretPath) ||
       pathname.startsWith('/admin/dashboard') ||
       pathname.startsWith('/admin/orders') ||
       pathname.startsWith('/admin/customers') ||
@@ -152,7 +164,7 @@ function App() {
       'ui-theme-operations',
     )
     document.body.classList.add(`ui-theme-${nextTheme}`)
-  }, [location.pathname, currentUser?.role])
+  }, [location.pathname, currentUser?.role, superAdminSecretPath])
 
   return (
     <PageLayout>
@@ -191,7 +203,12 @@ function App() {
         <Route path="/admin/customers" element={<RequireRole user={currentUser} allowedRoles={['admin']}><AdminCustomersPage /></RequireRole>} />
         <Route path="/admin/analytics" element={<RequireRole user={currentUser} allowedRoles={['admin']}><AdminAnalyticsPage /></RequireRole>} />
         <Route path="/admin/profile" element={<RequireRole user={currentUser} allowedRoles={['admin']}><AdminProfilePage /></RequireRole>} />
+        <Route
+          path={superAdminSecretPath}
+          element={<RequireRole user={currentUser} allowedRoles={['super_admin']}><SuperAdminDashboard /></RequireRole>}
+        />
         <Route path="/delivery/dashboard" element={<RequireRole user={currentUser} allowedRoles={['delivery']}><DeliveryDashboard /></RequireRole>} />
+        <Route path="/delivery/profile" element={<RequireRole user={currentUser} allowedRoles={['delivery']}><DeliveryProfile /></RequireRole>} />
         <Route path="/operations/dashboard" element={<RequireRole user={currentUser} allowedRoles={['operations']}><OperationsDashboard /></RequireRole>} />
         <Route path="*" element={<RequireAuth user={currentUser}><Navigate to={redirectByRole(currentUser)} replace /></RequireAuth>} />
       </Routes>

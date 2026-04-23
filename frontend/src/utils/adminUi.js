@@ -1,7 +1,6 @@
 export function normalizeOrderStatus(status) {
   const value = String(status || '').trim().toUpperCase()
-  if (!value) return 'PENDING'
-  if (value === 'PLACED' || value === 'CONFIRMED') return 'PENDING'
+  if (!value) return 'PLACED'
   return value
 }
 
@@ -10,14 +9,14 @@ export function formatStatusLabel(status) {
     .trim()
     .replaceAll('_', ' ')
     .toLowerCase()
-    .replace(/\b\w/g, (char) => char.toUpperCase()) || 'Pending'
+    .replace(/\b\w/g, (char) => char.toUpperCase()) || 'Placed'
 }
 
 export function getStatusBadgeClass(status) {
   const normalized = normalizeOrderStatus(status)
   if (normalized === 'DELIVERED') return 'badge badge-success'
   if (normalized === 'SHIPPED' || normalized === 'OUT_FOR_DELIVERY') return 'badge badge-info'
-  if (normalized === 'PACKED') return 'badge badge-warning'
+  if (normalized === 'PACKED' || normalized === 'CONFIRMED' || normalized === 'PLACED') return 'badge badge-warning'
   return 'badge badge-danger'
 }
 
@@ -34,7 +33,7 @@ export function getSlaState(order) {
     return { label: 'On Time', className: 'badge badge-success' }
   }
 
-  if (normalized === 'PENDING' && ageHours > 48) {
+  if ((normalized === 'PLACED' || normalized === 'CONFIRMED') && ageHours > 48) {
     return { label: 'Delayed', className: 'badge badge-danger' }
   }
 

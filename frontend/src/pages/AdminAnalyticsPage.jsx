@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Cell,
   Pie,
@@ -9,7 +9,7 @@ import {
 import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
 import RevenueChart from '../components/RevenueChart'
-import { products } from '../data/products'
+import { fetchCatalogProducts } from '../utils/catalog'
 
 const palette = ['#0f62fe', '#3a80ff', '#69a1ff', '#9ec0ff', '#d0e2ff']
 
@@ -31,9 +31,28 @@ function toCsv(rows) {
 
 export default function AdminAnalyticsPage() {
   const [range, setRange] = useState('MONTHLY')
+  const [catalogProducts, setCatalogProducts] = useState([])
+
+  useEffect(() => {
+    let mounted = true
+
+    const loadCatalog = async () => {
+      const data = await fetchCatalogProducts()
+      if (!mounted) {
+        return
+      }
+      setCatalogProducts(Array.isArray(data) ? data : [])
+    }
+
+    loadCatalog()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const categorySales = useMemo(() => {
-    const grouped = products.reduce((accumulator, product) => {
+    const grouped = catalogProducts.reduce((accumulator, product) => {
       const key = product.category || 'Other'
       accumulator[key] = (accumulator[key] || 0) + Number(product.price || 0)
       return accumulator
@@ -43,11 +62,11 @@ export default function AdminAnalyticsPage() {
       .map(([name, value]) => ({ name, value }))
       .sort((first, second) => second.value - first.value)
       .slice(0, 5)
-  }, [])
+  }, [catalogProducts])
 
   const topProducts = useMemo(
     () =>
-      [...products]
+      [...catalogProducts]
         .sort((first, second) => Number(second.price || 0) - Number(first.price || 0))
         .slice(0, 5)
         .map((product, index) => ({
@@ -56,7 +75,7 @@ export default function AdminAnalyticsPage() {
           value: Number(product.price || 0),
           progress: 100 - index * 14,
         })),
-    [],
+    [catalogProducts],
   )
 
   const metrics = metricsByRange[range]

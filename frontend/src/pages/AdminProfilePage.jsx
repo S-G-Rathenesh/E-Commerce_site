@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import PageWrapper from '../components/PageWrapper'
+import ImageUploadField from '../components/ImageUploadField'
 import { getStoredUser, buildAuthHeaders } from '../utils/auth'
 
 const DEMO_MERCHANT_EMAIL = 'admin.demo@veloura.com'
@@ -47,8 +48,9 @@ export default function AdminProfilePage() {
   }))
 
   const [loading, setLoading] = useState(false)
+  const [logoUploading, setLogoUploading] = useState(false)
   const [message, setMessage] = useState('')
-  const [logoPreview, setLogoPreview] = useState(profileDetails?.logo_url || null)
+  const logoPreview = formData.logoUrl || profileDetails?.logo_url || null
 
   const verificationStatus = String(user?.status || 'PENDING').toUpperCase() === 'ACTIVE' ? 'Verified' : 'Pending'
   const contactEmail = String(user?.email || '').trim() || 'Not provided'
@@ -59,6 +61,10 @@ export default function AdminProfilePage() {
   }
 
   const handleSave = async () => {
+    if (logoUploading) {
+      setMessage('Please wait for the logo upload to finish before saving.')
+      return
+    }
     setLoading(true)
     setMessage('')
     try {
@@ -131,6 +137,14 @@ export default function AdminProfilePage() {
                 </div>
               </div>
             </div>
+
+            <ImageUploadField
+              label="Store logo"
+              value={formData.logoUrl}
+              onChange={(nextValue) => setFormData((current) => ({ ...current, logoUrl: nextValue }))}
+              onUploadingChange={setLogoUploading}
+              description="Upload a store logo or paste the hosted URL you want on your profile."
+            />
 
             <label className="field-group">
               <span className="field-label">Store name</span>
@@ -228,9 +242,9 @@ export default function AdminProfilePage() {
           <button
             className="btn btn-primary"
             onClick={handleSave}
-            disabled={loading}
+            disabled={loading || logoUploading}
           >
-            {loading ? 'Saving...' : 'Save changes'}
+            {logoUploading ? 'Upload in progress...' : loading ? 'Saving...' : 'Save changes'}
           </button>
           {message && (
             <span style={{

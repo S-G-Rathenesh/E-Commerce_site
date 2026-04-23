@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders } from '../utils/auth'
+import { getSlaState } from '../utils/adminUi'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const WS_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace('http', 'ws')
@@ -14,15 +15,129 @@ const TRACKING_STEPS = [
   'DELIVERED',
 ]
 
+const TRACKING_OVERVIEW_STEPS = ['CONFIRMED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+
+const TRACKING_CARD_STEPS = [
+  { key: 'PLACED', label: 'Order Placed' },
+  { key: 'CONFIRMED', label: 'Confirmed' },
+  { key: 'PACKED', label: 'Packed' },
+  { key: 'SHIPPED', label: 'Shipped' },
+  { key: 'DELIVERY', label: 'Delivery' },
+]
+
 const STATUS_MESSAGES = {
-  'PLACED': '✅ Order Confirmed',
-  'CONFIRMED': '📦 Order Confirmed',
+  'PLACED': '📝 Order Placed',
+  'CONFIRMED': '✅ Order Confirmed',
   'PACKED': '📦 Order Packed',
   'SHIPPED': '🚚 Order Shipped',
   'OUT_FOR_DELIVERY': '🚚 Out for Delivery',
   'DELIVERED': '✅ Order Delivered',
   'CANCELLED': '❌ Order Cancelled',
   'DELIVERY_FAILED': '⚠️ Delivery Failed',
+}
+
+const STATUS_PERFORMER_ROLE_MAP = {
+  CONFIRMED: ['ADMIN'],
+  PACKED: ['OPERATIONS_STAFF'],
+  SHIPPED: ['ADMIN'],
+  OUT_FOR_DELIVERY: ['DELIVERY_ASSOCIATE'],
+  DELIVERED: ['DELIVERY_ASSOCIATE'],
+}
+
+function formatOrderDate(value, fallback = 'Date unavailable') {
+  const date = new Date(value || '')
+  if (Number.isNaN(date.getTime())) {
+    return fallback
+  }
+  return date.toLocaleDateString('en-IN', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function formatFriendlyDate(value, fallback = 'Today') {
+  const date = new Date(value || '')
+  if (Number.isNaN(date.getTime())) {
+    return fallback
+  }
+  return date.toLocaleDateString('en-IN', {
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function getProgressState(stepKey, status) {
+  const current = String(status || '').trim().toUpperCase()
+
+  if (stepKey === 'CONFIRMED') {
+    if (['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
+      return ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
+    }
+    return 'pending'
+  }
+
+  if (stepKey === 'PACKED') {
+    if (['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
+      return ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
+    }
+    return 'pending'
+  }
+
+  if (stepKey === 'SHIPPED') {
+    if (['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
+      return ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
+    }
+    return 'pending'
+  }
+
+  if (stepKey === 'DELIVERY') {
+    if (current === 'DELIVERED') {
+      return 'completed'
+    }
+    if (current === 'OUT_FOR_DELIVERY') {
+      return 'active'
+    }
+    return 'pending'
+  }
+
+  return 'pending'
+}
+
+function getTrackingSummary(order, slaLabel) {
+  const current = String(order.status || '').trim().toUpperCase()
+  const currentLocation = String(order?.shipment?.current_location || '').trim()
+  const shippedTime = order?.status_timestamps?.SHIPPED || order?.shipment?.updated_at || order?.updated_at
+
+  if (current === 'SHIPPED') {
+    return {
+      title: 'Shipped',
+      detail: `Today, ${formatFriendlyDate(shippedTime)}: Product has left the ${currentLocation || 'origin'} facility.`,
+      badge: slaLabel,
+    }
+  }
+
+  if (current === 'OUT_FOR_DELIVERY') {
+    return {
+      title: 'Out For Delivery',
+      detail: `Today, ${formatFriendlyDate(order?.updated_at)}: Your package is out for delivery.`,
+      badge: slaLabel,
+    }
+  }
+
+  if (current === 'DELIVERED') {
+    return {
+      title: 'Delivered',
+      detail: `Delivered on ${formatFriendlyDate(order?.status_timestamps?.DELIVERED || order?.updated_at)}.`,
+      badge: 'Delivered',
+    }
+  }
+
+  return {
+    title: String(current || 'PLACED').replaceAll('_', ' '),
+    detail: `Order placed on ${formatOrderDate(order?.created_at, 'today')}.`,
+    badge: slaLabel,
+  }
 }
 
 function resolveStepState(step, currentStatus, completedSet) {
@@ -42,6 +157,110 @@ function resolveStepState(step, currentStatus, completedSet) {
   }
 
   return 'pending'
+}
+
+function getHistoryByStatus(order) {
+  const history = Array.isArray(order?.status_history) ? order.status_history : []
+  return history.reduce((accumulator, entry) => {
+    const key = String(entry?.status || '').trim().toUpperCase()
+    if (key) {
+      accumulator[key] = entry
+    }
+    return accumulator
+  }, {})
+}
+
+function getStepTimestamp(order, step) {
+  const timestamps = order?.status_timestamps || {}
+  const fromMap = timestamps?.[step]
+  if (fromMap) {
+    return fromMap
+  }
+  const historyByStatus = getHistoryByStatus(order)
+  return historyByStatus?.[step]?.timestamp || ''
+}
+
+function mapStatusToCardStepIndex(status) {
+  const current = String(status || '').trim().toUpperCase()
+
+  if (current === 'PLACED') {
+    return 0
+  }
+  if (current === 'CONFIRMED') {
+    return 1
+  }
+  if (current === 'PACKED') {
+    return 2
+  }
+  if (current === 'SHIPPED') {
+    return 3
+  }
+  if (current === 'OUT_FOR_DELIVERY' || current === 'DELIVERED') {
+    return 4
+  }
+  return 0
+}
+
+function formatStepTimestamp(value, options = {}) {
+  const date = new Date(value || '')
+  if (Number.isNaN(date.getTime())) {
+    return options.fallback || 'Pending'
+  }
+
+  if (options.todayLabel) {
+    const now = new Date()
+    const isToday =
+      date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate()
+    if (isToday) {
+      return 'Today'
+    }
+  }
+
+  return date.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function getDeliveryEta(order) {
+  const shippedAt = getStepTimestamp(order, 'SHIPPED') || getStepTimestamp(order, 'PACKED') || order?.updated_at
+  const baseDate = new Date(shippedAt || '')
+  if (Number.isNaN(baseDate.getTime())) {
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    return `Expected ${tomorrow.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
+  }
+
+  baseDate.setDate(baseDate.getDate() + 1)
+  return `Expected ${baseDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
+}
+
+function shouldApplyStatusUpdate(previousStatus, nextStatus, performerRole) {
+  const current = String(previousStatus || '').trim().toUpperCase()
+  const target = String(nextStatus || '').trim().toUpperCase()
+  const role = String(performerRole || '').trim().toUpperCase()
+  const allowedRoles = STATUS_PERFORMER_ROLE_MAP[target]
+
+  if (!target || current === target) {
+    return false
+  }
+
+  if (allowedRoles && !allowedRoles.includes(role)) {
+    return false
+  }
+
+  const currentIndex = TRACKING_STEPS.indexOf(current)
+  const targetIndex = TRACKING_STEPS.indexOf(target)
+
+  if (currentIndex === -1 || targetIndex === -1) {
+    return true
+  }
+
+  return targetIndex === currentIndex + 1
 }
 
 export default function OrdersTracking() {
@@ -116,6 +335,10 @@ export default function OrdersTracking() {
 
   const handleOrderStatusUpdate = (event) => {
     const { order_id, new_status, previous_status, message: statusMessage } = event.data
+
+    if (!shouldApplyStatusUpdate(previous_status, new_status, event.data?.performer_role)) {
+      return
+    }
     
     // Update the order status in local state
     setOrders((prevOrders) =>
@@ -396,54 +619,116 @@ export default function OrdersTracking() {
 
         <div className="admin-orders-stack">
           {trackedOrders.map((order) => (
-            <article key={order.order_id} className={`section-card panel-stack tracking-order-card ${recentStatusUpdates[order.order_id] ? 'tracking-order-card-updating' : ''}`}>
-              <div className="section-head">
-                <div>
-                  <h3>{order.order_id}</h3>
-                  <p>{order.customer_email}</p>
-                </div>
-                <p className="tracking-order-status">
-                  {order.current_status}
-                </p>
-              </div>
+            <article key={order.order_id} className={`section-card panel-stack tracking-order-card tracking-order-card-compact ${recentStatusUpdates[order.order_id] ? 'tracking-order-card-updating' : ''}`}>
+              {(() => {
+                const currentStatus = String(order.current_status || '').trim().toUpperCase()
+                const overviewIndex = TRACKING_OVERVIEW_STEPS.indexOf(currentStatus)
+                const timelineEvents = [
+                  ...(Array.isArray(order.status_history) ? order.status_history : []),
+                  ...(Array.isArray(order.tracking_logs) ? order.tracking_logs : []),
+                ]
+                  .map((entry) => ({
+                    status: String(entry?.status || '').trim().toUpperCase(),
+                    timestamp: entry?.timestamp || '',
+                    location: entry?.location || '',
+                    updatedByRole: entry?.updated_by_role || entry?.performer_role || '',
+                  }))
+                  .filter((entry) => entry.status)
+                  .sort((first, second) => String(first.timestamp).localeCompare(String(second.timestamp)))
 
-              {order.tracking_id ? (
-                <p>
-                  Tracking ID: <strong>{order.tracking_id}</strong>
-                </p>
-              ) : null}
+                const header = getTrackingSummary(order, getSlaState(order).label)
+                const etaText = getDeliveryEta(order).replace(/^Expected\s+/i, 'Expected delivery: ')
 
-              <section className="section-card panel-stack tracking-subcard">
-                <p className="field-label">Payment</p>
-                <p>Method: {String(order?.payment?.method || order.payment_method || 'COD').replaceAll('_', ' ')}</p>
-                <p>Status: {String(order?.payment?.status || 'PENDING').replaceAll('_', ' ')}</p>
-                {order?.payment?.payment_id ? <p>Payment ID: {order.payment.payment_id}</p> : null}
-              </section>
+                return (
+                  <>
+                    <div className="tracking-card-head tracking-card-head-compact">
+                      <div>
+                        <h3>{header.title}</h3>
+                        <p className="tracking-order-message">{header.detail}</p>
+                        <p className="tracking-order-meta">{etaText}</p>
+                        <p className="tracking-order-meta">Order ID: {order.order_id}</p>
+                      </div>
+                      <span className={`tracking-status-chip ${currentStatus === 'DELIVERED' ? 'tracking-status-chip-delivered' : ''}`}>
+                        {currentStatus ? currentStatus.replaceAll('_', ' ') : 'PLACED'}
+                      </span>
+                    </div>
 
-              <div className="tracking-timeline" role="list" aria-label={`Tracking timeline ${order.order_id}`}>
-                {order.timeline.map((entry) => (
-                  <div
-                    key={`${order.order_id}-${entry.step}`}
-                      className={`tracking-step tracking-step-${entry.state} ${
-                      recentStatusUpdates[order.order_id] === entry.step ? 'updating' : ''
-                    }`}
-                    role="listitem"
-                  >
-                    <span className="tracking-dot" />
-                    <p>{entry.step.replaceAll('_', ' ')}</p>
-                  </div>
-                ))}
-              </div>
+                    <section className="tracking-progress-shell" aria-label={`Tracking timeline ${order.order_id}`}>
+                      <div className="tracking-progress-line" aria-hidden="true">
+                        <span className="tracking-progress-fill" style={{ width: `${Math.max(0, (Math.max(0, overviewIndex) / (TRACKING_OVERVIEW_STEPS.length - 1)) * 100)}%` }} />
+                      </div>
+                      <div className="tracking-progress-steps" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+                        {TRACKING_OVERVIEW_STEPS.map((step, index) => {
+                          const isCompleted = overviewIndex > index
+                          const isCurrent = overviewIndex === index
+                          return (
+                            <div
+                              key={`${order.order_id}-step-${step}`}
+                              className={`tracking-progress-step ${isCompleted ? 'tracking-progress-step-completed' : ''} ${isCurrent ? 'tracking-progress-step-active' : ''}`}
+                            >
+                              <span className="tracking-progress-dot" aria-hidden="true">
+                                {isCompleted ? '✓' : isCurrent ? '●' : '○'}
+                              </span>
+                              <span className="tracking-progress-label-wrap">
+                                <span>{step.replaceAll('_', ' ')}</span>
+                                <span className="tracking-progress-time">
+                                  {formatStepTimestamp(getStepTimestamp(order, step), { fallback: index === 0 ? formatStepTimestamp(order.created_at, { fallback: 'Pending' }) : 'Pending', todayLabel: step === 'SHIPPED' || step === 'OUT_FOR_DELIVERY' })}
+                                </span>
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </section>
 
-              {(order.tracking_logs || []).length > 0 ? (
-                <div className="summary-row">
-                  {(order.tracking_logs || []).map((entry) => (
-                    <p key={`${order.order_id}-${entry.id || entry.timestamp}`}>
-                      {String(entry.status || '').replaceAll('_', ' ')} · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
+                    <div className="tracking-delivery-info">
+                      {currentStatus === 'SHIPPED' ? (
+                        <p>Product has left the facility.</p>
+                      ) : currentStatus === 'OUT_FOR_DELIVERY' ? (
+                        <p>Product is on the way to the customer.</p>
+                      ) : currentStatus === 'DELIVERED' ? (
+                        <p>Product has been delivered successfully.</p>
+                      ) : (
+                        <p>Tracking will update after the shipment is dispatched.</p>
+                      )}
+                    </div>
+
+                    <details className="tracking-details-accordion">
+                      <summary>Tracking Details</summary>
+                      <div className="tracking-details-list">
+                        {timelineEvents.length > 0 ? (
+                          timelineEvents.map((entry, index) => (
+                            <div key={`${order.order_id}-timeline-event-${index}`} className="tracking-details-row">
+                              <span className="tracking-details-time">{formatStepTimestamp(entry.timestamp, { fallback: 'Updated' })}</span>
+                              <span className="tracking-details-status">{String(entry.status).replaceAll('_', ' ')}</span>
+                              <span className="tracking-details-meta">
+                                {entry.location ? ` · ${entry.location}` : ''}
+                                {entry.updatedByRole ? ` · ${entry.updatedByRole}` : ''}
+                              </span>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="tracking-details-empty">No tracking events available yet.</p>
+                        )}
+                      </div>
+                    </details>
+
+                    <section className="tracking-payment-line">
+                      <p>Payment method: {String(order?.payment?.method || order.payment_method || 'COD').replaceAll('_', ' ')}</p>
+                      <p>Status: {String(order?.payment?.status || 'PENDING').replaceAll('_', ' ')}</p>
+                      {String(order?.payment?.method || order.payment_method || 'COD').toUpperCase() === 'COD' ? (
+                        <p>Payment will be collected on delivery.</p>
+                      ) : order?.payment?.payment_id ? (
+                        <p>Payment ID: {order.payment.payment_id}</p>
+                      ) : null}
+                    </section>
+
+                    {order.tracking_id ? (
+                      <p className="tracking-order-meta">Tracking ID: <strong>{order.tracking_id}</strong></p>
+                    ) : null}
+                  </>
+                )
+              })()}
 
               <div className="row-gap">
                 {order.can_cancel ? (

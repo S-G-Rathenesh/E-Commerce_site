@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import { setStoredUser } from '../utils/auth'
+import { getSuperAdminSecretPath } from '../utils/platform'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -12,6 +13,12 @@ const DEMO_LOGIN_ACCOUNTS = [
     role: 'admin',
     email: 'admin.demo@veloura.com',
     password: 'Admin#Demo2026',
+  },
+  {
+    label: 'Super Admin',
+    role: 'super_admin',
+    email: 'superadmin.demo@veloura.com',
+    password: 'SuperAdmin#Demo2026',
   },
   {
     label: 'Customer',
@@ -35,6 +42,9 @@ const DEMO_LOGIN_ACCOUNTS = [
 
 function redirectPathByRole(role) {
   const nextRole = String(role || '').trim().toLowerCase()
+  if (nextRole === 'super_admin' || nextRole === 'superadmin') {
+    return getSuperAdminSecretPath()
+  }
   if (nextRole === 'admin' || nextRole === 'merchant') {
     return '/admin'
   }

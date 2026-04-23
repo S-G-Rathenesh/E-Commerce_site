@@ -5,36 +5,76 @@ import StatusBadge from '../components/StatusBadge'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
-const DELIVERY_TABS = ['ACTIVE', 'COMPLETED', 'FAILED']
-const DELIVERY_STEPS = ['ASSIGNED', 'PICKED', 'OUT_FOR_DELIVERY', 'DELIVERED']
-
-function getStepState(order, step) {
-  const status = String(order?.status || '').toUpperCase()
-  const meta = order?.delivery_meta || {}
-
-  const completed = {
-    ASSIGNED: true,
-    PICKED: Boolean(meta.picked_at),
-    OUT_FOR_DELIVERY: status === 'OUT_FOR_DELIVERY' || status === 'DELIVERED',
-    DELIVERED: status === 'DELIVERED',
-  }
-
-  if (completed[step]) {
-    if (step === 'DELIVERED' && status === 'DELIVERED') {
-      return 'active'
-    }
-    if (step === 'OUT_FOR_DELIVERY' && status === 'OUT_FOR_DELIVERY') {
-      return 'active'
-    }
-    return 'done'
-  }
-  return 'todo'
-}
+const DELIVERY_TABS = ['READY', 'ACTIVE', 'COMPLETED', 'FAILED']
+const DELIVERY_FLOW = ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 function buildMapsLink(order) {
   const rawAddress = String(order?.delivery_address || '').trim()
   const destination = rawAddress || `${order?.destination_pincode || ''}`
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination)}`
+}
+
+function getDeliveryQueueState(order) {
+  const status = String(order?.status || '').toUpperCase()
+  const meta = order?.delivery_meta || {}
+
+  if (status === 'DELIVERED') {
+    return 'COMPLETED'
+  }
+  if (status === 'DELIVERY_FAILED') {
+    return 'FAILED'
+  }
+  if (meta.rejected_at) {
+    return 'FAILED'
+  }
+  if (status === 'OUT_FOR_DELIVERY') {
+    return 'ACTIVE'
+  }
+  return 'READY'
+}
+
+function getFlowState(order, step) {
+  const status = String(order?.status || '').toUpperCase()
+
+  const completed = {
+    SHIPPED: true,
+    OUT_FOR_DELIVERY: status === 'OUT_FOR_DELIVERY' || status === 'DELIVERED',
+    DELIVERED: status === 'DELIVERED',
+  }
+
+  if (!completed[step]) {
+    return 'todo'
+  }
+
+  if (status === 'DELIVERED' && step === 'DELIVERED') {
+    return 'active'
+  }
+  if (status === 'OUT_FOR_DELIVERY' && step === 'OUT_FOR_DELIVERY') {
+    return 'active'
+  }
+  return 'done'
+}
+
+function getOrderTitle(order) {
+  return order?.customer_name || order?.customer_email || order?.order_id || 'Delivery order'
+}
+
+function formatOrderTime(value) {
+  if (!value) {
+    return 'N/A'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'N/A'
+  }
+  return date.toLocaleString()
+}
+
+function getReadyForPickupLabel(order) {
+  if (String(order?.status || '').toUpperCase() === 'SHIPPED') {
+    return 'Ready for Pickup'
+  }
+  return 'Awaiting Pickup'
 }
 
 export default function DeliveryDashboard() {
@@ -47,12 +87,10 @@ export default function DeliveryDashboard() {
   })
   const [message, setMessage] = useState('')
   const [drafts, setDrafts] = useState({})
-  const [activeTab, setActiveTab] = useState('ACTIVE')
-  const [isOnline, setIsOnline] = useState(() => {
-    const stored = window.localStorage.getItem('delivery_online_status')
-    return stored ? stored === 'ONLINE' : true
-  })
+  const [activeTab, setActiveTab] = useState('READY')
+  const [isOnline, setIsOnline] = useState(() => window.localStorage.getItem('delivery_online_status') !== 'OFFLINE')
   const [loading, setLoading] = useState(true)
+  const [actionLoadingByOrder, setActionLoadingByOrder] = useState({})
 
   const refreshAccessToken = async () => {
     const user = getStoredUser()
@@ -107,9 +145,7 @@ export default function DeliveryDashboard() {
 
   const validateTokenOnLoad = async () => {
     try {
-      const response = await requestWithAuth(`${API_BASE}/auth/me`, {
-        method: 'GET',
-      })
+      const response = await requestWithAuth(`${API_BASE}/auth/me`, { method: 'GET' })
       return response.ok
     } catch {
       return false
@@ -118,9 +154,7 @@ export default function DeliveryDashboard() {
 
   const loadEarnings = async () => {
     try {
-      const response = await requestWithAuth(`${API_BASE}/delivery/earnings`, {
-        method: 'GET',
-      })
+      const response = await requestWithAuth(`${API_BASE}/delivery/earnings`, { method: 'GET' })
       const data = await response.json()
       if (!response.ok) {
         return
@@ -143,9 +177,7 @@ export default function DeliveryDashboard() {
 
     setLoading(true)
     try {
-      const response = await requestWithAuth(`${API_BASE}/delivery/orders`, {
-        method: 'GET',
-      })
+      const response = await requestWithAuth(`${API_BASE}/delivery/orders`, { method: 'GET' })
       const data = await response.json()
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to load delivery orders.')
@@ -158,7 +190,6 @@ export default function DeliveryDashboard() {
       setDrafts(
         nextOrders.reduce((accumulator, order) => {
           accumulator[order.order_id] = {
-            status: order.status === 'DELIVERED' ? 'DELIVERED' : order.status === 'DELIVERY_FAILED' ? 'FAILED' : 'OUT_FOR_DELIVERY',
             current_location: order?.shipment?.current_location || 'Last mile route',
           }
           return accumulator
@@ -192,7 +223,7 @@ export default function DeliveryDashboard() {
     if (isOnline) {
       loadOrders()
     } else {
-      setMessage('You are offline. New orders will not be fetched.')
+      setMessage('You are offline. New delivery tasks will not refresh.')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline])
@@ -219,83 +250,101 @@ export default function DeliveryDashboard() {
     }))
   }
 
-  const saveStatus = async (orderId, statusOverride = null) => {
+  const performDeliveryAction = async (orderId, action, currentLocationOverride = null) => {
+    if (actionLoadingByOrder[orderId]) {
+      return
+    }
+
+    setActionLoadingByOrder((current) => ({
+      ...current,
+      [orderId]: true,
+    }))
+
     const draft = drafts[orderId] || {}
-    const statusValue = statusOverride || draft.status
+    const currentLocation = currentLocationOverride || draft.current_location || 'Last mile route'
+
+    const startDeliveryEndpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/start-delivery`
+    const legacyStartDeliveryEndpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/out-for-delivery`
+    let endpoint = startDeliveryEndpoint
+    let method = 'POST'
+    let body = { current_location: currentLocation }
+
+    if (action === 'DELIVERED') {
+      endpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/delivered`
+    }
 
     try {
-      const response = await requestWithAuth(`${API_BASE}/delivery/update-status`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          order_id: orderId,
-          status: statusValue,
-          current_location: draft.current_location,
-        }),
+      let response = await requestWithAuth(endpoint, {
+        method,
+        headers: body && Object.keys(body).length > 0 ? { 'Content-Type': 'application/json' } : undefined,
+        body: body && Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
       })
 
+      // Backward compatibility for older backend instances still exposing /out-for-delivery.
+      if (action !== 'DELIVERED' && response.status === 404) {
+        response = await requestWithAuth(legacyStartDeliveryEndpoint, {
+          method,
+          headers: body && Object.keys(body).length > 0 ? { 'Content-Type': 'application/json' } : undefined,
+          body: body && Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
+        })
+      }
+
       const data = await response.json()
+
       if (!response.ok) {
-        setMessage(data?.detail || 'Failed to update delivery status.')
+        setMessage(data?.detail || 'Failed to update delivery task.')
         return
       }
 
-      setMessage('Delivery status updated successfully.')
-      const updatedOrder = data?.order || null
-      if (updatedOrder?.order_id) {
-        setOrders((current) => current.map((order) => (order.order_id === updatedOrder.order_id ? updatedOrder : order)))
-        setDrafts((current) => ({
-          ...current,
-          [updatedOrder.order_id]: {
-            status: updatedOrder.status === 'DELIVERED' ? 'DELIVERED' : 'OUT_FOR_DELIVERY',
-            current_location: updatedOrder?.shipment?.current_location || draft.current_location || 'Last mile route',
-          },
-        }))
-      } else {
-        loadOrders()
-      }
-      await loadEarnings()
+      setMessage(data?.message || 'Delivery task updated successfully.')
+      await loadOrders()
     } catch {
-      setMessage('Failed to update delivery status.')
+      setMessage('Failed to update delivery task.')
+    } finally {
+      setActionLoadingByOrder((current) => {
+        const next = { ...current }
+        delete next[orderId]
+        return next
+      })
     }
   }
 
   const filteredOrders = useMemo(() => {
-    return orders.filter((order) => {
-      const status = String(order.status || '').toUpperCase()
-      if (activeTab === 'COMPLETED') {
-        return status === 'DELIVERED'
-      }
-      if (activeTab === 'FAILED') {
-        return status === 'DELIVERY_FAILED'
-      }
-      return status !== 'DELIVERED' && status !== 'DELIVERY_FAILED'
-    })
+    return orders.filter((order) => getDeliveryQueueState(order) === activeTab)
   }, [orders, activeTab])
+
+  const stats = useMemo(() => {
+    return orders.reduce(
+      (accumulator, order) => {
+        const queueState = getDeliveryQueueState(order)
+        accumulator[queueState] += 1
+        return accumulator
+      },
+      { READY: 0, ACTIVE: 0, COMPLETED: 0, FAILED: 0 },
+    )
+  }, [orders])
 
   return (
     <PageWrapper
       className="page-delivery"
       eyebrow="Delivery"
       title="Delivery dashboard"
-      description="Accept tasks, navigate fast, update real-time delivery status, and track your earnings."
+      description="Manage ready-for-pickup shipments, start deliveries, and confirm final delivery in real time."
     >
       <section className="panel panel-stack">
         <div className="section-head">
-          <h2>Last-mile control center</h2>
+          <div>
+            <h2>Last-mile control center</h2>
+            <p>Only your assigned orders are shown here.</p>
+          </div>
           <div className="admin-controls-row">
-            <label className="field-group" style={{ margin: 0 }}>
-              <span className="field-label">Partner status</span>
-              <button
-                type="button"
-                className={`btn ${isOnline ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setIsOnline((current) => !current)}
-              >
-                {isOnline ? 'Online' : 'Offline'}
-              </button>
-            </label>
+            <button
+              type="button"
+              className={`btn ${isOnline ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setIsOnline((current) => !current)}
+            >
+              {isOnline ? 'Online' : 'Offline'}
+            </button>
             <button type="button" className="btn btn-secondary" onClick={loadOrders} disabled={!isOnline}>
               Refresh
             </button>
@@ -309,9 +358,14 @@ export default function DeliveryDashboard() {
             <span>Delivered today: {earnings.today_deliveries}</span>
           </article>
           <article className="panel stat-card card">
-            <p>Total deliveries today</p>
-            <h3 className="stat-value">{earnings.today_deliveries}</h3>
-            <span>Successful drops</span>
+            <p>Ready for Pickup</p>
+            <h3 className="stat-value">{stats.READY}</h3>
+            <span>Shipped orders awaiting pickup</span>
+          </article>
+          <article className="panel stat-card card">
+            <p>Completed</p>
+            <h3 className="stat-value">{stats.COMPLETED}</h3>
+            <span>Delivered successfully</span>
           </article>
           <article className="panel stat-card card">
             <p>Weekly earnings</p>
@@ -328,7 +382,13 @@ export default function DeliveryDashboard() {
               className={`tab-button ${activeTab === tab ? 'tab-button-active' : ''}`}
               onClick={() => setActiveTab(tab)}
             >
-              {tab === 'ACTIVE' ? 'Active Orders' : tab === 'COMPLETED' ? 'Completed Orders' : 'Failed Orders'}
+              {tab === 'READY'
+                ? 'Ready for Pickup'
+                : tab === 'ACTIVE'
+                  ? 'Out for Delivery'
+                  : tab === 'COMPLETED'
+                    ? 'Completed Orders'
+                    : 'Failed Orders'}
             </button>
           ))}
         </div>
@@ -342,19 +402,26 @@ export default function DeliveryDashboard() {
           {filteredOrders.map((order) => {
             const shipment = order.shipment || {}
             const draft = drafts[order.order_id] || {
-              status: 'OUT_FOR_DELIVERY',
               current_location: shipment.current_location || 'Last mile route',
             }
             const phone = String(order.customer_phone || '').trim()
             const mapsLink = buildMapsLink(order)
-            const rawStatus = String(order.status || '').toUpperCase()
+            const status = String(order.status || '').toUpperCase()
+            const queueState = getDeliveryQueueState(order)
+            const canStart = status === 'SHIPPED'
+            const canComplete = status === 'OUT_FOR_DELIVERY'
+            const isDelivered = status === 'DELIVERED'
+            const isActionLoading = Boolean(actionLoadingByOrder[order.order_id])
+
+            console.log('ORDER STATUS:', order.status)
 
             return (
-              <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${String(order.status || '').toUpperCase() === 'OUT_FOR_DELIVERY' ? 'delivery-order-card-active' : ''}`}>
+              <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${queueState === 'ACTIVE' ? 'delivery-order-card-active' : ''}`}>
                 <div className="section-head">
                   <div>
                     <h3>{order.order_id}</h3>
-                    <p>{order.customer_name || order.customer_email}</p>
+                    <p>{getOrderTitle(order)}</p>
+                    <p>{getReadyForPickupLabel(order)}</p>
                   </div>
                   <StatusBadge status={order.status} />
                 </div>
@@ -378,7 +445,7 @@ export default function DeliveryDashboard() {
 
                   <div className="field-group">
                     <span className="field-label">Order value</span>
-                    <p>Rs. {Number(order.order_value || order.total_amount || 0).toFixed(2)}</p>
+                    <p>Rs. {Number(order.order_value || order.total_amount || 0).toLocaleString('en-IN')}</p>
                   </div>
 
                   <div className="field-group">
@@ -390,10 +457,10 @@ export default function DeliveryDashboard() {
                 </div>
 
                 <div className="field-group">
-                  <span className="field-label">Delivery progress</span>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '8px' }}>
-                    {DELIVERY_STEPS.map((step) => {
-                      const stepState = getStepState(order, step)
+                  <span className="field-label">Delivery flow</span>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '8px' }}>
+                    {DELIVERY_FLOW.map((step) => {
+                      const stepState = getFlowState(order, step)
                       return (
                         <div
                           key={`${order.order_id}-${step}`}
@@ -418,26 +485,12 @@ export default function DeliveryDashboard() {
 
                 <div className="admin-orders-grid">
                   <label className="field-group">
-                    <span className="field-label">Status</span>
-                    <select
-                      className="field"
-                      value={draft.status}
-                      onChange={(event) => updateDraft(order.order_id, 'status', event.target.value)}
-                    >
-                      {['OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED'].map((statusValue) => (
-                        <option key={statusValue} value={statusValue}>
-                          {statusValue}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="field-group">
-                    <span className="field-label">Current Location</span>
+                    <span className="field-label">Current location</span>
                     <input
                       className="field"
                       value={draft.current_location}
                       onChange={(event) => updateDraft(order.order_id, 'current_location', event.target.value)}
+                      placeholder="Last mile route"
                     />
                   </label>
 
@@ -446,49 +499,20 @@ export default function DeliveryDashboard() {
                     <p>{shipment.tracking_id || 'Pending tracking ID'}</p>
                   </div>
 
-                  <button type="button" className="btn btn-primary" onClick={() => saveStatus(order.order_id)}>
-                    Update Status
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => saveStatus(order.order_id, 'ACCEPTED')}
-                    disabled={Boolean(order?.delivery_meta?.accepted_at) || rawStatus === 'DELIVERED' || rawStatus === 'DELIVERY_FAILED'}
-                  >
-                    Accept Order
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => saveStatus(order.order_id, 'PICKED_UP')}
-                    disabled={!order?.delivery_meta?.accepted_at || Boolean(order?.delivery_meta?.picked_at) || rawStatus === 'DELIVERED' || rawStatus === 'DELIVERY_FAILED'}
-                  >
-                    Mark as Picked Up
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => saveStatus(order.order_id, 'OUT_FOR_DELIVERY')}
-                    disabled={!order?.delivery_meta?.picked_at || rawStatus === 'OUT_FOR_DELIVERY' || rawStatus === 'DELIVERED' || rawStatus === 'DELIVERY_FAILED'}
-                  >
-                    Out for Delivery
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => saveStatus(order.order_id, 'DELIVERED')}
-                    disabled={rawStatus === 'DELIVERED' || rawStatus === 'DELIVERY_FAILED'}
-                  >
-                    Mark Delivered
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => saveStatus(order.order_id, 'FAILED')}
-                    disabled={rawStatus === 'DELIVERED' || rawStatus === 'DELIVERY_FAILED'}
-                  >
-                    Mark as Failed
-                  </button>
+                  {isDelivered ? (
+                    <button type="button" className="btn btn-secondary" disabled>
+                      ✔ Delivered
+                    </button>
+                  ) : canStart ? (
+                    <button type="button" className="btn btn-primary" onClick={() => performDeliveryAction(order.order_id, 'START_DELIVERY')} disabled={!canStart || isActionLoading}>
+                      {isActionLoading ? 'Starting...' : 'Start Delivery'}
+                    </button>
+                  ) : null}
+                  {canComplete ? (
+                    <button type="button" className="btn btn-secondary" onClick={() => performDeliveryAction(order.order_id, 'DELIVERED')} disabled={!canComplete || isActionLoading}>
+                      {isActionLoading ? 'Updating...' : 'Mark Delivered'}
+                    </button>
+                  ) : null}
                 </div>
               </article>
             )

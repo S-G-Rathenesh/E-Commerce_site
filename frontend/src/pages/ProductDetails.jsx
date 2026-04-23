@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { findProductById } from '../data/products'
 import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
 import AnimatedSection from '../components/AnimatedSection'
@@ -9,8 +8,7 @@ import DeliveryEstimate from '../components/DeliveryEstimate'
 import { addToCart } from '../utils/cart'
 import { getStoredUser } from '../utils/auth'
 import { addToWishlist } from '../utils/wishlist'
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+import { fetchCatalogProductById } from '../utils/catalog'
 
 const sizeOptions = ['S', 'M', 'L', 'XL']
 
@@ -65,8 +63,7 @@ const reviews = [
 export default function ProductDetails() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const localProduct = findProductById(id)
-  const [product, setProduct] = useState(localProduct)
+  const [product, setProduct] = useState(null)
   const [selectedSize, setSelectedSize] = useState('M')
   const [quantity, setQuantity] = useState(1)
   const [activeImageIndex, setActiveImageIndex] = useState(0)
@@ -76,24 +73,20 @@ export default function ProductDetails() {
   useEffect(() => {
     let active = true
 
-    fetch(`${API_BASE}/product/${id}`)
-      .then((response) => (response.ok ? response.json() : Promise.reject()))
-      .then((data) => {
-        if (!active || !data || data.error) {
-          return
-        }
-        setProduct(data)
-      })
-      .catch(() => {
-        if (active) {
-          setProduct((current) => current || localProduct)
-        }
-      })
+    const loadProduct = async () => {
+      const data = await fetchCatalogProductById(id)
+      if (!active) {
+        return
+      }
+      setProduct(data)
+    }
+
+    loadProduct()
 
     return () => {
       active = false
     }
-  }, [id, localProduct])
+  }, [id])
 
   useEffect(() => {
     const syncAuth = () => setCurrentUser(getStoredUser())

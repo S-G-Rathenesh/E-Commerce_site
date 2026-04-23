@@ -12,25 +12,23 @@ export default function ProductCard({ product, onAddToWishlist, isWishlisted = f
 
   return (
     <MotionArticle
-      className="product-card product-card-clickable"
-      role="button"
-      tabIndex={0}
+      className="product-card"
       initial={{ opacity: 0, y: 14 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, amount: 0.2 }}
       transition={{ duration: 0.34, delay: Math.min(index * 0.05, 0.35), ease: [0.22, 1, 0.36, 1] }}
       whileHover={{ scale: 1.03, y: -4 }}
       whileTap={{ scale: 0.99 }}
-      onClick={openProduct}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          openProduct()
-        }
-      }}
     >
       <div className="product-image-wrap">
-        <img src={product.image} alt={product.name} className="product-image" />
+        <button
+          type="button"
+          className="product-image-button"
+          onClick={openProduct}
+          aria-label={`View details for ${product.name}`}
+        >
+          <img src={product.image} alt={product.name} className="product-image" />
+        </button>
         <span className="product-badge">New</span>
       </div>
       <div className="product-content">

@@ -273,7 +273,7 @@ export default function MerchantRegister() {
         password: form.password,
         provider: 'email',
         role: 'admin',
-        status: 'ACTIVE',
+        status: 'PENDING',
       })
 
       setMessage(`Merchant registration submitted for ${form.storeName}.`)
