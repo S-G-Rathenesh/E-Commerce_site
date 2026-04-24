@@ -4,7 +4,7 @@ import Button from '../components/Button'
 import Input from '../components/Input'
 import PageWrapper from '../components/PageWrapper'
 import DeliveryInfo from '../components/DeliveryInfo'
-import { buildAuthHeaders, getStoredUser } from '../utils/auth'
+import { buildAuthHeaders, getStoredUser, refreshAuthToken } from '../utils/auth'
 import { clearCart, getCartItems } from '../utils/cart'
 import { getFinalDeliveryCharge } from '../utils/shipping'
 import { getSavedDefaultAddress } from '../utils/profileAddress'
@@ -103,29 +103,54 @@ export default function Checkout() {
     setAddress(savedDefaultAddress.addressLine)
   }
 
-  const loadSavedPaymentMethods = async () => {
-    const token = localStorage.getItem('auth_token')
-    const requestInit = {
-      headers: { Authorization: `Bearer ${token}` },
-    }
+  const requestWithAuth = async (path, requestInit = {}) => {
+    let lastError = null
+    const initialHeaders = requestInit?.headers || {}
 
     for (const baseUrl of API_CANDIDATES) {
       try {
-        const response = await fetch(`${baseUrl}/payment-methods`, requestInit)
-        if (response.ok) {
-          const data = await response.json()
-          setSavedMethods(data.payment_methods || [])
-          return
+        let response = await fetch(`${baseUrl}${path}`, {
+          ...requestInit,
+          headers: buildAuthHeaders(initialHeaders),
+        })
+
+        if (response.status !== 401) {
+          return response
         }
-        if (response.status < 500) {
-          setSavedMethods([])
-          return
+
+        const refreshed = await refreshAuthToken(baseUrl)
+        if (!refreshed) {
+          return response
         }
+
+        response = await fetch(`${baseUrl}${path}`, {
+          ...requestInit,
+          headers: buildAuthHeaders(initialHeaders),
+        })
+        return response
       } catch (error) {
-        if (baseUrl === API_CANDIDATES[API_CANDIDATES.length - 1]) {
-          console.error('Failed to load saved payment methods:', error)
-        }
+        lastError = error
       }
+    }
+
+    throw lastError || new Error('Unable to reach the service.')
+  }
+
+  const loadSavedPaymentMethods = async () => {
+    try {
+      const response = await requestWithAuth('/payment-methods', { method: 'GET' })
+      if (response.ok) {
+        const data = await response.json()
+        setSavedMethods(data.payment_methods || [])
+        return
+      }
+
+      if (response.status < 500) {
+        setSavedMethods([])
+        return
+      }
+    } catch (error) {
+      console.error('Failed to load saved payment methods:', error)
     }
 
     setSavedMethods([])
@@ -187,22 +212,11 @@ export default function Checkout() {
   }
 
   const submitOrder = async (orderPayload) => {
-    const requestOptions = {
+    return requestWithAuth('/orders', {
       method: 'POST',
-      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(orderPayload),
-    }
-
-    let lastError = null
-    for (const baseUrl of API_CANDIDATES) {
-      try {
-        return await fetch(`${baseUrl}/orders`, requestOptions)
-      } catch (error) {
-        lastError = error
-      }
-    }
-
-    throw lastError || new Error('Unable to reach the order service.')
+    })
   }
 
   const handlePlaceOrder = async () => {

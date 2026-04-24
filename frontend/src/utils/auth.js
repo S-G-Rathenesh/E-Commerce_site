@@ -1,5 +1,7 @@
 const AUTH_STORAGE_KEY = 'veloura_auth_user'
 const AUTH_ACCOUNTS_KEY = 'veloura_auth_accounts'
+const LEGACY_AUTH_TOKEN_KEY = 'auth_token'
+const LEGACY_ACCESS_TOKEN_KEY = 'access_token'
 
 const DEMO_ACCOUNTS = [
   {
@@ -64,7 +66,17 @@ export function getStoredUser() {
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY)
     if (!raw) {
-      return null
+      const legacyToken = String(
+        localStorage.getItem(LEGACY_AUTH_TOKEN_KEY) || localStorage.getItem(LEGACY_ACCESS_TOKEN_KEY) || '',
+      ).trim()
+      if (!legacyToken) {
+        return null
+      }
+      return {
+        role: 'user',
+        status: 'ACTIVE',
+        token: legacyToken,
+      }
     }
     const parsed = JSON.parse(raw)
     if (!parsed) {
@@ -87,19 +99,31 @@ export function setStoredUser(user) {
     role: normalizeRole(user?.role),
     status: normalizeStatus(user?.status),
     token: user?.token || '',
+    refresh_token: user?.refresh_token || '',
   }
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload))
+  if (payload.token) {
+    localStorage.setItem(LEGACY_AUTH_TOKEN_KEY, payload.token)
+    localStorage.setItem(LEGACY_ACCESS_TOKEN_KEY, payload.token)
+  } else {
+    localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY)
+    localStorage.removeItem(LEGACY_ACCESS_TOKEN_KEY)
+  }
   window.dispatchEvent(new Event('auth-changed'))
 }
 
 export function clearStoredUser() {
   localStorage.removeItem(AUTH_STORAGE_KEY)
+  localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY)
+  localStorage.removeItem(LEGACY_ACCESS_TOKEN_KEY)
   window.dispatchEvent(new Event('auth-changed'))
 }
 
 export function getAuthToken() {
   const user = getStoredUser()
-  return String(user?.token || '').trim()
+  return String(
+    user?.token || localStorage.getItem(LEGACY_AUTH_TOKEN_KEY) || localStorage.getItem(LEGACY_ACCESS_TOKEN_KEY) || '',
+  ).trim()
 }
 
 export function isAuthenticated() {
@@ -114,6 +138,38 @@ export function buildAuthHeaders(headers = {}) {
   return {
     ...headers,
     Authorization: `Bearer ${token}`,
+  }
+}
+
+export async function refreshAuthToken(apiBase) {
+  const user = getStoredUser()
+  const refreshToken = String(user?.refresh_token || '').trim()
+  if (!refreshToken || !apiBase) {
+    return false
+  }
+
+  try {
+    const response = await fetch(`${apiBase}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    })
+    const data = await response.json()
+    if (!response.ok || !data?.token) {
+      return false
+    }
+
+    setStoredUser({
+      ...(user || {}),
+      ...(data?.user || {}),
+      role: data?.role || user?.role || 'user',
+      status: data?.status || user?.status || 'ACTIVE',
+      token: data.token,
+      refresh_token: data.refresh_token || refreshToken,
+    })
+    return true
+  } catch {
+    return false
   }
 }
 

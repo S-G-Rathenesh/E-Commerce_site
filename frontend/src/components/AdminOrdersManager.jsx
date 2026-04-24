@@ -93,6 +93,7 @@ export default function AdminOrdersManager({ compact = false }) {
     try {
       const response = await fetch(`${API_BASE}/admin/orders`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
       if (!response.ok) {
@@ -226,6 +227,7 @@ export default function AdminOrdersManager({ compact = false }) {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify(payload),
       })
       const data = await response.json()
@@ -234,7 +236,7 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
       setMessage(successMessage || data?.message || 'Order updated.')
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Unable to update order status.')
     }
@@ -261,6 +263,7 @@ export default function AdminOrdersManager({ compact = false }) {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({
           order_ids: selectedOrders,
           courier_name: shipmentDraft.courier_name,
@@ -277,7 +280,7 @@ export default function AdminOrdersManager({ compact = false }) {
       setMessage(`Shipment records created for ${selectedOrders.length} packed order(s). Use Ship to dispatch and move to SHIPPED.`)
       setSelectedOrders([])
       setShipmentDraft((current) => ({ ...current, tracking_id: '' }))
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Failed to create shipment.')
     }
@@ -290,6 +293,7 @@ export default function AdminOrdersManager({ compact = false }) {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({}),
       })
       const data = await response.json()
@@ -305,7 +309,7 @@ export default function AdminOrdersManager({ compact = false }) {
       }
       setSelectedOrders([])
       setShipmentDraft((current) => ({ ...current, tracking_id: '' }))
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Failed to auto-create shipments.')
     }
@@ -315,6 +319,7 @@ export default function AdminOrdersManager({ compact = false }) {
     try {
       const response = await fetch(`${API_BASE}/admin/tracking-logs?order_id=${encodeURIComponent(orderId)}`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
       if (!response.ok) {
@@ -334,6 +339,7 @@ export default function AdminOrdersManager({ compact = false }) {
     try {
       const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/tracking`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
       if (!response.ok) {
@@ -361,6 +367,7 @@ export default function AdminOrdersManager({ compact = false }) {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({
           delivery_partner_email: draft.delivery_partner_email,
         }),
@@ -371,7 +378,7 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
       setMessage('Delivery partner assigned successfully.')
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Failed to assign delivery partner.')
     }
@@ -392,6 +399,7 @@ export default function AdminOrdersManager({ compact = false }) {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({
           current_location: draft.current_location,
         }),
@@ -402,7 +410,7 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
       setMessage(data?.message || 'Shipment dispatched successfully.')
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Failed to dispatch shipment.')
     }

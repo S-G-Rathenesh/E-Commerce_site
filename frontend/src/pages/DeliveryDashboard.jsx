@@ -103,6 +103,7 @@ export default function DeliveryDashboard() {
       const response = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({ refresh_token: refreshToken }),
       })
       const data = await response.json()
@@ -124,7 +125,7 @@ export default function DeliveryDashboard() {
 
   const requestWithAuth = async (url, options = {}) => {
     const headers = buildAuthHeaders(options.headers || {})
-    let response = await fetch(url, { ...options, headers })
+    let response = await fetch(url, { ...options, headers, cache: 'no-store' })
     if (response.status !== 401) {
       return response
     }
@@ -139,6 +140,7 @@ export default function DeliveryDashboard() {
     response = await fetch(url, {
       ...options,
       headers: buildAuthHeaders(options.headers || {}),
+      cache: 'no-store',
     })
     return response
   }

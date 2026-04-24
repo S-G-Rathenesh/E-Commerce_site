@@ -1222,6 +1222,18 @@ def normalize_order_status(value: str, fallback: str = 'PLACED') -> str:
     return fallback
 
 
+def active_orders_filter(query: dict | None = None) -> dict:
+    active_filter = {
+        '$or': [
+            {'is_deleted': {'$exists': False}},
+            {'is_deleted': False},
+        ]
+    }
+    if not query:
+        return active_filter
+    return {'$and': [query, active_filter]}
+
+
 def normalize_shipment_entity_status(value: str, fallback: str = 'CREATED') -> str:
     candidate = (value or fallback).strip().upper()
     if candidate in SHIPMENT_ENTITY_STATUSES:
@@ -1348,6 +1360,7 @@ def serialize_order(document: dict, include_shipment: bool = False) -> dict:
         payload['updated_at'] = payload['updated_at'].isoformat()
     payload['id'] = payload.get('id') or payload.get('order_id')
     payload['status'] = normalize_order_status(payload.get('status', 'PLACED'))
+    payload['is_deleted'] = bool(payload.get('is_deleted', False))
     payload['status_timestamps'] = payload.get('status_timestamps') or {}
     history = get_order_status_history(payload.get('order_id', ''))
     if history:
@@ -3659,6 +3672,7 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
         'customer_email': current_user.get('email', '').strip().lower(),
         'total_amount': round(total_amount, 2),
         'status': 'PLACED',
+        'is_deleted': False,
         'status_timestamps': build_initial_status_timestamps('PLACED'),
         'assigned_delivery_id': None,
         'assigned_delivery_partner': None,
@@ -3757,7 +3771,7 @@ def get_my_orders(current_user: dict = Depends(require_roles('CUSTOMER'))):
     email = current_user['email'].strip().lower()
     orders = list(
         orders_collection.find(
-            {'$or': [{'user_id': user_id}, {'user_id': email}, {'customer_email': email}]}
+            active_orders_filter({'$or': [{'user_id': user_id}, {'user_id': email}, {'customer_email': email}]})
         ).sort('created_at', -1)
     )
     payload = [serialize_order(order, include_shipment=True) for order in orders]
@@ -3766,7 +3780,7 @@ def get_my_orders(current_user: dict = Depends(require_roles('CUSTOMER'))):
 
 @app.get('/orders/{order_id}')
 def get_order_by_id(order_id: str, current_user: dict = Depends(get_current_user)):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -3871,7 +3885,7 @@ def update_order_status(
     payload: UpdateOrderStatusRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -3903,7 +3917,7 @@ def confirm_order(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('ADMIN')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -3919,13 +3933,22 @@ def confirm_order(
     return {'message': 'Order confirmed.', 'order': serialize_order(latest, include_shipment=True)}
 
 
+@app.post('/orders/{order_id}/confirm')
+def confirm_order_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN')),
+):
+    return confirm_order(order_id, payload, current_user)
+
+
 @app.patch('/orders/{order_id}/reject')
 def reject_order(
     order_id: str,
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('ADMIN')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -3939,7 +3962,7 @@ def reject_order(
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
     orders_collection.update_one(
-        {'order_id': order_id},
+        active_orders_filter({'order_id': order_id}),
         {'$set': {'rejection_reason': str(payload.reason if payload and payload.reason else '').strip(), 'updated_at': now_utc()}},
     )
     return {'message': 'Order rejected.', 'order': serialize_order(latest, include_shipment=True)}
@@ -3951,7 +3974,7 @@ def pack_order(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -3967,13 +3990,22 @@ def pack_order(
     return {'message': 'Order packed.', 'order': serialize_order(latest, include_shipment=True)}
 
 
+@app.post('/orders/{order_id}/pack')
+def pack_order_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    return pack_order(order_id, payload, current_user)
+
+
 @app.patch('/orders/{order_id}/ship')
 def ship_order(
     order_id: str,
     payload: ShipmentUpdateRequest,
     current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -4005,10 +4037,10 @@ def ship_order(
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
     orders_collection.update_one(
-        {'order_id': order_id},
+        active_orders_filter({'order_id': order_id}),
         {'$set': {'shipment_id': shipment_id, 'updated_at': now_utc()}},
     )
-    latest = orders_collection.find_one({'order_id': order_id}) or latest
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
     return {'message': 'Order shipped.', 'order': serialize_order(latest, include_shipment=True)}
 
 
@@ -4018,7 +4050,7 @@ def mark_out_for_delivery(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -4041,7 +4073,7 @@ def mark_out_for_delivery(
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
     orders_collection.update_one(
-        {'order_id': order_id},
+        active_orders_filter({'order_id': order_id}),
         {
             '$set': {
                 'delivery_meta.out_for_delivery_at': now_utc().isoformat(),
@@ -4050,7 +4082,7 @@ def mark_out_for_delivery(
             }
         },
     )
-    latest = orders_collection.find_one({'order_id': order_id}) or latest
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
     return {'message': 'Order marked out for delivery.', 'order': serialize_order(latest, include_shipment=True)}
 
 
@@ -4060,7 +4092,7 @@ def mark_delivered(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -4083,7 +4115,7 @@ def mark_delivered(
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
     orders_collection.update_one(
-        {'order_id': order_id},
+        active_orders_filter({'order_id': order_id}),
         {
             '$set': {
                 'delivery_meta.delivered_at': now_utc().isoformat(),
@@ -4092,7 +4124,7 @@ def mark_delivered(
             }
         },
     )
-    latest = orders_collection.find_one({'order_id': order_id}) or latest
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
     return {'message': 'Order delivered.', 'order': serialize_order(latest, include_shipment=True)}
 
 
@@ -4111,7 +4143,7 @@ def mark_out_for_delivery_alias(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
@@ -4125,7 +4157,7 @@ def mark_out_for_delivery_alias(
 @app.get('/admin/orders')
 def get_admin_orders(current_user: dict = Depends(require_roles('admin', 'merchant'))):
     _ = current_user
-    orders = list(orders_collection.find().sort('created_at', -1))
+    orders = list(orders_collection.find(active_orders_filter()).sort('created_at', -1))
     return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
 
 
@@ -4150,7 +4182,7 @@ def purge_orders(
         raise HTTPException(status_code=400, detail='Provide statuses or set delete_all=true.')
 
     query = {} if delete_all else {'status': {'$in': normalized_statuses}}
-    orders = list(orders_collection.find(query, {'_id': 0, 'order_id': 1, 'shipment_id': 1, 'status': 1}))
+    orders = list(orders_collection.find(active_orders_filter(query), {'_id': 0, 'order_id': 1, 'shipment_id': 1, 'status': 1}))
     order_ids = [order.get('order_id') for order in orders if order.get('order_id')]
 
     deleted = {
@@ -4166,14 +4198,19 @@ def purge_orders(
     }
 
     if order_ids:
-        deleted['order_items'] = order_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['delivery_logs'] = delivery_logs_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['order_status_history'] = order_status_history_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['payments'] = payments_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['returns'] = returns_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['notifications'] = notifications_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['shipment_items'] = shipment_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
-        deleted['orders'] = orders_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count
+        deleted['orders'] = orders_collection.update_many(
+            {'order_id': {'$in': order_ids}},
+            {
+                '$set': {
+                    'is_deleted': True,
+                    'deleted_at': now_utc(),
+                    'updated_at': now_utc(),
+                    'updated_by': str(current_user.get('id') or current_user.get('email') or 'admin-purge'),
+                    'updated_by_role': normalize_role(current_user.get('role', 'ADMIN')),
+                    'updated_by_email': str(current_user.get('email', 'system@local')).strip().lower(),
+                }
+            },
+        ).modified_count
 
     orphaned_shipments = []
     for shipment in shipments_collection.find({}, {'_id': 0, 'shipment_id': 1}):
@@ -4209,7 +4246,7 @@ def cleanup_order_and_shipment_data(
         raise HTTPException(status_code=400, detail='mode must be RESET or DELETE.')
 
     order_filter = {'customer_email': 'customer.demo@veloura.com'} if demo_only else {}
-    orders = list(orders_collection.find(order_filter, {'_id': 0, 'order_id': 1, 'created_at': 1}))
+    orders = list(orders_collection.find(active_orders_filter(order_filter), {'_id': 0, 'order_id': 1, 'created_at': 1}))
     order_ids = [str(order.get('order_id') or '').strip() for order in orders if str(order.get('order_id') or '').strip()]
     related_shipment_ids = []
     if order_ids:
@@ -4222,27 +4259,32 @@ def cleanup_order_and_shipment_data(
 
     if mode == 'DELETE':
         deleted = {
-            'order_items': order_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'delivery_logs': delivery_logs_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'order_status_history': order_status_history_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'payments': payments_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'returns': returns_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'notifications': notifications_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'shipment_items': shipment_items_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
-            'orders': orders_collection.delete_many({'order_id': {'$in': order_ids}}).deleted_count if order_ids else 0,
+            'order_items': 0,
+            'delivery_logs': 0,
+            'order_status_history': 0,
+            'payments': 0,
+            'returns': 0,
+            'notifications': 0,
+            'shipment_items': 0,
+            'orders': 0,
+            'shipments': 0,
         }
-
-        orphaned_shipments = []
-        for shipment in shipments_collection.find({}, {'_id': 0, 'shipment_id': 1}):
-            shipment_id = str(shipment.get('shipment_id') or '').strip()
-            if not shipment_id:
-                continue
-            if shipment_items_collection.count_documents({'shipment_id': shipment_id}) == 0:
-                orphaned_shipments.append(shipment_id)
-
-        deleted['shipments'] = shipments_collection.delete_many({'shipment_id': {'$in': orphaned_shipments}}).deleted_count if orphaned_shipments else 0
+        if order_ids:
+            deleted['orders'] = orders_collection.update_many(
+                {'order_id': {'$in': order_ids}},
+                {
+                    '$set': {
+                        'is_deleted': True,
+                        'deleted_at': now_utc(),
+                        'updated_at': now_utc(),
+                        'updated_by': str(current_user.get('id') or current_user.get('email') or 'admin-cleanup'),
+                        'updated_by_role': normalize_role(current_user.get('role', 'ADMIN')),
+                        'updated_by_email': str(current_user.get('email', 'system@local')).strip().lower(),
+                    }
+                },
+            ).modified_count
         return {
-            'message': 'Order and shipment data deleted successfully.',
+            'message': 'Order and shipment data soft-deleted successfully.',
             'mode': mode,
             'demo_only': demo_only,
             'matched_orders': len(order_ids),
@@ -4321,7 +4363,7 @@ def cleanup_order_and_shipment_data(
 @app.get('/operations/orders')
 def get_operations_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF'))):
     _ = current_user
-    orders = list(orders_collection.find({'status': 'CONFIRMED'}).sort('created_at', -1))
+    orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED'})).sort('created_at', -1))
     return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
 
 
@@ -4343,7 +4385,7 @@ def assign_delivery_partner(
         raise HTTPException(status_code=404, detail='Delivery partner account not found.')
 
     result = orders_collection.update_one(
-        {'order_id': order_id},
+        active_orders_filter({'order_id': order_id}),
         {
             '$set': {
                 'assigned_delivery_partner': delivery_email,
@@ -4356,7 +4398,7 @@ def assign_delivery_partner(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail='Order not found.')
 
-    order = orders_collection.find_one({'order_id': order_id})
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
     return {'message': 'Delivery partner assigned.', 'order': serialize_order(order, include_shipment=True)}
 
 
@@ -4366,7 +4408,7 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
         raise HTTPException(status_code=400, detail='Select at least one order.')
 
     unique_order_ids = list(dict.fromkeys(payload.order_ids))
-    orders = list(orders_collection.find({'order_id': {'$in': unique_order_ids}}))
+    orders = list(orders_collection.find(active_orders_filter({'order_id': {'$in': unique_order_ids}})))
     if len(orders) != len(unique_order_ids):
         raise HTTPException(status_code=404, detail='One or more orders were not found.')
 
@@ -4503,7 +4545,7 @@ def dispatch_shipment(
     if not shipment:
         raise HTTPException(status_code=404, detail='Shipment not found.')
 
-    shipment_status = normalize_order_status(shipment.get('status', 'CREATED'))
+    shipment_status = normalize_shipment_entity_status(shipment.get('status', 'CREATED'))
     if shipment_status == 'DISPATCHED':
         raise HTTPException(status_code=409, detail='Shipment is already dispatched.')
     if shipment_status != 'CREATED':
@@ -4523,6 +4565,9 @@ def dispatch_shipment(
     for order_id in order_ids:
         order = orders_collection.find_one({'order_id': order_id})
         if not order:
+            skipped_order_ids.append(order_id)
+            continue
+        if bool(order.get('is_deleted', False)):
             skipped_order_ids.append(order_id)
             continue
 
@@ -4587,7 +4632,7 @@ def dispatch_shipment(
 
 @app.post('/shipments/auto')
 def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))):
-    packed_orders = list(orders_collection.find({'status': 'PACKED'}).sort('created_at', 1))
+    packed_orders = list(orders_collection.find(active_orders_filter({'status': 'PACKED'})).sort('created_at', 1))
     if not packed_orders:
         return {
             'message': 'No packed orders available for auto shipment creation.',
@@ -4613,6 +4658,7 @@ def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPE
     _ = current_user
     orders = list(
         orders_collection.find(
+            active_orders_filter(
             {
                 'status': 'PACKED',
                 '$or': [
@@ -4621,6 +4667,7 @@ def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPE
                     {'shipment_id': ''},
                 ],
             }
+            )
         ).sort('updated_at', -1)
     )
     return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
@@ -4698,14 +4745,14 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
     user_id = current_user.get('id')
     orders = list(
         orders_collection.find(
-            {
+            active_orders_filter({
                 '$or': [
                     {'assigned_delivery_partner': email},
                     {'assigned_delivery_id': user_id},
                 ]
                 ,
                 'status': {'$in': ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
-            }
+            })
         ).sort('updated_at', -1)
     )
     enriched_orders = []

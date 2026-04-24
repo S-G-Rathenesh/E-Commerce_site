@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import PageWrapper from '../components/PageWrapper'
-import { buildAuthHeaders } from '../utils/auth'
+import { buildAuthHeaders, getAuthToken } from '../utils/auth'
 import { getSlaState } from '../utils/adminUi'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -14,8 +14,6 @@ const TRACKING_STEPS = [
   'OUT_FOR_DELIVERY',
   'DELIVERED',
 ]
-
-const TRACKING_OVERVIEW_STEPS = ['CONFIRMED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 const TRACKING_CARD_STEPS = [
   { key: 'PLACED', label: 'Order Placed' },
@@ -38,8 +36,8 @@ const STATUS_MESSAGES = {
 
 const STATUS_PERFORMER_ROLE_MAP = {
   CONFIRMED: ['ADMIN'],
-  PACKED: ['OPERATIONS_STAFF'],
-  SHIPPED: ['ADMIN'],
+  PACKED: ['ADMIN', 'OPERATIONS_STAFF'],
+  SHIPPED: ['ADMIN', 'OPERATIONS_STAFF'],
   OUT_FOR_DELIVERY: ['DELIVERY_ASSOCIATE'],
   DELIVERED: ['DELIVERY_ASSOCIATE'],
 }
@@ -260,7 +258,8 @@ function shouldApplyStatusUpdate(previousStatus, nextStatus, performerRole) {
     return true
   }
 
-  return targetIndex === currentIndex + 1
+  // Accept forward jumps because reconnects can miss intermediate WebSocket events.
+  return targetIndex > currentIndex
 }
 
 export default function OrdersTracking() {
@@ -291,6 +290,7 @@ export default function OrdersTracking() {
     try {
       const response = await fetch(`${API_BASE}/orders/my`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
 
@@ -371,6 +371,9 @@ export default function OrdersTracking() {
       statusMessage || `Order ${order_id} has been updated to ${new_status.replace(/_/g, ' ')}`,
       6000
     )
+
+    // Pull a fresh snapshot from API so status history/logs stay in sync across reconnects.
+    loadOrders()
   }
 
   const connectWebSocket = (userId) => {
@@ -422,13 +425,14 @@ export default function OrdersTracking() {
 
   const extractUserIdFromToken = () => {
     try {
-      const token = localStorage.getItem('access_token')
+      const token = getAuthToken()
       if (!token) return null
       
       const parts = token.split('.')
       if (parts.length !== 3) return null
-      
-      const decoded = JSON.parse(atob(parts[1]))
+
+      const normalizedPayload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+      const decoded = JSON.parse(atob(normalizedPayload))
       return decoded.sub || decoded.user_id || decoded.id || decoded.email
     } catch {
       return null
@@ -463,6 +467,7 @@ export default function OrdersTracking() {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({}),
       })
       const data = await response.json()
@@ -472,7 +477,7 @@ export default function OrdersTracking() {
       }
       setMessage(data?.message || 'Order cancelled successfully.')
       addNotification('Order Cancelled', `Order ${orderId} has been cancelled`)
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Unable to cancel order right now.')
     }
@@ -516,6 +521,7 @@ export default function OrdersTracking() {
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
         }),
+        cache: 'no-store',
         body: JSON.stringify({
           reason: draft.reason,
           issue_details: draft.issue_details,
@@ -530,7 +536,7 @@ export default function OrdersTracking() {
       setMessage(data?.message || 'Return request submitted successfully.')
       addNotification('Return Requested', 'Your return request has been submitted')
       setActiveReturnFormOrderId('')
-      loadOrders()
+      await loadOrders()
     } catch {
       setMessage('Unable to request return right now.')
     }
@@ -622,7 +628,7 @@ export default function OrdersTracking() {
             <article key={order.order_id} className={`section-card panel-stack tracking-order-card tracking-order-card-compact ${recentStatusUpdates[order.order_id] ? 'tracking-order-card-updating' : ''}`}>
               {(() => {
                 const currentStatus = String(order.current_status || '').trim().toUpperCase()
-                const overviewIndex = TRACKING_OVERVIEW_STEPS.indexOf(currentStatus)
+                const currentIndex = TRACKING_STEPS.indexOf(currentStatus)
                 const timelineEvents = [
                   ...(Array.isArray(order.status_history) ? order.status_history : []),
                   ...(Array.isArray(order.tracking_logs) ? order.tracking_logs : []),
@@ -638,6 +644,7 @@ export default function OrdersTracking() {
 
                 const header = getTrackingSummary(order, getSlaState(order).label)
                 const etaText = getDeliveryEta(order).replace(/^Expected\s+/i, 'Expected delivery: ')
+                console.log('ORDER STATUS:', order.status)
 
                 return (
                   <>
@@ -655,12 +662,12 @@ export default function OrdersTracking() {
 
                     <section className="tracking-progress-shell" aria-label={`Tracking timeline ${order.order_id}`}>
                       <div className="tracking-progress-line" aria-hidden="true">
-                        <span className="tracking-progress-fill" style={{ width: `${Math.max(0, (Math.max(0, overviewIndex) / (TRACKING_OVERVIEW_STEPS.length - 1)) * 100)}%` }} />
+                        <span className="tracking-progress-fill" style={{ width: `${Math.max(0, (Math.max(0, currentIndex) / (TRACKING_STEPS.length - 1)) * 100)}%` }} />
                       </div>
-                      <div className="tracking-progress-steps" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
-                        {TRACKING_OVERVIEW_STEPS.map((step, index) => {
-                          const isCompleted = overviewIndex > index
-                          const isCurrent = overviewIndex === index
+                      <div className="tracking-progress-steps" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
+                        {TRACKING_STEPS.map((step, index) => {
+                          const isCompleted = index < currentIndex
+                          const isCurrent = index === currentIndex
                           return (
                             <div
                               key={`${order.order_id}-step-${step}`}
@@ -684,6 +691,8 @@ export default function OrdersTracking() {
                     <div className="tracking-delivery-info">
                       {currentStatus === 'SHIPPED' ? (
                         <p>Product has left the facility.</p>
+                      ) : currentStatus === 'PACKED' ? (
+                        <p>Order is packed and waiting for shipment dispatch.</p>
                       ) : currentStatus === 'OUT_FOR_DELIVERY' ? (
                         <p>Product is on the way to the customer.</p>
                       ) : currentStatus === 'DELIVERED' ? (

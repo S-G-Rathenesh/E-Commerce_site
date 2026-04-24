@@ -132,6 +132,7 @@ export default function Login() {
           role: data.role || data?.user?.role || 'user',
           status: data.status || data?.user?.status || 'ACTIVE',
           token: data.token || '',
+          refresh_token: data.refresh_token || '',
         })
       }
 

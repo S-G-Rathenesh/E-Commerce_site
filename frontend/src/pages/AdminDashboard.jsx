@@ -135,6 +135,7 @@ export default function AdminDashboard() {
     try {
       const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/tracking`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
       if (!response.ok) {
@@ -158,6 +159,7 @@ export default function AdminDashboard() {
     try {
       const response = await fetch(`${API_BASE}/admin/orders`, {
         headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
       if (!response.ok) {
