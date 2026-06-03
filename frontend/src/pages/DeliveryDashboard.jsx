@@ -5,8 +5,8 @@ import StatusBadge from '../components/StatusBadge'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
-const DELIVERY_TABS = ['READY', 'ACTIVE', 'COMPLETED', 'FAILED']
-const DELIVERY_FLOW = ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const DELIVERY_TABS = ['READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'COMPLETED', 'FAILED']
+const DELIVERY_FLOW = ['READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 function buildMapsLink(order) {
   const rawAddress = String(order?.delivery_address || '').trim()
@@ -16,9 +16,10 @@ function buildMapsLink(order) {
 
 function getDeliveryQueueState(order) {
   const status = String(order?.status || '').toUpperCase()
+  const shipmentStatus = String(order?.shipment?.status || '').toUpperCase()
   const meta = order?.delivery_meta || {}
 
-  if (status === 'DELIVERED') {
+  if (status === 'DELIVERED' || shipmentStatus === 'DELIVERED') {
     return 'COMPLETED'
   }
   if (status === 'DELIVERY_FAILED') {
@@ -27,19 +28,23 @@ function getDeliveryQueueState(order) {
   if (meta.rejected_at) {
     return 'FAILED'
   }
-  if (status === 'OUT_FOR_DELIVERY') {
-    return 'ACTIVE'
+  if (status === 'OUT_FOR_DELIVERY' || shipmentStatus === 'OUT_FOR_DELIVERY') {
+    return 'OUT_FOR_DELIVERY'
   }
-  return 'READY'
+  if (shipmentStatus === 'ARRIVED_AT_CITY') {
+    return 'READY_FOR_PICKUP'
+  }
+  return 'PENDING'
 }
 
 function getFlowState(order, step) {
   const status = String(order?.status || '').toUpperCase()
+  const shipmentStatus = String(order?.shipment?.status || '').toUpperCase()
 
   const completed = {
-    SHIPPED: true,
-    OUT_FOR_DELIVERY: status === 'OUT_FOR_DELIVERY' || status === 'DELIVERED',
-    DELIVERED: status === 'DELIVERED',
+    READY_FOR_PICKUP: ['ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(shipmentStatus) || ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(status),
+    OUT_FOR_DELIVERY: shipmentStatus === 'OUT_FOR_DELIVERY' || status === 'OUT_FOR_DELIVERY' || status === 'DELIVERED',
+    DELIVERED: shipmentStatus === 'DELIVERED' || status === 'DELIVERED',
   }
 
   if (!completed[step]) {
@@ -71,7 +76,7 @@ function formatOrderTime(value) {
 }
 
 function getReadyForPickupLabel(order) {
-  if (String(order?.status || '').toUpperCase() === 'SHIPPED') {
+  if (String(order?.shipment?.status || '').toUpperCase() === 'ARRIVED_AT_CITY') {
     return 'Ready for Pickup'
   }
   return 'Awaiting Pickup'
@@ -87,8 +92,8 @@ export default function DeliveryDashboard() {
   })
   const [message, setMessage] = useState('')
   const [drafts, setDrafts] = useState({})
-  const [activeTab, setActiveTab] = useState('READY')
-  const [isOnline, setIsOnline] = useState(() => window.localStorage.getItem('delivery_online_status') !== 'OFFLINE')
+  const [activeTab, setActiveTab] = useState('READY_FOR_PICKUP')
+  const [isOnline, setIsOnline] = useState(true)
   const [loading, setLoading] = useState(true)
   const [actionLoadingByOrder, setActionLoadingByOrder] = useState({})
 
@@ -171,6 +176,25 @@ export default function DeliveryDashboard() {
     }
   }
 
+  const loadDeliveryProfile = async () => {
+    try {
+      const response = await requestWithAuth(`${API_BASE}/delivery/profile`, { method: 'GET' })
+      const data = await response.json()
+      if (!response.ok) {
+        return
+      }
+
+      const serverUser = data?.user || {}
+      const serverProfile = data?.profile_details || {}
+      const nextOnline = serverProfile.is_online ?? serverUser.is_online
+      if (typeof nextOnline === 'boolean') {
+        setIsOnline(nextOnline)
+      }
+    } catch {
+      // keep the current toggle state if the profile cannot be loaded
+    }
+  }
+
   const loadOrders = async () => {
     if (!isOnline) {
       setLoading(false)
@@ -214,6 +238,7 @@ export default function DeliveryDashboard() {
         navigate('/login', { replace: true })
         return
       }
+      await loadDeliveryProfile()
       loadOrders()
     }
 
@@ -221,7 +246,6 @@ export default function DeliveryDashboard() {
   }, [navigate])
 
   useEffect(() => {
-    window.localStorage.setItem('delivery_online_status', isOnline ? 'ONLINE' : 'OFFLINE')
     if (isOnline) {
       loadOrders()
     } else {
@@ -250,6 +274,34 @@ export default function DeliveryDashboard() {
         [key]: value,
       },
     }))
+  }
+
+  const toggleOnlineStatus = async () => {
+    const nextOnline = !isOnline
+    setIsOnline(nextOnline)
+
+    try {
+      const response = await requestWithAuth(`${API_BASE}/delivery/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_online: nextOnline }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data?.detail || 'Failed to update online status.')
+      }
+
+      if (data?.user) {
+        setStoredUser({ ...(getStoredUser() || {}), ...data.user })
+      }
+      setMessage(nextOnline ? 'You are online and receiving tasks.' : 'You are offline.')
+      if (nextOnline) {
+        await loadOrders()
+      }
+    } catch {
+      setIsOnline(!nextOnline)
+      setMessage('Failed to update online status.')
+    }
   }
 
   const performDeliveryAction = async (orderId, action, currentLocationOverride = null) => {
@@ -319,10 +371,10 @@ export default function DeliveryDashboard() {
     return orders.reduce(
       (accumulator, order) => {
         const queueState = getDeliveryQueueState(order)
-        accumulator[queueState] += 1
+            accumulator[queueState] = (accumulator[queueState] || 0) + 1
         return accumulator
       },
-      { READY: 0, ACTIVE: 0, COMPLETED: 0, FAILED: 0 },
+          { READY_FOR_PICKUP: 0, OUT_FOR_DELIVERY: 0, COMPLETED: 0, FAILED: 0 },
     )
   }, [orders])
 
@@ -343,7 +395,7 @@ export default function DeliveryDashboard() {
             <button
               type="button"
               className={`btn ${isOnline ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setIsOnline((current) => !current)}
+              onClick={toggleOnlineStatus}
             >
               {isOnline ? 'Online' : 'Offline'}
             </button>
@@ -361,7 +413,7 @@ export default function DeliveryDashboard() {
           </article>
           <article className="panel stat-card card">
             <p>Ready for Pickup</p>
-            <h3 className="stat-value">{stats.READY}</h3>
+            <h3 className="stat-value">{stats.READY_FOR_PICKUP}</h3>
             <span>Shipped orders awaiting pickup</span>
           </article>
           <article className="panel stat-card card">
@@ -377,22 +429,27 @@ export default function DeliveryDashboard() {
         </div>
 
         <div className="tab-strip" style={{ marginTop: '16px' }}>
-          {DELIVERY_TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              className={`tab-button ${activeTab === tab ? 'tab-button-active' : ''}`}
-              onClick={() => setActiveTab(tab)}
-            >
-              {tab === 'READY'
-                ? 'Ready for Pickup'
-                : tab === 'ACTIVE'
-                  ? 'Out for Delivery'
-                  : tab === 'COMPLETED'
-                    ? 'Completed Orders'
-                    : 'Failed Orders'}
-            </button>
-          ))}
+            {DELIVERY_TABS.map((tab) => {
+              const label =
+                tab === 'READY_FOR_PICKUP'
+                  ? 'Ready for Pickup'
+                  : tab === 'OUT_FOR_DELIVERY'
+                    ? 'Out for Delivery'
+                    : tab === 'COMPLETED'
+                      ? 'Completed Orders'
+                      : 'Failed Orders'
+
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  className={`tab-button ${activeTab === tab ? 'tab-button-active' : ''}`}
+                  onClick={() => setActiveTab(tab)}
+                >
+                  {label}
+                </button>
+              )
+            })}
         </div>
 
         {message ? <p className="wishlist-message">{message}</p> : null}
@@ -410,15 +467,15 @@ export default function DeliveryDashboard() {
             const mapsLink = buildMapsLink(order)
             const status = String(order.status || '').toUpperCase()
             const queueState = getDeliveryQueueState(order)
-            const canStart = status === 'SHIPPED'
-            const canComplete = status === 'OUT_FOR_DELIVERY'
+            const canStart = String(order?.shipment?.status || '').toUpperCase() === 'ARRIVED_AT_CITY'
+            const canComplete = status === 'OUT_FOR_DELIVERY' || String(order?.shipment?.status || '').toUpperCase() === 'OUT_FOR_DELIVERY'
             const isDelivered = status === 'DELIVERED'
             const isActionLoading = Boolean(actionLoadingByOrder[order.order_id])
 
             console.log('ORDER STATUS:', order.status)
 
             return (
-              <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${queueState === 'ACTIVE' ? 'delivery-order-card-active' : ''}`}>
+              <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${queueState === 'OUT_FOR_DELIVERY' ? 'delivery-order-card-active' : ''}`}>
                 <div className="section-head">
                   <div>
                     <h3>{order.order_id}</h3>
@@ -505,7 +562,7 @@ export default function DeliveryDashboard() {
                     <button type="button" className="btn btn-secondary" disabled>
                       ✔ Delivered
                     </button>
-                  ) : canStart ? (
+                  ) : queueState === 'READY_FOR_PICKUP' ? (
                     <button type="button" className="btn btn-primary" onClick={() => performDeliveryAction(order.order_id, 'START_DELIVERY')} disabled={!canStart || isActionLoading}>
                       {isActionLoading ? 'Starting...' : 'Start Delivery'}
                     </button>

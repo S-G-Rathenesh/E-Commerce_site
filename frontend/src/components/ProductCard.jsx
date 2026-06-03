@@ -29,7 +29,13 @@ export default function ProductCard({ product, onAddToWishlist, isWishlisted = f
         >
           <img src={product.image} alt={product.name} className="product-image" />
         </button>
-        <span className="product-badge">New</span>
+        {product?.stock_status === 'Out of Stock' ? (
+          <span className="product-badge badge-out">Out of Stock</span>
+        ) : product?.stock_status === 'Limited Stock' ? (
+          <span className="product-badge badge-low">Only {product?.available_stock ?? product?.stock} left</span>
+        ) : (
+          <span className="product-badge">New</span>
+        )}
       </div>
       <div className="product-content">
         <p className="product-category">{product.category}</p>

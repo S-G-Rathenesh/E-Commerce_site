@@ -1,309 +1,102 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import PageWrapper from '../components/PageWrapper'
-import { buildAuthHeaders, getAuthToken } from '../utils/auth'
-import { getSlaState } from '../utils/adminUi'
+import { buildAuthHeaders } from '../utils/auth'
+import DiscoveryProductCard from '../components/DiscoveryProductCard'
+import { fetchCatalogProducts, fetchRecommendationsForCustomer } from '../utils/catalog'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
-const WS_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace('http', 'ws')
+const TRACKING_STEPS = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const EMPTY_FILTER = '__ALL__'
 
-const TRACKING_STEPS = [
-  'PLACED',
-  'CONFIRMED',
-  'PACKED',
-  'SHIPPED',
-  'OUT_FOR_DELIVERY',
-  'DELIVERED',
+const STATUS_LABELS = {
+  PLACED: 'Placed',
+  CONFIRMED: 'Confirmed',
+  PACKED: 'Packed',
+  SHIPPED: 'Shipped',
+  OUT_FOR_DELIVERY: 'Out for Delivery',
+  DELIVERED: 'Delivered',
+  CANCELLED: 'Cancelled',
+}
+
+const TRACKER_STEPS = [
+  { key: 'PLACED', label: 'Placed', icon: '🛒' },
+  { key: 'CONFIRMED', label: 'Confirmed', icon: '📋' },
+  { key: 'PACKED', label: 'Packed', icon: '📦' },
+  { key: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: '🚚' },
+  { key: 'DELIVERED', label: 'Delivered', icon: '🏠' },
 ]
 
-const TRACKING_CARD_STEPS = [
-  { key: 'PLACED', label: 'Order Placed' },
-  { key: 'CONFIRMED', label: 'Confirmed' },
-  { key: 'PACKED', label: 'Packed' },
-  { key: 'SHIPPED', label: 'Shipped' },
-  { key: 'DELIVERY', label: 'Delivery' },
-]
-
-const STATUS_MESSAGES = {
-  'PLACED': '📝 Order Placed',
-  'CONFIRMED': '✅ Order Confirmed',
-  'PACKED': '📦 Order Packed',
-  'SHIPPED': '🚚 Order Shipped',
-  'OUT_FOR_DELIVERY': '🚚 Out for Delivery',
-  'DELIVERED': '✅ Order Delivered',
-  'CANCELLED': '❌ Order Cancelled',
-  'DELIVERY_FAILED': '⚠️ Delivery Failed',
+function normalizeStatus(value) {
+  return String(value || '').trim().toUpperCase()
 }
 
-const STATUS_PERFORMER_ROLE_MAP = {
-  CONFIRMED: ['ADMIN'],
-  PACKED: ['ADMIN', 'OPERATIONS_STAFF'],
-  SHIPPED: ['ADMIN', 'OPERATIONS_STAFF'],
-  OUT_FOR_DELIVERY: ['DELIVERY_ASSOCIATE'],
-  DELIVERED: ['DELIVERY_ASSOCIATE'],
-}
-
-function formatOrderDate(value, fallback = 'Date unavailable') {
+function formatDateTime(value) {
   const date = new Date(value || '')
-  if (Number.isNaN(date.getTime())) {
-    return fallback
-  }
-  return date.toLocaleDateString('en-IN', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  })
+  if (Number.isNaN(date.getTime())) return 'Pending'
+  return date.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
-function formatFriendlyDate(value, fallback = 'Today') {
-  const date = new Date(value || '')
-  if (Number.isNaN(date.getTime())) {
-    return fallback
-  }
-  return date.toLocaleDateString('en-IN', {
-    month: 'short',
-    day: 'numeric',
-  })
+function getPrimaryItem(order) {
+  return Array.isArray(order?.items) ? order.items[0] : null
 }
 
-function getProgressState(stepKey, status) {
-  const current = String(status || '').trim().toUpperCase()
-
-  if (stepKey === 'CONFIRMED') {
-    if (['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
-      return ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
-    }
-    return 'pending'
-  }
-
-  if (stepKey === 'PACKED') {
-    if (['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
-      return ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
-    }
-    return 'pending'
-  }
-
-  if (stepKey === 'SHIPPED') {
-    if (['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(current)) {
-      return ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(current) ? 'completed' : 'active'
-    }
-    return 'pending'
-  }
-
-  if (stepKey === 'DELIVERY') {
-    if (current === 'DELIVERED') {
-      return 'completed'
-    }
-    if (current === 'OUT_FOR_DELIVERY') {
-      return 'active'
-    }
-    return 'pending'
-  }
-
-  return 'pending'
+function getShipmentStatus(order) {
+  return normalizeStatus(order?.shipment?.status || order?.status)
 }
 
-function getTrackingSummary(order, slaLabel) {
-  const current = String(order.status || '').trim().toUpperCase()
-  const currentLocation = String(order?.shipment?.current_location || '').trim()
-  const shippedTime = order?.status_timestamps?.SHIPPED || order?.shipment?.updated_at || order?.updated_at
-
-  if (current === 'SHIPPED') {
-    return {
-      title: 'Shipped',
-      detail: `Today, ${formatFriendlyDate(shippedTime)}: Product has left the ${currentLocation || 'origin'} facility.`,
-      badge: slaLabel,
-    }
-  }
-
-  if (current === 'OUT_FOR_DELIVERY') {
-    return {
-      title: 'Out For Delivery',
-      detail: `Today, ${formatFriendlyDate(order?.updated_at)}: Your package is out for delivery.`,
-      badge: slaLabel,
-    }
-  }
-
-  if (current === 'DELIVERED') {
-    return {
-      title: 'Delivered',
-      detail: `Delivered on ${formatFriendlyDate(order?.status_timestamps?.DELIVERED || order?.updated_at)}.`,
-      badge: 'Delivered',
-    }
-  }
-
-  return {
-    title: String(current || 'PLACED').replaceAll('_', ' '),
-    detail: `Order placed on ${formatOrderDate(order?.created_at, 'today')}.`,
-    badge: slaLabel,
-  }
+function getTrackerActiveIndex(order) {
+  const status = getShipmentStatus(order)
+  if (status === 'DELIVERED') return 4
+  if (status === 'OUT_FOR_DELIVERY') return 3
+  if (status === 'SHIPPED' || status === 'PACKED' || status === 'DISPATCHED') return 2
+  if (status === 'CONFIRMED') return 1
+  if (status === 'PLACED') return 0
+  return -1
 }
 
-function resolveStepState(step, currentStatus, completedSet) {
-  if (completedSet.has(step)) {
-    return step === currentStatus ? 'active' : 'completed'
-  }
+function formatTrackerMessage(order) {
+  const status = getShipmentStatus(order)
+  const lastEvent = Array.isArray(order?.shipment_events) && order.shipment_events.length > 0 ? order.shipment_events[order.shipment_events.length - 1] : null
+  const deliveredAt = order?.status_timestamps?.DELIVERED || order?.updated_at || lastEvent?.timestamp
 
-  const currentIndex = TRACKING_STEPS.indexOf(currentStatus)
-  const stepIndex = TRACKING_STEPS.indexOf(step)
-
-  if (stepIndex < currentIndex) {
-    return 'completed'
-  }
-
-  if (stepIndex === currentIndex) {
-    return 'active'
-  }
-
-  return 'pending'
-}
-
-function getHistoryByStatus(order) {
-  const history = Array.isArray(order?.status_history) ? order.status_history : []
-  return history.reduce((accumulator, entry) => {
-    const key = String(entry?.status || '').trim().toUpperCase()
-    if (key) {
-      accumulator[key] = entry
-    }
-    return accumulator
-  }, {})
-}
-
-function getStepTimestamp(order, step) {
-  const timestamps = order?.status_timestamps || {}
-  const fromMap = timestamps?.[step]
-  if (fromMap) {
-    return fromMap
-  }
-  const historyByStatus = getHistoryByStatus(order)
-  return historyByStatus?.[step]?.timestamp || ''
-}
-
-function mapStatusToCardStepIndex(status) {
-  const current = String(status || '').trim().toUpperCase()
-
-  if (current === 'PLACED') {
-    return 0
-  }
-  if (current === 'CONFIRMED') {
-    return 1
-  }
-  if (current === 'PACKED') {
-    return 2
-  }
-  if (current === 'SHIPPED') {
-    return 3
-  }
-  if (current === 'OUT_FOR_DELIVERY' || current === 'DELIVERED') {
-    return 4
-  }
-  return 0
-}
-
-function formatStepTimestamp(value, options = {}) {
-  const date = new Date(value || '')
-  if (Number.isNaN(date.getTime())) {
-    return options.fallback || 'Pending'
-  }
-
-  if (options.todayLabel) {
-    const now = new Date()
-    const isToday =
-      date.getFullYear() === now.getFullYear() &&
-      date.getMonth() === now.getMonth() &&
-      date.getDate() === now.getDate()
-    if (isToday) {
-      return 'Today'
-    }
-  }
-
-  return date.toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function getDeliveryEta(order) {
-  const shippedAt = getStepTimestamp(order, 'SHIPPED') || getStepTimestamp(order, 'PACKED') || order?.updated_at
-  const baseDate = new Date(shippedAt || '')
-  if (Number.isNaN(baseDate.getTime())) {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    return `Expected ${tomorrow.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
-  }
-
-  baseDate.setDate(baseDate.getDate() + 1)
-  return `Expected ${baseDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
-}
-
-function shouldApplyStatusUpdate(previousStatus, nextStatus, performerRole) {
-  const current = String(previousStatus || '').trim().toUpperCase()
-  const target = String(nextStatus || '').trim().toUpperCase()
-  const role = String(performerRole || '').trim().toUpperCase()
-  const allowedRoles = STATUS_PERFORMER_ROLE_MAP[target]
-
-  if (!target || current === target) {
-    return false
-  }
-
-  if (allowedRoles && !allowedRoles.includes(role)) {
-    return false
-  }
-
-  const currentIndex = TRACKING_STEPS.indexOf(current)
-  const targetIndex = TRACKING_STEPS.indexOf(target)
-
-  if (currentIndex === -1 || targetIndex === -1) {
-    return true
-  }
-
-  // Accept forward jumps because reconnects can miss intermediate WebSocket events.
-  return targetIndex > currentIndex
+  if (status === 'DELIVERED') return `Delivered on ${formatDateTime(deliveredAt)}`
+  if (status === 'OUT_FOR_DELIVERY') return 'Out for delivery today'
+  if (status === 'SHIPPED' || status === 'DISPATCHED') return lastEvent?.message || 'Shipment dispatched'
+  if (status === 'PACKED') return lastEvent?.message || 'Shipment packed and ready'
+  if (status === 'CONFIRMED') return lastEvent?.message || 'Order confirmed'
+  if (status === 'PLACED') return 'Order placed successfully'
+  if (status === 'CANCELLED') return 'Order cancelled'
+  return lastEvent?.message || 'Shipment in progress'
 }
 
 export default function OrdersTracking() {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
-  const [lastUpdatedAt, setLastUpdatedAt] = useState('')
   const [message, setMessage] = useState('')
-  const [activeReturnFormOrderId, setActiveReturnFormOrderId] = useState('')
-  const [returnDrafts, setReturnDrafts] = useState({})
-  const [notifications, setNotifications] = useState([])
-  const [recentStatusUpdates, setRecentStatusUpdates] = useState({})
-  const wsRef = useRef(null)
-  const userIdRef = useRef(null)
-  const notificationTimeoutRef = useRef({})
-
-  const getReturnDraft = (orderId) => {
-    return (
-      returnDrafts[orderId] || {
-        reason: '',
-        issue_details: '',
-        proof_images: [],
-      }
-    )
-  }
+  const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState(EMPTY_FILTER)
+  const [yearFilter, setYearFilter] = useState('all')
+  const [activeTab, setActiveTab] = useState('orders')
+  const [expandedSpecs, setExpandedSpecs] = useState({})
+  const [modalOrder, setModalOrder] = useState(null)
+  const [recommendations, setRecommendations] = useState([])
+  const [recsLoading, setRecsLoading] = useState(false)
+  const [toastMessage, setToastMessage] = useState('')
+  const recsRef = useRef(null)
 
   const loadOrders = async () => {
     setLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/orders/my`, {
-        headers: buildAuthHeaders(),
-        cache: 'no-store',
-      })
-      const data = await response.json()
-
+      const response = await fetch(`${API_BASE}/orders/my`, { headers: buildAuthHeaders(), cache: 'no-store' })
+      const data = await response.json().catch(() => ({}))
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to load orders.')
         setOrders([])
         return
       }
-
       setOrders(Array.isArray(data?.orders) ? data.orders : [])
-      setLastUpdatedAt(new Date().toISOString())
       setMessage('')
-    } catch {
+    } catch (err) {
       setMessage('Unable to load orders right now.')
       setOrders([])
     } finally {
@@ -311,541 +104,420 @@ export default function OrdersTracking() {
     }
   }
 
-  const addNotification = (title, message, duration = 5000) => {
-    const id = `notif-${Date.now()}-${Math.random()}`
-    setNotifications((prev) => [
-      ...prev,
-      {
-        id,
-        title,
-        message,
-        timestamp: new Date(),
-      },
-    ])
-
-    if (notificationTimeoutRef.current[id]) {
-      clearTimeout(notificationTimeoutRef.current[id])
-    }
-
-    notificationTimeoutRef.current[id] = setTimeout(() => {
-      setNotifications((prev) => prev.filter((n) => n.id !== id))
-      delete notificationTimeoutRef.current[id]
-    }, duration)
-  }
-
-  const handleOrderStatusUpdate = (event) => {
-    const { order_id, new_status, previous_status, message: statusMessage } = event.data
-
-    if (!shouldApplyStatusUpdate(previous_status, new_status, event.data?.performer_role)) {
-      return
-    }
-    
-    // Update the order status in local state
-    setOrders((prevOrders) =>
-      prevOrders.map((order) =>
-        order.order_id === order_id
-          ? { ...order, status: new_status }
-          : order
-      )
-    )
-
-    // Add animation for status transition
-    setRecentStatusUpdates((prev) => ({
-      ...prev,
-      [order_id]: new_status,
-    }))
-
-    // Clear animation after 1 second
-    setTimeout(() => {
-      setRecentStatusUpdates((prev) => {
-        const updated = { ...prev }
-        delete updated[order_id]
-        return updated
-      })
-    }, 1000)
-
-    // Show notification
-    const title = STATUS_MESSAGES[new_status] || `Status: ${new_status}`
-    addNotification(
-      title,
-      statusMessage || `Order ${order_id} has been updated to ${new_status.replace(/_/g, ' ')}`,
-      6000
-    )
-
-    // Pull a fresh snapshot from API so status history/logs stay in sync across reconnects.
-    loadOrders()
-  }
-
-  const connectWebSocket = (userId) => {
-    if (!userId) return
-
-    try {
-      const wsUrl = `${WS_BASE}/ws/orders/${encodeURIComponent(userId)}`
-      wsRef.current = new WebSocket(wsUrl)
-
-      wsRef.current.onopen = () => {
-        console.log('WebSocket connected for real-time order updates')
-      }
-
-      wsRef.current.onmessage = (event) => {
-        try {
-          const eventData = JSON.parse(event.data)
-          if (eventData.type === 'order_status_updated') {
-            handleOrderStatusUpdate(eventData)
-          } else if (eventData.type === 'notification') {
-            const notif = eventData.data
-            addNotification(
-              notif.title || STATUS_MESSAGES[notif.event_type] || 'Order Update',
-              notif.message,
-              6000
-            )
-          }
-        } catch (e) {
-          console.error('Error parsing WebSocket message:', e)
-        }
-      }
-
-      wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error)
-      }
-
-      wsRef.current.onclose = () => {
-        console.log('WebSocket disconnected')
-        // Reconnect after 3 seconds
-        setTimeout(() => {
-          if (userIdRef.current) {
-            connectWebSocket(userIdRef.current)
-          }
-        }, 3000)
-      }
-    } catch (error) {
-      console.error('Failed to connect WebSocket:', error)
-    }
-  }
-
-  const extractUserIdFromToken = () => {
-    try {
-      const token = getAuthToken()
-      if (!token) return null
-      
-      const parts = token.split('.')
-      if (parts.length !== 3) return null
-
-      const normalizedPayload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
-      const decoded = JSON.parse(atob(normalizedPayload))
-      return decoded.sub || decoded.user_id || decoded.id || decoded.email
-    } catch {
-      return null
-    }
-  }
-
   useEffect(() => {
     loadOrders()
-    
-    // Initialize WebSocket connection for real-time updates
-    const userId = extractUserIdFromToken()
-    if (userId) {
-      userIdRef.current = userId
-      connectWebSocket(userId)
-    }
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close()
-      }
-      Object.values(notificationTimeoutRef.current).forEach((timeout) =>
-        clearTimeout(timeout)
-      )
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const intervalId = setInterval(loadOrders, 15000)
+    return () => clearInterval(intervalId)
   }, [])
 
-  const cancelOrder = async (orderId) => {
+  useEffect(() => {
+    // compute recommendations after orders load
+    if (!orders || orders.length === 0) {
+      setRecommendations([])
+      return
+    }
+
+    let mounted = true
+    const cacheKey = 'recs_v1'
+    const local = window.localStorage.getItem(cacheKey)
     try {
-      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/cancel`, {
-        method: 'PUT',
-        headers: buildAuthHeaders({
-          'Content-Type': 'application/json',
-        }),
-        cache: 'no-store',
-        body: JSON.stringify({}),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        setMessage(data?.detail || 'Unable to cancel order.')
-        return
+      if (local) {
+        const parsed = JSON.parse(local)
+        // quick heuristic: if orders length unchanged and signature matches, reuse
+        if (parsed && parsed.signature === String(orders.length) && Array.isArray(parsed.items)) {
+          setRecommendations(parsed.items)
+          return
+        }
       }
-      setMessage(data?.message || 'Order cancelled successfully.')
-      addNotification('Order Cancelled', `Order ${orderId} has been cancelled`)
+    } catch {}
+
+    setRecsLoading(true)
+    ;(async () => {
+      try {
+        const all = await fetchCatalogProducts()
+
+        // gather most-purchased attributes
+        const catCount = {}
+        const sectionCount = {}
+        const typeCount = {}
+        const purchasedIds = new Set()
+
+        orders.forEach((o) => {
+          (o.items || []).forEach((it) => {
+            const p = it.product || it
+            if (!p) return
+            purchasedIds.add(String(p.id || p.product_id || p._id || p._uid || p.name))
+            if (p.category) catCount[p.category] = (catCount[p.category] || 0) + 1
+            if (p.section) sectionCount[p.section] = (sectionCount[p.section] || 0) + 1
+            if (p.productType) typeCount[p.productType] = (typeCount[p.productType] || 0) + 1
+            if (p.product_type) typeCount[p.product_type] = (typeCount[p.product_type] || 0) + 1
+          })
+        })
+
+        const topCategories = Object.entries(catCount).sort((a, b) => b[1] - a[1]).map((r) => r[0])
+        const topSection = Object.entries(sectionCount).sort((a, b) => b[1] - a[1])[0]?.[0]
+        const topTypes = Object.entries(typeCount).sort((a, b) => b[1] - a[1]).map((r) => r[0])
+
+        const picks = []
+        const pushIf = (product) => {
+          const id = String(product.id || product.product_id || product._id || product.name)
+          if (purchasedIds.has(id)) return
+          if (picks.find((p) => String(p.id || p.product_id || p._id || p.name) === id)) return
+          picks.push(product)
+        }
+
+        // 1. previously purchased category
+        if (topCategories.length > 0) {
+          all.forEach((p) => { if (topCategories.includes(p.category)) pushIf(p) })
+        }
+
+        // 2. same section/gender
+        if (topSection) {
+          all.forEach((p) => { if (String(p.section) === String(topSection)) pushIf(p) })
+        }
+
+        // 3. similar product type
+        if (topTypes.length > 0) {
+          topTypes.forEach((t) => all.forEach((p) => { if ((p.productType || p.product_type) === t) pushIf(p) }))
+        }
+
+        // 4. popular/bestseller fallback - approximate by price desc then id
+        const fallback = all.slice().sort((a, b) => (Number(b.price || 0) - Number(a.price || 0)))
+        fallback.forEach((p) => pushIf(p))
+
+        const final = picks.slice(0, 12)
+        if (mounted) {
+          setRecommendations(final)
+          try { window.localStorage.setItem(cacheKey, JSON.stringify({ signature: String(orders.length), items: final })) } catch {}
+        }
+      } catch (err) {
+        // ignore recommendation failures
+      } finally {
+        if (mounted) setRecsLoading(false)
+      }
+    })()
+
+    return () => { mounted = false }
+  }, [orders])
+
+  const years = useMemo(() => {
+    const setYears = new Set()
+    orders.forEach((o) => {
+      try {
+        const d = new Date(o.created_at)
+        if (!Number.isNaN(d.getFullYear())) setYears.add(String(d.getFullYear()))
+      } catch {}
+    })
+    return Array.from(setYears).sort((a, b) => Number(b) - Number(a))
+  }, [orders])
+
+  const filteredOrders = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return orders.filter((order) => {
+      if (statusFilter !== EMPTY_FILTER) {
+        const s = normalizeStatus(order?.status)
+        const shipmentS = getShipmentStatus(order)
+        if (s !== statusFilter && shipmentS !== statusFilter) return false
+      }
+      if (yearFilter !== 'all') {
+        const d = new Date(order.created_at)
+        if (String(d.getFullYear()) !== yearFilter) return false
+      }
+      if (!q) return true
+      const hay = [order.order_id, order.customer_name, order.customer_email, order?.shipment?.tracking_id, ...(Array.isArray(order.items) ? order.items.map((i) => i.name) : [])]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return hay.includes(q)
+    })
+  }, [orders, searchQuery, statusFilter, yearFilter])
+
+  const buyAgainItems = useMemo(() => {
+    const seen = new Set()
+    const items = []
+    orders.forEach((order) => {
+      (order.items || []).forEach((it) => {
+        const id = String(it.product_id || it.id || it.name)
+        if (!seen.has(id)) {
+          seen.add(id)
+          items.push(it)
+        }
+      })
+    })
+    return items.slice(0, 12)
+  }, [orders])
+
+  const handleCancel = async (orderId) => {
+    try {
+      await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/cancel`, { method: 'PUT', headers: buildAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({}) })
       await loadOrders()
-    } catch {
+    } catch (err) {
       setMessage('Unable to cancel order right now.')
     }
   }
 
-  const handleReturnProofUpload = (orderId, fileList) => {
-    const files = Array.from(fileList || []).slice(0, 3)
-    if (!files.length) {
-      return
-    }
-
-    const readers = files.map(
-      (file) =>
-        new Promise((resolve) => {
-          const reader = new FileReader()
-          reader.onload = (event) => {
-            resolve(String(event.target?.result || '').trim())
-          }
-          reader.onerror = () => resolve('')
-          reader.readAsDataURL(file)
-        }),
-    )
-
-    Promise.all(readers).then((images) => {
-      const normalized = images.filter(Boolean).slice(0, 3)
-      setReturnDrafts((current) => ({
-        ...current,
-        [orderId]: {
-          ...getReturnDraft(orderId),
-          proof_images: normalized,
-        },
-      }))
-    })
-  }
-
-  const requestReturn = async (orderId) => {
-    const draft = getReturnDraft(orderId)
-    try {
-      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/return-request`, {
-        method: 'POST',
-        headers: buildAuthHeaders({
-          'Content-Type': 'application/json',
-        }),
-        cache: 'no-store',
-        body: JSON.stringify({
-          reason: draft.reason,
-          issue_details: draft.issue_details,
-          proof_images: draft.proof_images,
-        }),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        setMessage(data?.detail || 'Unable to request return.')
-        return
-      }
-      setMessage(data?.message || 'Return request submitted successfully.')
-      addNotification('Return Requested', 'Your return request has been submitted')
-      setActiveReturnFormOrderId('')
-      await loadOrders()
-    } catch {
-      setMessage('Unable to request return right now.')
-    }
-  }
-
-  const trackedOrders = useMemo(() => {
-    return orders.map((order) => ({
-      ...order,
-      current_status: order.status,
-      tracking_id: order?.shipment?.tracking_id || '',
-      can_cancel: ['PLACED', 'CONFIRMED', 'PACKED'].includes(String(order.status || '').toUpperCase()),
-      can_return:
-        String(order.status || '').toUpperCase() === 'DELIVERED' &&
-        !(order.return_request && String(order.return_request.status || '').trim()),
-      timeline: TRACKING_STEPS.map((step) => ({
-        step,
-        state: resolveStepState(
-          step,
-          order.status,
-          new Set((order.tracking_logs || []).map((entry) => String(entry.status || '').toUpperCase())),
-        ),
-      })),
-    }))
-  }, [orders])
+  const openDetailsModal = (order) => setModalOrder(order)
+  const closeDetailsModal = () => setModalOrder(null)
 
   return (
-    <PageWrapper
-      className="page-customer page-tracking"
-      eyebrow="Orders"
-      title="Track your shipments"
-      description="See every stage from order confirmation to final delivery."
-    >
-      {/* Notification Toast Container */}
-      <div className="tracking-toast-stack">
-        {notifications.map((notif) => (
-          <div key={notif.id} className="tracking-toast tracking-toast-success">
-            <p>
-              {notif.title}
-            </p>
-            <p>
-              {notif.message}
-            </p>
+    <PageWrapper eyebrow="Orders" title="My Orders" description="Your purchases and tracking summarized in a clean, Amazon-style layout.">
+      <section className="panel panel-stack orders-panel">
+        <div className="orders-topbar">
+          <div className="orders-tabs">
+            <button className={`tab ${activeTab === 'orders' ? 'active' : ''}`} onClick={() => setActiveTab('orders')}>Orders</button>
+            <button className={`tab ${activeTab === 'buyagain' ? 'active' : ''}`} onClick={() => setActiveTab('buyagain')}>Buy Again</button>
+            <button className={`tab ${activeTab === 'notshipped' ? 'active' : ''}`} onClick={() => setActiveTab('notshipped')}>Not Yet Shipped</button>
           </div>
-        ))}
-      </div>
 
-      <style>{`
-        @keyframes slideInRight {
-          from {
-            transform: translateX(400px);
-            opacity: 0;
-          }
-          to {
-            transform: translateX(0);
-            opacity: 1;
-          }
-        }
-        
-        .tracking-step {
-          transition: all 0.3s ease;
-        }
-        
-        .tracking-step.updating {
-          animation: pulse 0.6s ease;
-        }
-        
-        @keyframes pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.1); opacity: 0.8; }
-        }
-      `}</style>
-
-      <section className="panel panel-stack">
-        <div className="section-head">
-          <h2>My orders</h2>
-          <button type="button" className="btn btn-secondary" onClick={loadOrders}>
-            Refresh
-          </button>
+          <div className="orders-controls">
+            <input className="field" placeholder="Search all orders" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+            <select className="field" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value={EMPTY_FILTER}>All Orders</option>
+              <option value="DELIVERED">Delivered</option>
+              <option value="SHIPPED">Shipped</option>
+              <option value="PACKED">Packed</option>
+              <option value="OUT_FOR_DELIVERY">Out For Delivery</option>
+              <option value="CANCELLED">Cancelled</option>
+            </select>
+            <select className="field" value={yearFilter} onChange={(e) => setYearFilter(e.target.value)}>
+              <option value="all">All years</option>
+              {years.map((y) => (<option key={y} value={y}>{y}</option>))}
+            </select>
+            <button className="btn btn-secondary" onClick={loadOrders} disabled={loading}>{loading ? 'Refreshing...' : 'Search'}</button>
+          </div>
         </div>
 
-        {lastUpdatedAt ? <p style={{ fontSize: '13px', color: '#6b7280' }}>Last synced: {new Date(lastUpdatedAt).toLocaleTimeString()}</p> : null}
+        {activeTab === 'buyagain' ? (
+          <div className="buy-again-row">
+            <h3>Buy Again</h3>
+            <div className="horizontal-scroll">
+              {buyAgainItems.map((it) => (
+                <div key={`${it.product_id || it.id}-${it.name}`} style={{ width: 200, padding: 8 }}>
+                  <DiscoveryProductCard product={{ id: it.product_id || it.id, title: it.name, image: it.image, price: it.price }} onAddToCart={() => { window.location.assign('/cart') }} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
-        {message ? <p className="wishlist-message">{message}</p> : null}
-        {loading ? <p>Loading your orders...</p> : null}
-        {!loading && trackedOrders.length === 0 ? <p>No tracked orders yet.</p> : null}
+        {activeTab === 'orders' || activeTab === 'notshipped' ? (
+          <div className="orders-list">
+            {filteredOrders.length === 0 && !loading ? <p>No orders found.</p> : null}
+            {filteredOrders.map((order) => {
+              const primary = getPrimaryItem(order) || {}
+              const status = getShipmentStatus(order)
+              const placedDate = formatDateTime(order.created_at)
+              const total = Number(order.total_amount || order.total || 0)
+              const shipTo = order.shipping_details?.full_name || order.customer_name || ''
 
-        <div className="admin-orders-stack">
-          {trackedOrders.map((order) => (
-            <article key={order.order_id} className={`section-card panel-stack tracking-order-card tracking-order-card-compact ${recentStatusUpdates[order.order_id] ? 'tracking-order-card-updating' : ''}`}>
-              {(() => {
-                const currentStatus = String(order.current_status || '').trim().toUpperCase()
-                const currentIndex = TRACKING_STEPS.indexOf(currentStatus)
-                const timelineEvents = [
-                  ...(Array.isArray(order.status_history) ? order.status_history : []),
-                  ...(Array.isArray(order.tracking_logs) ? order.tracking_logs : []),
-                ]
-                  .map((entry) => ({
-                    status: String(entry?.status || '').trim().toUpperCase(),
-                    timestamp: entry?.timestamp || '',
-                    location: entry?.location || '',
-                    updatedByRole: entry?.updated_by_role || entry?.performer_role || '',
-                  }))
-                  .filter((entry) => entry.status)
-                  .sort((first, second) => String(first.timestamp).localeCompare(String(second.timestamp)))
+              const statusBadgeClass = status === 'DELIVERED' ? 'badge-delivered' : status === 'SHIPPED' ? 'badge-shipped' : status === 'PACKED' ? 'badge-packed' : status === 'OUT_FOR_DELIVERY' ? 'badge-out' : status === 'CANCELLED' ? 'badge-cancelled' : 'badge-default'
 
-                const header = getTrackingSummary(order, getSlaState(order).label)
-                const etaText = getDeliveryEta(order).replace(/^Expected\s+/i, 'Expected delivery: ')
-                console.log('ORDER STATUS:', order.status)
-
-                return (
-                  <>
-                    <div className="tracking-card-head tracking-card-head-compact">
+              return (
+                <article key={order.order_id} className="order-card panel-stack">
+                  <div className="order-topbar">
+                    <div className="order-meta">
                       <div>
-                        <h3>{header.title}</h3>
-                        <p className="tracking-order-message">{header.detail}</p>
-                        <p className="tracking-order-meta">{etaText}</p>
-                        <p className="tracking-order-meta">Order ID: {order.order_id}</p>
+                        <p className="meta-label">ORDER PLACED</p>
+                        <p className="meta-value">{placedDate}</p>
                       </div>
-                      <span className={`tracking-status-chip ${currentStatus === 'DELIVERED' ? 'tracking-status-chip-delivered' : ''}`}>
-                        {currentStatus ? currentStatus.replaceAll('_', ' ') : 'PLACED'}
-                      </span>
+                      <div>
+                        <p className="meta-label">TOTAL</p>
+                        <p className="meta-value">₹{total.toFixed(2)}</p>
+                      </div>
+                      <div>
+                        <p className="meta-label">SHIP TO</p>
+                        <p className="meta-value">{shipTo}</p>
+                      </div>
+                      <div>
+                        <p className="meta-label">ORDER #</p>
+                        <p className="meta-value">{order.order_id}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="order-items-row">
+                    <div className="item-thumb">
+                      {primary.image ? <img src={primary.image} alt={primary.name} /> : <div className="placeholder-thumb" />}
                     </div>
 
-                    <section className="tracking-progress-shell" aria-label={`Tracking timeline ${order.order_id}`}>
-                      <div className="tracking-progress-line" aria-hidden="true">
-                        <span className="tracking-progress-fill" style={{ width: `${Math.max(0, (Math.max(0, currentIndex) / (TRACKING_STEPS.length - 1)) * 100)}%` }} />
-                      </div>
-                      <div className="tracking-progress-steps" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
-                        {TRACKING_STEPS.map((step, index) => {
-                          const isCompleted = index < currentIndex
-                          const isCurrent = index === currentIndex
-                          return (
-                            <div
-                              key={`${order.order_id}-step-${step}`}
-                              className={`tracking-progress-step ${isCompleted ? 'tracking-progress-step-completed' : ''} ${isCurrent ? 'tracking-progress-step-active' : ''}`}
-                            >
-                              <span className="tracking-progress-dot" aria-hidden="true">
-                                {isCompleted ? '✓' : isCurrent ? '●' : '○'}
-                              </span>
-                              <span className="tracking-progress-label-wrap">
-                                <span>{step.replaceAll('_', ' ')}</span>
-                                <span className="tracking-progress-time">
-                                  {formatStepTimestamp(getStepTimestamp(order, step), { fallback: index === 0 ? formatStepTimestamp(order.created_at, { fallback: 'Pending' }) : 'Pending', todayLabel: step === 'SHIPPED' || step === 'OUT_FOR_DELIVERY' })}
-                                </span>
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </section>
+                    <div className="item-main">
+                      <h4 className="item-title">{primary.name}</h4>
+                      <p className="delivery-message">{order.shipment?.status ? (order.shipment?.status === 'DELIVERED' ? `Delivered on ${formatDateTime(order.status_timestamps?.DELIVERED || order.updated_at)}` : order.shipment?.status.replaceAll('_', ' ')) : ''}</p>
+                      <div className={`status-badge ${statusBadgeClass}`}>{STATUS_LABELS[status] || status.replaceAll('_', ' ')}</div>
 
-                    <div className="tracking-delivery-info">
-                      {currentStatus === 'SHIPPED' ? (
-                        <p>Product has left the facility.</p>
-                      ) : currentStatus === 'PACKED' ? (
-                        <p>Order is packed and waiting for shipment dispatch.</p>
-                      ) : currentStatus === 'OUT_FOR_DELIVERY' ? (
-                        <p>Product is on the way to the customer.</p>
-                      ) : currentStatus === 'DELIVERED' ? (
-                        <p>Product has been delivered successfully.</p>
+                      <div className="item-attrs">
+                        <span>Qty: {primary.quantity || 1}</span>
+
+                      <div className="order-live-tracker">
+                        <div className="order-live-tracker-row" aria-label="Order progress tracker">
+                          {TRACKER_STEPS.map((step, index) => {
+                            const activeIndex = getTrackerActiveIndex(order)
+                            const isCompleted = activeIndex >= 0 && index < activeIndex
+                            const isCurrent = activeIndex === index
+                            const isPending = activeIndex < 0 || index > activeIndex
+
+                            return (
+                              <span key={step.key} className="tracker-segment-group">
+                                <span
+                                  className={`tracker-step tracker-step-card ${isCompleted ? 'is-completed' : ''} ${isCurrent ? 'is-current' : ''} ${isPending ? 'is-pending' : ''}`.trim()}
+                                  aria-current={isCurrent ? 'step' : undefined}
+                                  aria-label={`${step.label} ${isCompleted ? 'completed' : isCurrent ? 'current' : 'pending'}`}
+                                >
+                                  <span className="tracker-step-icon" aria-hidden="true">{step.icon}</span>
+                                </span>
+                                {index < TRACKER_STEPS.length - 1 ? (
+                                  <span className={`tracker-connector ${activeIndex > index ? 'is-filled' : 'is-pending'}`} aria-hidden="true" />
+                                ) : null}
+                              </span>
+                            )
+                          })}
+                        </div>
+                        <div className="order-live-tracker-footer">
+                          <span className="shipment-tracker-status">{formatTrackerMessage(order)}</span>
+                        </div>
+                      </div>
+                        {primary.size ? <span>Size: {primary.size}</span> : null}
+                        {primary.color ? <span>Color: {primary.color}</span> : null}
+                        <strong className="item-price">₹{Number(primary.price || primary.unit_price || 0).toFixed(2)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="item-cta">
+                      {/* Order-level actions moved into right column */}
+                      <div className="order-actions-inline">
+                        <button className="btn btn-secondary" onClick={() => openDetailsModal(order)}>View order details</button>
+                        <button className="btn btn-secondary">Invoice</button>
+                      </div>
+
+                      {status === 'DELIVERED' ? (
+                        <>
+                          <button className="btn btn-primary" onClick={() => window.location.assign('/products')}>Buy Again</button>
+                          <button className="btn btn-secondary">Write Review</button>
+                          <button className="btn btn-secondary" onClick={() => window.location.assign(`/product/${primary.product_id || primary.id}`)}>View Product</button>
+                        </>
+                      ) : status === 'SHIPPED' ? (
+                        <button className="btn btn-primary btn-small" onClick={() => openDetailsModal(order)}>Track Package</button>
+                      ) : status === 'PACKED' ? (
+                        <button className="btn btn-secondary">Ready for dispatch</button>
+                      ) : status === 'OUT_FOR_DELIVERY' ? (
+                        <button className="btn btn-primary" onClick={() => openDetailsModal(order)}>Track Live</button>
+                      ) : status === 'CANCELLED' ? (
+                        <button className="btn btn-primary" onClick={() => window.location.assign('/products')}>Reorder</button>
                       ) : (
-                        <p>Tracking will update after the shipment is dispatched.</p>
+                        <div className="row-gap">
+                          <button className="btn btn-secondary" onClick={() => handleCancel(order.order_id)}>Cancel order</button>
+                        </div>
                       )}
                     </div>
+                  </div>
 
-                    <details className="tracking-details-accordion">
-                      <summary>Tracking Details</summary>
-                      <div className="tracking-details-list">
-                        {timelineEvents.length > 0 ? (
-                          timelineEvents.map((entry, index) => (
-                            <div key={`${order.order_id}-timeline-event-${index}`} className="tracking-details-row">
-                              <span className="tracking-details-time">{formatStepTimestamp(entry.timestamp, { fallback: 'Updated' })}</span>
-                              <span className="tracking-details-status">{String(entry.status).replaceAll('_', ' ')}</span>
-                              <span className="tracking-details-meta">
-                                {entry.location ? ` · ${entry.location}` : ''}
-                                {entry.updatedByRole ? ` · ${entry.updatedByRole}` : ''}
-                              </span>
-                            </div>
-                          ))
-                        ) : (
-                          <p className="tracking-details-empty">No tracking events available yet.</p>
-                        )}
-                      </div>
-                    </details>
-
-                    <section className="tracking-payment-line">
-                      <p>Payment method: {String(order?.payment?.method || order.payment_method || 'COD').replaceAll('_', ' ')}</p>
-                      <p>Status: {String(order?.payment?.status || 'PENDING').replaceAll('_', ' ')}</p>
-                      {String(order?.payment?.method || order.payment_method || 'COD').toUpperCase() === 'COD' ? (
-                        <p>Payment will be collected on delivery.</p>
-                      ) : order?.payment?.payment_id ? (
-                        <p>Payment ID: {order.payment.payment_id}</p>
-                      ) : null}
-                    </section>
-
-                    {order.tracking_id ? (
-                      <p className="tracking-order-meta">Tracking ID: <strong>{order.tracking_id}</strong></p>
-                    ) : null}
-                  </>
-                )
-              })()}
-
-              <div className="row-gap">
-                {order.can_cancel ? (
-                  <button type="button" className="btn btn-secondary" onClick={() => cancelOrder(order.order_id)}>
-                    Cancel Order
-                  </button>
-                ) : null}
-                {order.can_return ? (
-                  <>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() =>
-                        setActiveReturnFormOrderId((current) => (current === order.order_id ? '' : order.order_id))
-                      }
-                    >
-                      {activeReturnFormOrderId === order.order_id ? 'Hide Return Form' : 'Request Return'}
+                  {/* expandable product specs */}
+                  <div className="order-specs">
+                    <button className="btn btn-link" onClick={() => setExpandedSpecs((s) => ({ ...s, [order.order_id]: !s[order.order_id] }))}>
+                      {expandedSpecs[order.order_id] ? 'Hide product details' : 'Product details & specifications'}
                     </button>
-
-                    {activeReturnFormOrderId === order.order_id ? (
-                      <section className="section-card panel-stack tracking-subcard">
-                        <label className="field-group">
-                          <span className="field-label">Return reason</span>
-                          <input
-                            className="field"
-                            value={getReturnDraft(order.order_id).reason}
-                            onChange={(event) =>
-                              setReturnDrafts((current) => ({
-                                ...current,
-                                [order.order_id]: {
-                                  ...getReturnDraft(order.order_id),
-                                  reason: event.target.value,
-                                },
-                              }))
-                            }
-                            placeholder="Example: Damaged item"
-                          />
-                        </label>
-
-                        <label className="field-group">
-                          <span className="field-label">Issue details</span>
-                          <textarea
-                            className="field"
-                            rows={3}
-                            value={getReturnDraft(order.order_id).issue_details}
-                            onChange={(event) =>
-                              setReturnDrafts((current) => ({
-                                ...current,
-                                [order.order_id]: {
-                                  ...getReturnDraft(order.order_id),
-                                  issue_details: event.target.value,
-                                },
-                              }))
-                            }
-                            placeholder="Describe what issue you found"
-                          />
-                        </label>
-
-                        <label className="field-group">
-                          <span className="field-label">Upload proof images (up to 3)</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            className="field"
-                            onChange={(event) => handleReturnProofUpload(order.order_id, event.target.files)}
-                          />
-                        </label>
-
-                        {(getReturnDraft(order.order_id).proof_images || []).length > 0 ? (
-                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                            {(getReturnDraft(order.order_id).proof_images || []).map((image, index) => (
-                              <img
-                                key={`${order.order_id}-draft-proof-${index + 1}`}
-                                src={image}
-                                alt={`Return proof preview ${index + 1}`}
-                                style={{
-                                  width: '72px',
-                                  height: '72px',
-                                  objectFit: 'cover',
-                                  borderRadius: '8px',
-                                  border: '1px solid #d1d5db',
-                                }}
-                              />
-                            ))}
-                          </div>
-                        ) : null}
-
-                        <button type="button" className="btn btn-primary" onClick={() => requestReturn(order.order_id)}>
-                          Submit Return Request
-                        </button>
-                      </section>
+                    {expandedSpecs[order.order_id] && primary.product ? (
+                      <div className="spec-table">
+                        {['fabric','fit_type','pattern','sleeve_type','material','occasion','brand','wash_care','color','available_sizes'].map((k) => (
+                          primary.product[k] ? (
+                            <div key={k} className="spec-row"><strong>{k.replaceAll('_',' ')}:</strong> <span>{Array.isArray(primary.product[k]) ? primary.product[k].join(', ') : String(primary.product[k])}</span></div>
+                          ) : null
+                        ))}
+                      </div>
                     ) : null}
-                  </>
-                ) : null}
-              </div>
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        ) : null}
 
-              {order.return_request ? (
-                <section className="section-card panel-stack tracking-subcard">
-                  <p className="field-label">Return request</p>
-                  <p>Status: {String(order.return_request.status || '').replaceAll('_', ' ')}</p>
-                  {order.return_request.reason ? <p>Reason: {order.return_request.reason}</p> : null}
-                  {order.return_request.issue_details ? <p>Details: {order.return_request.issue_details}</p> : null}
-                </section>
-              ) : null}
-            </article>
-          ))}
+        {/* Recommendations carousel */}
+        <div className="recommended-section">
+          <h3>Recommended based on your shopping trends</h3>
+          <div className="recommend-carousel-controls">
+            <button className="btn btn-secondary" onClick={() => { if (recsRef.current) recsRef.current.scrollBy({ left: -recsRef.current.clientWidth * 0.8, behavior: 'smooth' }) }} aria-label="Previous">◀</button>
+            <div className="recommend-carousel" ref={recsRef}>
+              {recsLoading ? <p>Loading recommendations...</p> : null}
+              {!recsLoading && recommendations.length === 0 ? <p className="muted">No recommendations yet — shop to get personalized picks.</p> : null}
+              {recommendations.map((p) => (
+                <div key={p.id} className="recommend-card">
+                  <DiscoveryProductCard
+                    product={{ id: p.id, title: p.title || p.name, image: p.image, price: p.price, mrp: p.mrp || 0, discount: p.discount_percent || 0, rating: p.rating || 0, badge: p.badge || '' }}
+                    onAddToCart={() => {
+                      setToastMessage('✅ Added to cart')
+                      setTimeout(() => setToastMessage(''), 3000)
+                    }}
+                    onToggleWishlist={() => {
+                      setToastMessage('❤️ Added to wishlist')
+                      setTimeout(() => setToastMessage(''), 3000)
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+            <button className="btn btn-secondary" onClick={() => { if (recsRef.current) recsRef.current.scrollBy({ left: recsRef.current.clientWidth * 0.8, behavior: 'smooth' }) }} aria-label="Next">▶</button>
+          </div>
         </div>
+
+        {modalOrder ? (
+          <div className="modal-overlay" role="dialog" aria-modal="true">
+            <div className="modal-panel">
+              <header>
+                <h3>Order {modalOrder.order_id} — Tracking</h3>
+                <button className="btn btn-link" onClick={closeDetailsModal}>Close</button>
+              </header>
+              <div className="modal-body">
+                <p><strong>Tracking ID:</strong> {modalOrder.shipment?.tracking_id || 'Pending'}</p>
+                <p><strong>ETA:</strong> {modalOrder.shipment?.eta || '—'}</p>
+                <p><strong>Current location:</strong> {modalOrder.shipment?.current_location || (modalOrder.shipment_events && modalOrder.shipment_events.length ? modalOrder.shipment_events[modalOrder.shipment_events.length - 1].location : 'Pending')}</p>
+                <p><strong>Next destination:</strong> {(() => {
+                  const route = modalOrder.shipment?.route || []
+                  if (!route.length) return '—'
+                  const current = modalOrder.shipment?.current_location || (modalOrder.shipment_events && modalOrder.shipment_events.length ? modalOrder.shipment_events[modalOrder.shipment_events.length - 1].location : '')
+                  const idx = route.findIndex((r) => String(r).toLowerCase() === String(current).toLowerCase())
+                  if (idx >= 0 && idx < route.length - 1) return route[idx + 1]
+                  // fallback: next unprocessed stage
+                  return route.find((r) => r !== current) || '—'
+                })()}</p>
+
+                <div className="shipment-tracker-card">
+                  <div className="shipment-tracker-row" aria-label="Shipment progress tracker">
+                    {TRACKER_STEPS.map((step, index) => {
+                      const activeIndex = getTrackerActiveIndex(modalOrder)
+                      const isCompleted = activeIndex >= 0 && index < activeIndex
+                      const isCurrent = activeIndex === index
+                      const isPending = activeIndex < 0 || index > activeIndex
+
+                      return (
+                        <span key={step.key} className="tracker-segment-group">
+                          <span
+                            className={`tracker-step ${isCompleted ? 'is-completed' : ''} ${isCurrent ? 'is-current' : ''} ${isPending ? 'is-pending' : ''}`.trim()}
+                            aria-current={isCurrent ? 'step' : undefined}
+                            aria-label={`${step.label} ${isCompleted ? 'completed' : isCurrent ? 'current' : 'pending'}`}
+                          >
+                            <span className="tracker-step-icon" aria-hidden="true">{step.icon}</span>
+                          </span>
+                          {index < TRACKER_STEPS.length - 1 ? (
+                            <span className={`tracker-connector ${activeIndex > index ? 'is-filled' : 'is-pending'}`} aria-hidden="true" />
+                          ) : null}
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <div className="shipment-tracker-status">{formatTrackerMessage(modalOrder)}</div>
+                </div>
+
+                  <div className="tracking-metadata-row">
+                    <span className="tracker-hint">Use the tracker above to follow shipment progress.</span>
+                  </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {toastMessage ? (
+          <div className="app-toast" role="status" aria-live="polite">{toastMessage}</div>
+        ) : null}
       </section>
     </PageWrapper>
   )
