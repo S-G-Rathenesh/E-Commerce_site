@@ -1,3 +1,4 @@
+import asyncio
 import os
 import random
 import re
@@ -96,8 +97,8 @@ ORDER_STATUS_FLOW = [
     'OUT_FOR_DELIVERY',
     'DELIVERED',
 ]
-SHIPMENT_STATUS_FLOW = ORDER_STATUS_FLOW
-SHIPMENT_ENTITY_STATUSES = ['CREATED', 'DISPATCHED', 'IN_TRANSIT', 'DELIVERED']
+SHIPMENT_STATUS_FLOW = ['CREATED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED']
+SHIPMENT_ENTITY_STATUSES = SHIPMENT_STATUS_FLOW
 DELIVERY_FINAL_STATES = {'OUT_FOR_DELIVERY', 'DELIVERED'}
 ORDER_STATUS_TRANSITIONS = {
     'PLACED': {'CONFIRMED', 'REJECTED', 'CANCELLED'},
@@ -265,6 +266,7 @@ class DeliveryProfileUpdateRequest(BaseModel):
     state: str | None = None
     service_pincodes: list[str] | str | None = None
     allow_all_india: bool = False
+    is_online: bool | None = None
 
 
 class OrderItemCreateRequest(BaseModel):
@@ -499,6 +501,25 @@ class MerchantProductRequest(BaseModel):
     productType: str = ''
     subType: str = ''
     stock: int = 0
+    fabric: str | None = None
+    fit_type: str | None = None
+    pattern: str | None = None
+    sleeve_type: str | None = None
+    neck_type: str | None = None
+    occasion: str | None = None
+    closure_type: str | None = None
+    wash_care: str | None = None
+    country_of_origin: str | None = None
+    brand: str | None = None
+    sku: str | None = None
+    weight: str | None = None
+    available_sizes: list[str] | None = None
+    color: str | None = None
+    stock_status: str | None = None
+
+
+class WishlistRequest(BaseModel):
+    product_id: int
 
 
 SEED_PRODUCTS = [
@@ -735,6 +756,20 @@ SEED_PRODUCTS = [
         'description': 'Soft cotton night suit designed for breathable sleep comfort.',
         'merchant_id': 'USR-DEMO-ADMIN-01',
         'review_status': 'APPROVED',
+    },
+    {
+        'id': 19,
+        'name': 'Testing',
+        'section': 'women',
+        'category': 'Testing',
+        'productType': 'Testing',
+        'subType': 'Testing',
+        'price': 150.0,
+        'image': 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=900&q=80',
+        'description': 'Test product for development and QA purposes.',
+        'merchant_id': 'USR-DEMO-ADMIN-01',
+        'review_status': 'APPROVED',
+        'stock': 9,
     },
 ]
 
@@ -986,11 +1021,13 @@ shipments_collection = database['shipments']
 shipment_items_collection = database['shipment_items']
 delivery_logs_collection = database['delivery_logs']
 order_status_history_collection = database['order_status_history']
+shipment_events_collection = database['shipment_events']
 warehouses_collection = database['warehouses']
 delivery_coverage_collection = database['delivery_coverage']
 payments_collection = database['payments']
 returns_collection = database['returns']
 notifications_collection = database['notifications']
+wishlists_collection = database['wishlists']
 # NEW: Shipping system collections
 merchant_shipping_settings_collection = database['merchant_shipping_settings']
 serviceable_pincodes_collection = database['serviceable_pincodes']
@@ -1000,6 +1037,8 @@ banners_collection = database['banners']
 platform_settings_collection = database['platform_settings']
 global_offers_collection = database['global_offers']
 database_mode = 'mongo'
+shipment_simulation_started = False
+shipment_simulation_task = None
 
 
 def activate_in_memory_database(reason: str) -> None:
@@ -1013,11 +1052,13 @@ def activate_in_memory_database(reason: str) -> None:
     global shipment_items_collection
     global delivery_logs_collection
     global order_status_history_collection
+    global shipment_events_collection
     global warehouses_collection
     global delivery_coverage_collection
     global payments_collection
     global returns_collection
     global notifications_collection
+    global wishlists_collection
     global merchant_shipping_settings_collection
     global serviceable_pincodes_collection
     global blocked_pincodes_collection
@@ -1044,11 +1085,13 @@ def activate_in_memory_database(reason: str) -> None:
     shipment_items_collection = database['shipment_items']
     delivery_logs_collection = database['delivery_logs']
     order_status_history_collection = database['order_status_history']
+    shipment_events_collection = database['shipment_events']
     warehouses_collection = database['warehouses']
     delivery_coverage_collection = database['delivery_coverage']
     payments_collection = database['payments']
     returns_collection = database['returns']
     notifications_collection = database['notifications']
+    wishlists_collection = database['wishlists']
     # NEW: Shipping system collections
     merchant_shipping_settings_collection = database['merchant_shipping_settings']
     serviceable_pincodes_collection = database['serviceable_pincodes']
@@ -1139,9 +1182,402 @@ def create_refresh_token(subject_email: str, role: str) -> str:
 
 
 def serialize_product(document: dict) -> dict:
-    payload = dict(document)
+    payload = enrich_product_specifications(document)
     payload.pop('_id', None)
     return payload
+
+
+def normalize_product_size_list(value: list[str] | str | None) -> list[str]:
+    if not value:
+        return []
+
+    raw_values = value if isinstance(value, list) else re.split(r'[\s,|/]+', str(value))
+    normalized_sizes: list[str] = []
+    for raw_value in raw_values:
+        size = str(raw_value).strip()
+        if size and size not in normalized_sizes:
+            normalized_sizes.append(size)
+    return normalized_sizes
+
+
+def infer_product_kind(product: dict) -> str:
+    searchable_text = normalize_product_text(
+        ' '.join(
+            str(product.get(field) or '')
+            for field in [
+                'name',
+                'description',
+                'category',
+                'section',
+                'productType',
+                'subType',
+                'fabric',
+                'fit_type',
+                'pattern',
+                'sleeve_type',
+                'neck_type',
+                'occasion',
+                'closure_type',
+                'color',
+            ]
+        ),
+    )
+
+    if any(keyword in searchable_text for keyword in ['shoe', 'shoes', 'sneaker', 'sneakers', 'sandal', 'sandals', 'loafer', 'boot', 'boots', 'footwear']):
+        return 'shoes'
+    if any(keyword in searchable_text for keyword in ['laptop', 'mobile', 'phone', 'smartphone', 'tablet', 'camera', 'television', 'tv', 'headphone', 'speaker', 'watch', 'electronics', 'electronic']):
+        return 'electronics'
+    return 'fashion'
+
+
+def infer_product_fabric(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    fabric_rules = [
+        (['cashmere', 'wool'], 'Wool Blend'),
+        (['linen'], 'Linen'),
+        (['denim'], 'Denim'),
+        (['satin'], 'Satin'),
+        (['silk'], 'Silk Blend'),
+        (['rayon'], 'Rayon'),
+        (['fleece'], 'Fleece'),
+        (['polyester'], 'Polyester'),
+        (['cotton'], 'Cotton'),
+    ]
+    for keywords, fabric in fabric_rules:
+        if any(keyword in searchable_text for keyword in keywords):
+            return fabric
+    return 'Cotton Blend' if infer_product_kind(product) == 'fashion' else 'Standard Material'
+
+
+def infer_product_fit_type(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['bodycon', 'slim', 'tailored']):
+        return 'Slim Fit'
+    if any(keyword in searchable_text for keyword in ['oversized', 'relaxed', 'loose']):
+        return 'Oversized'
+    if any(keyword in searchable_text for keyword in ['regular', 'straight', 'classic', 'crew']):
+        return 'Regular Fit'
+    return 'Regular Fit'
+
+
+def infer_product_pattern(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['floral', 'printed', 'print']):
+        return 'Printed'
+    if any(keyword in searchable_text for keyword in ['checked', 'check', 'plaid']):
+        return 'Checked'
+    if any(keyword in searchable_text for keyword in ['striped', 'stripe']):
+        return 'Striped'
+    return 'Solid'
+
+
+def infer_product_sleeve_type(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['sleeveless', 'tank', 'camisole']):
+        return 'Sleeveless'
+    if any(keyword in searchable_text for keyword in ['tee', 't-shirt', 'polo', 'half sleeve', 'shirt', 'kurta']):
+        return 'Half Sleeve'
+    return 'Full Sleeve'
+
+
+def infer_product_neck_type(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['v neck', 'v-neck']):
+        return 'V Neck'
+    if any(keyword in searchable_text for keyword in ['polo', 'collar', 'shirt', 'placket']):
+        return 'Collar Neck'
+    if any(keyword in searchable_text for keyword in ['crew', 'round', 'sweater', 'tee']):
+        return 'Round Neck'
+    return 'Round Neck'
+
+
+def infer_product_occasion(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['formal', 'office', 'blazer', 'chino', 'oxford']):
+        return 'Formal'
+    if any(keyword in searchable_text for keyword in ['party', 'festive', 'evening']):
+        return 'Party Wear'
+    if any(keyword in searchable_text for keyword in ['sports', 'gym', 'training', 'active']):
+        return 'Sports'
+    return 'Casual'
+
+
+def infer_product_closure_type(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['zip', 'zipper']):
+        return 'Zip'
+    if any(keyword in searchable_text for keyword in ['button', 'shirt', 'blazer', 'kurta', 'dress']):
+        return 'Button'
+    return 'Pull Over'
+
+
+def infer_product_wash_care(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if any(keyword in searchable_text for keyword in ['satin', 'silk', 'cashmere', 'wool']):
+        return 'Hand Wash'
+    return 'Machine Wash'
+
+
+def infer_product_color(product: dict) -> str:
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    color_rules = [
+        (['blazer'], 'Black'),
+        (['cashmere'], 'Ivory'),
+        (['denim'], 'Indigo Blue'),
+        (['satin'], 'Wine'),
+        (['floral'], 'Multicolor'),
+        (['anarkali'], 'Pastel Pink'),
+        (['bodycon'], 'Burgundy'),
+        (['polo'], 'Navy Blue'),
+        (['chino'], 'Beige'),
+        (['bomber'], 'Olive'),
+        (['linen'], 'Sand'),
+        (['party dress'], 'Pink'),
+        (['dungaree'], 'Blue'),
+        (['sweatshirt'], 'Grey'),
+        (['skirt'], 'Black'),
+        (['shirt dress'], 'Beige'),
+        (['oxford shirt'], 'White'),
+        (['night suit'], 'Light Blue'),
+    ]
+    for keywords, color in color_rules:
+        if any(keyword in searchable_text for keyword in keywords):
+            return color
+    return 'Neutral'
+
+
+def infer_product_weight(product: dict) -> str:
+    kind = infer_product_kind(product)
+    searchable_text = normalize_product_text(' '.join(str(product.get(field) or '') for field in ['name', 'description', 'category', 'productType', 'subType']))
+    if kind == 'electronics':
+        return '1.4 kg'
+    if kind == 'shoes':
+        return '0.9 kg'
+    if any(keyword in searchable_text for keyword in ['blazer', 'jacket', 'coat', 'outerwear']):
+        return '0.65 kg'
+    if any(keyword in searchable_text for keyword in ['dress', 'skirt', 'night suit']):
+        return '0.42 kg'
+    if any(keyword in searchable_text for keyword in ['shirt', 'tee', 'kurta', 'polo', 'sweater']):
+        return '0.32 kg'
+    return '0.45 kg'
+
+
+def infer_product_available_sizes(product: dict) -> list[str]:
+    existing_sizes = normalize_product_size_list(product.get('available_sizes'))
+    if existing_sizes:
+        return existing_sizes
+
+    kind = infer_product_kind(product)
+    section = normalize_product_text(product.get('section'))
+    if kind == 'shoes':
+        return ['6', '7', '8', '9', '10']
+    if section == 'kids':
+        return ['2Y', '4Y', '6Y', '8Y', '10Y']
+    return ['S', 'M', 'L', 'XL']
+
+
+def infer_product_stock_status(product: dict) -> str:
+    existing_status = str(product.get('stock_status') or '').strip()
+    if existing_status:
+        return existing_status
+
+    stock_quantity = int(product.get('stock_quantity') if product.get('stock_quantity') is not None else product.get('stock') or 0)
+    reserved = int(product.get('reserved_stock') or 0)
+    low_threshold = int(product.get('low_stock_threshold') or 5)
+    available = stock_quantity - reserved
+    if available <= 0:
+        return 'Out of Stock'
+    if available < low_threshold:
+        return 'Limited Stock'
+    return 'In Stock'
+
+
+def build_product_spec_defaults(product: dict) -> dict:
+    brand = str(product.get('brand') or '').strip()
+    sku = str(product.get('sku') or '').strip()
+    country_of_origin = str(product.get('country_of_origin') or '').strip()
+    weight = str(product.get('weight') or '').strip()
+    if not brand:
+        brand = 'Movi Tech' if infer_product_kind(product) == 'electronics' else 'Movi Fashion'
+    if not sku:
+        product_id = int(product.get('id') or 0)
+        sku = f'MF-{product_id:04d}' if product_id else 'MF-0000'
+    if not country_of_origin:
+        country_of_origin = 'India'
+    if not weight:
+        weight = infer_product_weight(product)
+
+    return {
+        'fabric': str(product.get('fabric') or '').strip() or infer_product_fabric(product),
+        'fit_type': str(product.get('fit_type') or '').strip() or infer_product_fit_type(product),
+        'pattern': str(product.get('pattern') or '').strip() or infer_product_pattern(product),
+        'sleeve_type': str(product.get('sleeve_type') or '').strip() or infer_product_sleeve_type(product),
+        'neck_type': str(product.get('neck_type') or '').strip() or infer_product_neck_type(product),
+        'occasion': str(product.get('occasion') or '').strip() or infer_product_occasion(product),
+        'closure_type': str(product.get('closure_type') or '').strip() or infer_product_closure_type(product),
+        'wash_care': str(product.get('wash_care') or '').strip() or infer_product_wash_care(product),
+        'country_of_origin': country_of_origin,
+        'brand': brand,
+        'sku': sku,
+        'weight': weight,
+        'available_sizes': infer_product_available_sizes(product),
+        'color': str(product.get('color') or '').strip() or infer_product_color(product),
+        'stock_status': infer_product_stock_status(product),
+        # Inventory fields
+        'stock_quantity': int(product.get('stock_quantity') if product.get('stock_quantity') is not None else product.get('stock') or 0),
+        'reserved_stock': int(product.get('reserved_stock') or 0),
+        'low_stock_threshold': int(product.get('low_stock_threshold') or 5),
+        'is_active': bool(product.get('is_active') if product.get('is_active') is not None else True),
+    }
+
+
+def enrich_product_specifications(document: dict) -> dict:
+    payload = dict(document)
+    payload.pop('_id', None)
+
+    if 'available_sizes' in payload:
+        payload['available_sizes'] = normalize_product_size_list(payload.get('available_sizes')) or payload.get('available_sizes') or []
+
+    defaults = build_product_spec_defaults(payload)
+    for key, value in defaults.items():
+        if payload.get(key) in (None, '', []):
+            payload[key] = value
+
+    # Compute canonical stock fields for API consumers
+    payload['stock_quantity'] = int(payload.get('stock_quantity') if payload.get('stock_quantity') is not None else payload.get('stock') or 0)
+    payload['reserved_stock'] = int(payload.get('reserved_stock') or 0)
+    payload['available_stock'] = max(0, payload['stock_quantity'] - payload['reserved_stock'])
+    payload['low_stock_threshold'] = int(payload.get('low_stock_threshold') or defaults.get('low_stock_threshold') or 5)
+    payload['stock_status'] = infer_product_stock_status(payload)
+
+    return payload
+
+
+def get_approved_product_catalog() -> list[dict]:
+    products = list(
+        products_collection.find(
+            {'review_status': 'APPROVED'},
+            {'_id': 0},
+        )
+    )
+    if products:
+        return products
+
+    return [product for product in SEED_PRODUCTS if normalize_product_review_status(product.get('review_status', 'APPROVED')) == 'APPROVED']
+
+
+def normalize_product_text(value: str | None) -> str:
+    return re.sub(r'\s+', ' ', str(value or '').strip().lower())
+
+
+def tokenize_product(product: dict) -> set[str]:
+    fields = [
+        product.get('name'),
+        product.get('description'),
+        product.get('category'),
+        product.get('section'),
+        product.get('productType'),
+        product.get('subType'),
+        product.get('fabric'),
+        product.get('fit_type'),
+        product.get('pattern'),
+        product.get('sleeve_type'),
+        product.get('neck_type'),
+        product.get('occasion'),
+        product.get('closure_type'),
+        product.get('wash_care'),
+        product.get('country_of_origin'),
+        product.get('brand'),
+        product.get('sku'),
+        product.get('color'),
+        product.get('stock_status'),
+        ' '.join(normalize_product_size_list(product.get('available_sizes'))),
+    ]
+    tokens: set[str] = set()
+    for field in fields:
+        for token in re.findall(r'[a-z0-9]+', normalize_product_text(field)):
+            if len(token) > 2:
+                tokens.add(token)
+    return tokens
+
+
+def build_related_product_rating(score: float, product_id: int) -> float:
+    seeded_variation = (product_id % 7) * 0.05
+    rating = 4.1 + min(0.7, score / 120.0) + seeded_variation
+    return round(min(4.9, rating), 1)
+
+
+def score_related_product(source: dict, candidate: dict) -> float:
+    score = 0.0
+    source_section = normalize_product_text(source.get('section'))
+    candidate_section = normalize_product_text(candidate.get('section'))
+    source_category = normalize_product_text(source.get('category'))
+    candidate_category = normalize_product_text(candidate.get('category'))
+    source_product_type = normalize_product_text(source.get('productType'))
+    candidate_product_type = normalize_product_text(candidate.get('productType'))
+    source_sub_type = normalize_product_text(source.get('subType'))
+    candidate_sub_type = normalize_product_text(candidate.get('subType'))
+
+    if source_section and source_section == candidate_section:
+        score += 35
+    if source_category and source_category == candidate_category:
+        score += 28
+    if source_product_type and source_product_type == candidate_product_type:
+        score += 22
+    if source_sub_type and source_sub_type == candidate_sub_type:
+        score += 12
+
+    try:
+        source_price = float(source.get('price') or 0)
+        candidate_price = float(candidate.get('price') or 0)
+        if source_price > 0 and candidate_price > 0:
+            price_gap = abs(source_price - candidate_price) / max(source_price, candidate_price)
+            if price_gap <= 0.12:
+                score += 20
+            elif price_gap <= 0.25:
+                score += 12
+            elif price_gap <= 0.45:
+                score += 6
+    except (TypeError, ValueError):
+        pass
+
+    overlap = tokenize_product(source) & tokenize_product(candidate)
+    score += min(len(overlap) * 2.5, 12)
+
+    return score
+
+
+def get_related_products_for_product(product_id: int) -> list[dict]:
+    catalog = get_approved_product_catalog()
+    source_product = next((product for product in catalog if int(product.get('id') or 0) == int(product_id)), None)
+    if not source_product:
+        raise HTTPException(status_code=404, detail='Product not found')
+
+    candidates = [product for product in catalog if int(product.get('id') or 0) != int(product_id)]
+    if not candidates:
+        return []
+
+    scored_candidates = []
+    for candidate in candidates:
+        score = score_related_product(source_product, candidate)
+        scored_candidates.append((score, candidate))
+
+    scored_candidates.sort(key=lambda item: (item[0], -int(item[1].get('id') or 0)), reverse=True)
+
+    related_candidates = [candidate for score, candidate in scored_candidates if score > 0]
+    if not related_candidates:
+        rng = random.Random(int(product_id))
+        fallback_candidates = candidates[:]
+        rng.shuffle(fallback_candidates)
+        related_candidates = fallback_candidates
+
+    related_products = []
+    for candidate in related_candidates[:8]:
+        candidate_id = int(candidate.get('id') or 0)
+        base_score = next((score for score, item in scored_candidates if int(item.get('id') or 0) == candidate_id), 0.0)
+        related_products.append(build_discovery_card(candidate, score=base_score, rank=len(related_products)))
+
+    return related_products
 
 
 def normalize_product_stock(value: int | float | str | None, fallback: int = 0) -> int:
@@ -1150,6 +1586,258 @@ def normalize_product_stock(value: int | float | str | None, fallback: int = 0) 
     except (TypeError, ValueError):
         stock_value = fallback
     return max(stock_value, 0)
+
+
+def parse_id_list(value: str | list[str] | None) -> list[int]:
+    if not value:
+        return []
+
+    raw_values = value if isinstance(value, list) else re.split(r'[\s,]+', str(value))
+    parsed_ids: list[int] = []
+    for raw_value in raw_values:
+        try:
+            candidate_id = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            continue
+        if candidate_id > 0 and candidate_id not in parsed_ids:
+            parsed_ids.append(candidate_id)
+    return parsed_ids
+
+
+def get_catalog_product_by_id(product_id: int) -> dict | None:
+    catalog = get_approved_product_catalog()
+    return next((product for product in catalog if int(product.get('id') or 0) == int(product_id)), None)
+
+
+def score_similarity_product(source: dict, candidate: dict) -> float:
+    score = score_related_product(source, candidate)
+
+    source_name_tokens = tokenize_product(source)
+    candidate_name_tokens = tokenize_product(candidate)
+    shared_tokens = source_name_tokens & candidate_name_tokens
+    score += min(len(shared_tokens) * 1.8, 10)
+
+    try:
+        source_price = float(source.get('price') or 0)
+        candidate_price = float(candidate.get('price') or 0)
+        if source_price > 0 and candidate_price > 0:
+            midpoint = (source_price + candidate_price) / 2
+            price_gap = abs(source_price - candidate_price) / midpoint if midpoint else 0
+            if price_gap <= 0.18:
+                score += 10
+            elif price_gap <= 0.35:
+                score += 5
+    except (TypeError, ValueError):
+        pass
+
+    if normalize_product_text(source.get('section')) == normalize_product_text(candidate.get('section')):
+        score += 8
+    if normalize_product_text(source.get('category')) == normalize_product_text(candidate.get('category')):
+        score += 12
+
+    return score
+
+
+def get_trending_products(exclude_ids: set[int] | None = None, limit: int = 8) -> list[dict]:
+    blocked_ids = exclude_ids or set()
+    catalog = get_approved_product_catalog()
+    ranked = sorted(
+        [product for product in catalog if int(product.get('id') or 0) not in blocked_ids],
+        key=lambda product: (
+            float(product.get('price') or 0),
+            int(product.get('id') or 0),
+        ),
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
+def build_discovery_card(candidate: dict, score: float = 0.0, rank: int = 0) -> dict:
+    candidate = enrich_product_specifications(candidate)
+    candidate_id = int(candidate.get('id') or 0)
+    candidate_price = float(candidate.get('price') or 0)
+    price_multiplier = 12 if candidate_price < 500 else 9 if candidate_price < 1500 else 7 if candidate_price < 3000 else 5
+    score_bonus = int(max(0, min(18, score / 8)))
+    discount_percent = min(45, max(5, price_multiplier + score_bonus + (candidate_id % 5)))
+
+    return {
+        'id': candidate_id,
+        'title': candidate.get('name') or candidate.get('title') or f'Product {candidate_id}',
+        'image': candidate.get('image') or '',
+        'price': candidate_price,
+        'rating': build_related_product_rating(score, candidate_id),
+        'category': candidate.get('category') or '',
+        'fabric': candidate.get('fabric') or '',
+        'fit_type': candidate.get('fit_type') or '',
+        'brand': candidate.get('brand') or '',
+        'color': candidate.get('color') or '',
+        'sku': candidate.get('sku') or '',
+        'stock_status': candidate.get('stock_status') or '',
+        'discount_percent': discount_percent,
+        'delivery_badge': 'Free Delivery' if rank % 2 == 0 or candidate_price >= 1800 else 'Fast Shipping',
+    }
+
+
+def rank_candidate_for_recommendation(source_products: list[dict], candidate: dict) -> float:
+    if not source_products:
+        return 0.0
+
+    score = 0.0
+    candidate_tokens = tokenize_product(candidate)
+
+    for index, source_product in enumerate(source_products):
+        weight = 1.0 if index == 0 else 0.8 if index < 3 else 0.65
+        similarity = score_similarity_product(source_product, candidate)
+        score += similarity * weight
+
+        source_section = normalize_product_text(source_product.get('section'))
+        candidate_section = normalize_product_text(candidate.get('section'))
+        source_category = normalize_product_text(source_product.get('category'))
+        candidate_category = normalize_product_text(candidate.get('category'))
+
+        if source_section and source_section == candidate_section:
+            score += 10 * weight
+        if source_category and source_category == candidate_category:
+            score += 18 * weight
+
+        try:
+            source_price = float(source_product.get('price') or 0)
+            candidate_price = float(candidate.get('price') or 0)
+            if source_price > 0 and candidate_price > 0:
+                price_gap = abs(source_price - candidate_price) / max(source_price, candidate_price)
+                if price_gap <= 0.15:
+                    score += 8 * weight
+                elif price_gap <= 0.3:
+                    score += 4 * weight
+        except (TypeError, ValueError):
+            pass
+
+        score += min(len(tokenize_product(source_product) & candidate_tokens) * 1.6, 8) * weight
+
+    if source_products:
+        top_source = source_products[0]
+        source_price = float(top_source.get('price') or 0)
+        candidate_price = float(candidate.get('price') or 0)
+        if source_price > 0 and candidate_price > 0:
+            mid_price = (source_price + candidate_price) / 2
+            if mid_price and abs(source_price - candidate_price) / mid_price <= 0.2:
+                score += 6
+
+    return score
+
+
+def get_recommended_products_for_product(
+    product_id: int,
+    cart_ids: list[int] | None = None,
+    wishlist_ids: list[int] | None = None,
+    viewed_ids: list[int] | None = None,
+) -> list[dict]:
+    catalog = get_approved_product_catalog()
+    source_product = get_catalog_product_by_id(product_id)
+    if not source_product:
+        raise HTTPException(status_code=404, detail='Product not found')
+
+    blocked_ids = {int(product_id)}
+    seed_ids = [int(value) for value in (cart_ids or []) + (wishlist_ids or []) + (viewed_ids or []) if int(value) > 0]
+    seed_ids = [value for value in seed_ids if value != int(product_id)]
+    seed_products = [get_catalog_product_by_id(seed_id) for seed_id in seed_ids]
+    seed_products = [product for product in seed_products if product]
+
+    source_bundle = [source_product] + seed_products
+    ranked_candidates = []
+    for candidate in catalog:
+        candidate_id = int(candidate.get('id') or 0)
+        if candidate_id in blocked_ids:
+            continue
+        score = rank_candidate_for_recommendation(source_bundle, candidate)
+        if score > 0:
+            ranked_candidates.append((score, candidate))
+
+    ranked_candidates.sort(key=lambda item: (item[0], -int(item[1].get('id') or 0)), reverse=True)
+    if not ranked_candidates:
+        ranked_candidates = [(0.0, candidate) for candidate in get_trending_products(blocked_ids, limit=8)]
+
+    return [build_discovery_card(candidate, score=score, rank=index) for index, (score, candidate) in enumerate(ranked_candidates[:8])]
+
+
+def get_frequently_bought_bundle_for_product(product_id: int) -> dict:
+    source_product = get_catalog_product_by_id(product_id)
+    if not source_product:
+        raise HTTPException(status_code=404, detail='Product not found')
+
+    catalog = get_approved_product_catalog()
+    blocked_ids = {int(product_id)}
+    preferred_categories = {
+        'outerwear': ['Topwear', 'Shirts', 'Bottomwear', 'Bottoms'],
+        'topwear': ['Bottomwear', 'Bottoms', 'Trousers', 'Jeans'],
+        'western wear': ['Topwear', 'Bottomwear', 'Ethnic Wear'],
+        'ethnic wear': ['Western Wear', 'Topwear', 'Bottomwear'],
+        'bottomwear': ['Topwear', 'Shirts', 'Western Wear'],
+        'bottoms': ['Topwear', 'Shirts', 'Bottomwear'],
+        'knitwear': ['Bottomwear', 'Outerwear', 'Topwear'],
+    }
+
+    preferred_order = preferred_categories.get(normalize_product_text(source_product.get('category')), [])
+
+    scored_candidates: list[tuple[float, dict]] = []
+    for candidate in catalog:
+        candidate_id = int(candidate.get('id') or 0)
+        if candidate_id in blocked_ids:
+            continue
+
+        score = score_similarity_product(source_product, candidate)
+        candidate_category = str(candidate.get('category') or '')
+        candidate_section = str(candidate.get('section') or '').lower()
+
+        if preferred_order and candidate_category in preferred_order:
+            score += 24
+        if normalize_product_text(source_product.get('section')) == candidate_section:
+            score += 8
+
+        try:
+            source_price = float(source_product.get('price') or 0)
+            candidate_price = float(candidate.get('price') or 0)
+            if source_price > 0 and candidate_price > 0:
+                gap = abs(source_price - candidate_price) / max(source_price, candidate_price)
+                if gap <= 0.22:
+                    score += 12
+                elif gap <= 0.35:
+                    score += 7
+        except (TypeError, ValueError):
+            pass
+
+        scored_candidates.append((score, candidate))
+
+    scored_candidates.sort(key=lambda item: (item[0], -int(item[1].get('id') or 0)), reverse=True)
+    bundle_candidates = [candidate for score, candidate in scored_candidates if score > 0][:3]
+
+    if not bundle_candidates:
+        bundle_candidates = get_trending_products(blocked_ids, limit=3)
+
+    bundle_cards = [build_discovery_card(candidate, score=score, rank=index) for index, (score, candidate) in enumerate(scored_candidates[:3])] if scored_candidates else [build_discovery_card(candidate, score=0, rank=index) for index, candidate in enumerate(bundle_candidates)]
+    combined_price = float(source_product.get('price') or 0) + sum(float(candidate.get('price') or 0) for candidate in bundle_candidates)
+
+    return {
+        'product': build_discovery_card(source_product, score=100, rank=0),
+        'bundle': bundle_cards,
+        'bundle_total_price': round(combined_price, 2),
+        'bundle_savings': round(max(0.0, combined_price * 0.08), 2),
+    }
+
+
+def get_recently_viewed_products(product_ids: list[int]) -> list[dict]:
+    if not product_ids:
+        return []
+
+    catalog = get_approved_product_catalog()
+    product_map = {int(product.get('id') or 0): product for product in catalog}
+    ordered_products = []
+    for product_id in product_ids:
+        product = product_map.get(int(product_id))
+        if product and int(product.get('id') or 0) not in [int(item.get('id') or 0) for item in ordered_products]:
+            ordered_products.append(product)
+
+    return [build_discovery_card(product, score=0, rank=index) for index, product in enumerate(ordered_products[:8])]
 
 
 def get_next_product_id() -> int:
@@ -1177,7 +1865,34 @@ def build_merchant_product_payload(payload: MerchantProductRequest, existing: di
             'stock': stock_value,
         },
     )
-    return base
+
+    optional_fields = [
+        'fabric',
+        'fit_type',
+        'pattern',
+        'sleeve_type',
+        'neck_type',
+        'occasion',
+        'closure_type',
+        'wash_care',
+        'country_of_origin',
+        'brand',
+        'sku',
+        'weight',
+        'color',
+        'stock_status',
+    ]
+    for field in optional_fields:
+        value = getattr(payload, field)
+        if value is not None and str(value).strip():
+            base[field] = str(value).strip()
+
+    if payload.available_sizes is not None:
+        normalized_sizes = normalize_product_size_list(payload.available_sizes)
+        if normalized_sizes:
+            base['available_sizes'] = normalized_sizes
+
+    return enrich_product_specifications(base)
 
 
 def serialize_user(document: dict) -> dict:
@@ -1203,6 +1918,25 @@ def serialize_shipment(document: dict | None) -> dict | None:
     if isinstance(payload.get('created_at'), datetime):
         payload['created_at'] = payload['created_at'].isoformat()
     return payload
+
+
+def normalize_shipment_status(value: str, fallback: str = 'CREATED') -> str:
+    candidate = str(value or fallback).strip().upper()
+    if candidate in SHIPMENT_STATUS_FLOW:
+        return candidate
+    return fallback
+
+
+def get_shipment_events(shipment_id: str) -> list[dict]:
+    events = list(shipment_events_collection.find({'shipment_id': shipment_id}).sort('timestamp', 1))
+    serialized_events = []
+    for entry in events:
+        payload = dict(entry)
+        payload.pop('_id', None)
+        if isinstance(payload.get('timestamp'), datetime):
+            payload['timestamp'] = payload['timestamp'].isoformat()
+        serialized_events.append(payload)
+    return serialized_events
 
 
 def serialize_delivery_log(document: dict) -> dict:
@@ -1323,7 +2057,30 @@ def append_order_status_history(
 
 def get_order_items(order_id: str) -> list[dict]:
     items = list(order_items_collection.find({'order_id': order_id}, {'_id': 0}))
-    return items
+    enriched_items = []
+    for item in items:
+        payload = dict(item)
+        product = products_collection.find_one({'id': payload.get('product_id')}, {'_id': 0}) if payload.get('product_id') is not None else None
+        if product:
+            # Keep backwards-compatible top-level item fields
+            payload.setdefault('name', product.get('name'))
+            payload.setdefault('image', product.get('image'))
+            payload.setdefault('price', product.get('price'))
+            payload.setdefault('category', product.get('category'))
+            # Provide a full `product` object with enriched specifications for frontend use
+            try:
+                payload['product'] = serialize_product(product)
+            except Exception:
+                # Fall back to minimal product fields if enrichment fails
+                payload['product'] = {
+                    'id': product.get('id'),
+                    'name': product.get('name'),
+                    'image': product.get('image'),
+                    'price': product.get('price'),
+                    'category': product.get('category'),
+                }
+        enriched_items.append(payload)
+    return enriched_items
 
 
 def get_tracking_logs(order_id: str) -> list[dict]:
@@ -1347,7 +2104,7 @@ def find_user_by_id_or_email(identifier: str) -> dict | None:
         return None
     by_id = users_collection.find_one({'id': value})
     if by_id:
-        return by_id
+        raw_values = value if isinstance(value, list) else re.split(r'[\s,]+', str(value))
     return users_collection.find_one({'email': value.lower()})
 
 
@@ -1376,6 +2133,9 @@ def serialize_order(document: dict, include_shipment: bool = False) -> dict:
     if include_shipment and payload.get('shipment_id'):
         shipment = shipments_collection.find_one({'shipment_id': payload['shipment_id']})
         payload['shipment'] = serialize_shipment(shipment)
+        payload['shipment_events'] = get_shipment_events(payload['shipment_id'])
+    elif payload.get('shipment_id'):
+        payload['shipment_events'] = get_shipment_events(payload['shipment_id'])
 
     return payload
 
@@ -1471,7 +2231,7 @@ def create_notification(
 ) -> None:
     """Create notification and emit WebSocket event"""
     normalized_event = str(event_type or '').strip().upper()
-    if normalized_event in {'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}:
+    if normalized_event in {'SHIPPED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}:
         notification_type = 'DELIVERY'
     elif normalized_event in {'PLACED', 'CONFIRMED', 'PACKED', 'REJECTED', 'CANCELLED', 'ORDER_PLACED'}:
         notification_type = 'ORDER_UPDATE'
@@ -1513,6 +2273,9 @@ def generate_notification_title(event_type: str) -> str:
         'CONFIRMED': '✅ Order Confirmed',
         'PACKED': '📦 Order Packed',
         'SHIPPED': '🚚 Order Shipped',
+        'DISPATCHED': '🚚 Shipment Dispatched',
+        'IN_TRANSIT': '📍 Shipment In Transit',
+        'ARRIVED_AT_CITY': '🏙️ Shipment Reached City Hub',
         'OUT_FOR_DELIVERY': '🚚 Out for Delivery',
         'DELIVERED': '✅ Order Delivered',
         'REJECTED': '❌ Order Rejected',
@@ -1751,7 +2514,7 @@ def get_default_merchant_id() -> str | None:
     merchant = users_collection.find_one({'role': 'ADMIN'}, {'_id': 0, 'id': 1}, sort=[('created_at', 1)])
     if merchant and merchant.get('id'):
         return str(merchant['id'])
-    return None
+    return 'USR-DEMO-ADMIN-01'
 
 
 def get_merchant_delivery_coverage(merchant_id: str | None = None) -> dict:
@@ -2101,6 +2864,7 @@ def ensure_indexes() -> None:
     create_index_safe(shipment_items_collection, [('shipment_id', 1), ('order_id', 1)], unique=True)
     create_index_safe(delivery_logs_collection, [('order_id', 1), ('timestamp', 1)])
     create_index_safe(order_status_history_collection, [('order_id', 1), ('timestamp', 1)])
+    create_index_safe(shipment_events_collection, [('shipment_id', 1), ('timestamp', 1)])
     create_index_safe(warehouses_collection, 'warehouse_id', unique=True)
     create_index_safe(warehouses_collection, [('product_id', 1), ('pincode', 1)])
     create_index_safe(delivery_coverage_collection, 'merchant_id', unique=True)
@@ -2659,17 +3423,56 @@ def get_merchant_shipping_settings(merchant_id: str) -> dict | None:
     )
 
 
+def start_shipment_simulator() -> None:
+    global shipment_simulation_started
+    global shipment_simulation_task
+    if shipment_simulation_started:
+        return
+    if str(os.getenv('ENABLE_SHIPMENT_SIMULATION', '1')).strip() == '0':
+        return
+
+    shipment_simulation_started = True
+
+    async def run_loop() -> None:
+        try:
+            while True:
+                try:
+                    simulate_shipment_progress_once()
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            return
+
+    loop = asyncio.get_running_loop()
+    shipment_simulation_task = loop.create_task(run_loop())
+
+
+@app.on_event('shutdown')
+async def shutdown_shipment_simulator() -> None:
+    global shipment_simulation_task
+    if shipment_simulation_task:
+        shipment_simulation_task.cancel()
+        try:
+            await shipment_simulation_task
+        except asyncio.CancelledError:
+            pass
+        shipment_simulation_task = None
+
+
 @app.on_event('startup')
 def ensure_database_ready() -> None:
     try:
         mongo_client.admin.command('ping')
         ensure_indexes()
         seed_collections()
+        start_shipment_simulator()
     except (ConfigurationError, PyMongoError) as exc:
         if mongo_enable_fallback:
             activate_in_memory_database(str(exc))
             ensure_indexes()
             seed_collections()
+            start_shipment_simulator()
             return
 
         troubleshooting_hint = (
@@ -2796,31 +3599,198 @@ def root():
 @app.get('/products')
 def get_products():
     merchant_id = get_default_merchant_id()
-    if not merchant_id:
-        return []
-
     products = list(
         products_collection.find(
             {'merchant_id': merchant_id, 'review_status': 'APPROVED'},
             {'_id': 0},
         )
     )
+    if not products:
+        products = [product for product in SEED_PRODUCTS if normalize_product_review_status(product.get('review_status', 'APPROVED')) == 'APPROVED']
     return [serialize_product(product) for product in products]
 
 
 @app.get('/product/{product_id}')
 def get_product(product_id: int):
     merchant_id = get_default_merchant_id()
-    if not merchant_id:
-        return {'error': 'Product not found'}
-
     product = products_collection.find_one(
         {'id': product_id, 'merchant_id': merchant_id, 'review_status': 'APPROVED'},
         {'_id': 0},
     )
     if not product:
+        product = next((item for item in SEED_PRODUCTS if int(item.get('id') or 0) == int(product_id)), None)
+    if not product:
         return {'error': 'Product not found'}
     return serialize_product(product)
+
+
+@app.get('/products/{product_id}/related')
+def get_related_products(product_id: int):
+    return get_related_products_for_product(product_id)
+
+
+@app.get('/products/{product_id}/recommended')
+def get_recommended_products(
+    product_id: int,
+    cart_ids: str | None = None,
+    wishlist_ids: str | None = None,
+    viewed_ids: str | None = None,
+):
+    return get_recommended_products_for_product(
+        product_id,
+        cart_ids=parse_id_list(cart_ids),
+        wishlist_ids=parse_id_list(wishlist_ids),
+        viewed_ids=parse_id_list(viewed_ids),
+    )
+
+
+@app.get('/products/frequently-bought')
+def get_frequently_bought(product_id: int):
+    return get_frequently_bought_bundle_for_product(product_id)
+
+
+@app.get('/products/recently-viewed')
+def get_recently_viewed(ids: str | None = None):
+    return get_recently_viewed_products(parse_id_list(ids))
+
+
+@app.get('/recommendations/{customer_id}')
+def get_recommendations_for_customer(customer_id: str, limit: int = 15):
+    """Return a ranked list of recommended products for a customer.
+
+    Scoring priorities (aligned with product team):
+      - same category (+5)
+      - same gender/section (+4)
+      - shared tokens/tags (+3)
+      - similar price range (+2)
+      - frequently ordered together (+2)
+      - trending (+1)
+
+    This endpoint is read-only and builds recommendations from the product catalog
+    and past orders in the database. Returns simplified discovery payloads.
+    """
+    user = find_user_by_id_or_email(customer_id) or {}
+    # Gather customer's purchased product ids from orders
+    purchased_ids = []
+    try:
+        email = str(user.get('email') or '').strip()
+        query = {'$or': []}
+        if email:
+            query['$or'].append({'customer_email': email})
+        query['$or'].append({'customer_id': str(user.get('id') or '')})
+        # Clean up query
+        if not any(query['$or']):
+            query = {}
+
+        orders = list(orders_collection.find(query, {'_id': 0})) if query else []
+        # sort orders by created_at desc if present
+        orders = sorted(orders, key=lambda o: o.get('created_at') or o.get('updated_at') or now_utc(), reverse=True)
+        for o in orders:
+            for it in o.get('items', []):
+                pid = int(it.get('product_id') or it.get('id') or 0)
+                if pid and pid not in purchased_ids:
+                    purchased_ids.append(pid)
+    except Exception:
+        purchased_ids = []
+
+    catalog = get_approved_product_catalog()
+    blocked = set(purchased_ids)
+
+    # Build source_products from most recent purchases (up to 4)
+    source_products = [get_catalog_product_by_id(pid) for pid in (purchased_ids[:4] or [])]
+    source_products = [p for p in source_products if p]
+
+    scored: list[tuple[float, dict]] = []
+    trending_ids = {int(p.get('id') or 0) for p in get_trending_products(limit=50)}
+
+    # Precompute co-purchase counts (simple): for each order, mark items that appeared together
+    copurchase_counts: dict[int, int] = {}
+    try:
+        all_orders = list(orders_collection.find({}, {'_id': 0, 'items': 1}))
+        for o in all_orders:
+            ids = [int(it.get('product_id') or it.get('id') or 0) for it in o.get('items', []) if int(it.get('product_id') or it.get('id') or 0) > 0]
+            for a in ids:
+                for b in ids:
+                    if a == b: continue
+                    copurchase_counts.setdefault((a, b), 0)
+                    copurchase_counts[(a, b)] += 1
+    except Exception:
+        copurchase_counts = {}
+
+    for candidate in catalog:
+        cid = int(candidate.get('id') or 0)
+        if cid in blocked:
+            continue
+        # base score from similarity/ranking function
+        base = rank_candidate_for_recommendation(source_products, candidate)
+
+        # apply additional business boosts
+        boost = 0.0
+        for sp in source_products:
+            if not sp: continue
+            try:
+                if normalize_product_text(sp.get('category')) and normalize_product_text(sp.get('category')) == normalize_product_text(candidate.get('category')):
+                    boost += 5
+                if normalize_product_text(sp.get('section')) and normalize_product_text(sp.get('section')) == normalize_product_text(candidate.get('section')):
+                    boost += 4
+                # shared tokens
+                overlap = tokenize_product(sp) & tokenize_product(candidate)
+                if overlap:
+                    boost += min(len(overlap), 3) * 3
+                # price proximity
+                try:
+                    sp_price = float(sp.get('price') or 0)
+                    c_price = float(candidate.get('price') or 0)
+                    if sp_price > 0 and c_price > 0 and abs(sp_price - c_price) / max(sp_price, c_price) <= 0.18:
+                        boost += 2
+                except Exception:
+                    pass
+                # frequently bought together (simple lookup)
+                if copurchase_counts.get((int(sp.get('id') or 0), cid), 0) > 0:
+                    boost += 2
+            except Exception:
+                continue
+
+        if cid in trending_ids:
+            boost += 1
+
+        final_score = base + boost
+        scored.append((final_score, candidate))
+
+    scored.sort(key=lambda item: (item[0], -int(item[1].get('id') or 0)), reverse=True)
+    recommended = [build_discovery_card(candidate, score=score, rank=i) for i, (score, candidate) in enumerate(scored[:limit])]
+
+    # Map to simplified response
+    result = []
+    for p in recommended:
+        pid = int(p.get('id') or 0)
+        badge = ''
+        prod = get_catalog_product_by_id(pid) or {}
+        stock_qty = int(prod.get('stock_quantity') or prod.get('stock') or 0)
+        sales_count = int(sum((int(it.get('quantity') or 0) for o in orders_collection.find({'items.product_id': pid}) for it in o.get('items', []) if int(it.get('product_id') or 0) == pid)))
+        if stock_qty > 0 and stock_qty < 10:
+            badge = 'LOW STOCK'
+        elif sales_count > 20:
+            badge = 'BESTSELLER'
+        elif prod.get('created_at') and isinstance(prod.get('created_at'), datetime) and (now_utc() - prod.get('created_at')).days <= 30:
+            badge = 'NEW ARRIVAL'
+        elif pid in trending_ids:
+            badge = 'TRENDING'
+        elif int(p.get('discount_percent') or 0) > 20:
+            badge = 'LIMITED DEAL'
+
+        result.append({
+            'id': pid,
+            'title': p.get('title') or p.get('name'),
+            'image': p.get('image'),
+            'price': float(p.get('price') or 0),
+            'rating': float(p.get('rating') or 0),
+            'badge': badge,
+            'category': p.get('category') or '',
+            'stock': stock_qty,
+        })
+
+    return result
 
 
 @app.get('/merchant/products')
@@ -2858,7 +3828,7 @@ def create_merchant_product(payload: MerchantProductRequest, current_user: dict 
     product = build_merchant_product_payload(payload)
     product['id'] = get_next_product_id()
     product['merchant_id'] = merchant_id
-    product['review_status'] = 'PENDING'
+    product['review_status'] = 'APPROVED'
     product['created_at'] = now_utc()
     product['updated_at'] = now_utc()
 
@@ -2901,6 +3871,96 @@ def update_merchant_product(
 
     updated = products_collection.find_one({'id': product_id, 'merchant_id': merchant_id}, {'_id': 0})
     return {'message': 'Product updated successfully.', 'product': serialize_product(updated)}
+
+
+class StockUpdateRequest(BaseModel):
+    stock_quantity: int
+
+
+@app.put('/admin/products/{product_id}/stock')
+def admin_update_product_stock(
+    product_id: int,
+    payload: StockUpdateRequest,
+    current_user: dict = Depends(require_roles('ADMIN')),
+):
+    existing = products_collection.find_one({'id': product_id}, {'_id': 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail='Product not found.')
+
+    old_stock_qty = int(existing.get('stock_quantity') if existing.get('stock_quantity') is not None else existing.get('stock') or 0)
+    old_reserved = int(existing.get('reserved_stock') or 0)
+    old_available = max(0, old_stock_qty - old_reserved)
+
+    new_stock_qty = int(payload.stock_quantity)
+    products_collection.update_one({'id': product_id}, {'$set': {'stock_quantity': new_stock_qty, 'updated_at': now_utc()}})
+
+    new_available = max(0, new_stock_qty - old_reserved)
+
+    # If product was out of stock and now restocked, notify wishlist owners
+    if old_available <= 0 and new_available > 0:
+        wishers = list(wishlists_collection.find({'product_id': product_id}, {'_id': 0}))
+        product_name = existing.get('name') or f'Product {product_id}'
+        for w in wishers:
+            user_id = str(w.get('user_id') or '')
+            if not user_id:
+                continue
+            create_notification(
+                event_type='PRODUCT_RESTOCK',
+                order_id='',
+                message=f'{product_name} is back in stock. Grab it while it lasts!',
+                user_id=user_id,
+                title='Product Back In Stock',
+            )
+
+    updated = products_collection.find_one({'id': product_id}, {'_id': 0})
+    return {'message': 'Stock updated.', 'product': serialize_product(updated)}
+
+
+@app.post('/wishlist')
+def add_to_wishlist(payload: WishlistRequest, current_user: dict = Depends(require_roles('CUSTOMER'))):
+    user_id = str(current_user.get('id') or '').strip()
+    user_email = str(current_user.get('email') or '').strip().lower()
+    product = products_collection.find_one({'id': payload.product_id}, {'_id': 0})
+    if not product:
+        raise HTTPException(status_code=404, detail='Product not found.')
+
+    owner = user_id or user_email
+    existing = wishlists_collection.find_one({'user_id': owner, 'product_id': payload.product_id})
+    if existing:
+        return {'message': 'Already in wishlist.'}
+
+    entry = {
+        'id': f"WIS-{uuid4().hex[:12].upper()}",
+        'user_id': owner,
+        'product_id': payload.product_id,
+        'created_at': now_utc().isoformat(),
+    }
+    wishlists_collection.insert_one(entry)
+    return {'message': 'Added to wishlist.', 'wishlist': entry}
+
+
+@app.get('/wishlist/my')
+def get_my_wishlist(current_user: dict = Depends(require_roles('CUSTOMER'))):
+    user_id = str(current_user.get('id') or '').strip()
+    user_email = str(current_user.get('email') or '').strip().lower()
+    owner = user_id or user_email
+    entries = list(wishlists_collection.find({'user_id': owner}, {'_id': 0}).sort('created_at', -1))
+    # enrich with product details
+    for e in entries:
+        prod = products_collection.find_one({'id': e.get('product_id')}, {'_id': 0})
+        e['product'] = serialize_product(prod) if prod else None
+    return {'wishlist': entries}
+
+
+@app.delete('/wishlist/{product_id}')
+def remove_from_wishlist(product_id: int, current_user: dict = Depends(require_roles('CUSTOMER'))):
+    user_id = str(current_user.get('id') or '').strip()
+    user_email = str(current_user.get('email') or '').strip().lower()
+    owner = user_id or user_email
+    result = wishlists_collection.delete_many({'user_id': owner, 'product_id': product_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail='Wishlist entry not found.')
+    return {'message': 'Removed from wishlist.'}
 
 
 @app.delete('/merchant/products/{product_id}')
@@ -3600,6 +4660,9 @@ def get_status_message(status: str) -> str:
         'CONFIRMED': 'Your order is confirmed! ✅',
         'PACKED': 'Your order is being packed. 📦',
         'SHIPPED': 'Your order has been shipped! 🚚',
+        'DISPATCHED': 'Your shipment has left the warehouse.',
+        'IN_TRANSIT': 'Your shipment is moving between hubs.',
+        'ARRIVED_AT_CITY': 'Your shipment has reached the destination city hub.',
         'OUT_FOR_DELIVERY': 'Your order is out for delivery! 📍',
         'DELIVERED': 'Your order has been delivered successfully! 🎉',
         'REJECTED': 'Your order has been rejected by the merchant.',
@@ -3607,6 +4670,345 @@ def get_status_message(status: str) -> str:
         'DELIVERY_FAILED': 'Delivery attempt failed. We will try again soon.',
     }
     return messages.get(status, f'Order status updated to {status.replace("_", " ")}')
+
+
+def build_shipment_route(source_warehouse: dict, destination: dict) -> list[str]:
+    warehouse_label = str(source_warehouse.get('city') or source_warehouse.get('warehouse_id') or 'Source Warehouse').strip()
+    if warehouse_label and 'warehouse' not in warehouse_label.lower():
+        warehouse_label = f'{warehouse_label} Warehouse'
+    if not warehouse_label:
+        warehouse_label = 'Source Warehouse'
+
+    destination_state = str(destination.get('state') or '').strip()
+    destination_city = str(destination.get('city') or '').strip()
+    regional_hub = f'{destination_state} Regional Hub' if destination_state else 'Regional Hub'
+    city_hub = f'{destination_city} Hub' if destination_city else 'City Hub'
+
+    route = [warehouse_label]
+    if regional_hub != route[-1]:
+        route.append(regional_hub)
+    if city_hub != route[-1]:
+        route.append(city_hub)
+    route.append('Out for Delivery')
+    return route
+
+
+def build_shipment_location(route: list[str], status: str, shipment: dict | None = None) -> tuple[str, str | None]:
+    current_status = normalize_shipment_status(status)
+    normalized_route = [str(entry or '').strip() for entry in (route or []) if str(entry or '').strip()]
+    source = normalized_route[0] if normalized_route else str((shipment or {}).get('source_warehouse') or 'Warehouse').strip() or 'Warehouse'
+    regional = normalized_route[1] if len(normalized_route) > 1 else 'Regional Hub'
+    city_hub = normalized_route[2] if len(normalized_route) > 2 else 'City Hub'
+
+    if current_status == 'CREATED':
+        return source, regional
+    if current_status == 'DISPATCHED':
+        return source, regional
+    if current_status == 'IN_TRANSIT':
+        return regional, city_hub
+    if current_status == 'ARRIVED_AT_CITY':
+        return city_hub, 'Out for Delivery'
+    if current_status == 'OUT_FOR_DELIVERY':
+        return 'Last mile route', None
+    return 'Delivered to customer', None
+
+
+def append_shipment_event(shipment_id: str, status_value: str, location: str, message: str, order_id: str | None = None) -> dict:
+    entry = {
+        'id': f'SEV-{uuid4().hex[:12].upper()}',
+        'shipment_id': shipment_id,
+        'order_id': order_id,
+        'status': normalize_shipment_status(status_value),
+        'location': str(location or '').strip(),
+        'message': str(message or '').strip(),
+        'timestamp': now_utc(),
+    }
+    shipment_events_collection.insert_one(entry)
+    return entry
+
+
+def get_shipment_status_message(status: str) -> str:
+    messages = {
+        'CREATED': 'Shipment created and queued at the source warehouse.',
+        'DISPATCHED': 'Shipment dispatched from the warehouse.',
+        'IN_TRANSIT': 'Shipment is moving through the hub network.',
+        'ARRIVED_AT_CITY': 'Shipment arrived at the destination city hub.',
+        'OUT_FOR_DELIVERY': 'Shipment handed over for last-mile delivery.',
+        'DELIVERED': 'Shipment delivered successfully.',
+    }
+    return messages.get(normalize_shipment_status(status), 'Shipment status updated.')
+
+
+def sync_order_status_from_shipment(
+    shipment: dict,
+    target_status: str,
+    location: str,
+    performer_role: str,
+    performer_email: str,
+    actor_id: str,
+) -> None:
+    shipment_status = normalize_shipment_status(target_status)
+    order_ids = get_shipment_order_ids(str(shipment.get('shipment_id') or ''))
+    if not order_ids:
+        return
+
+    for order_id in order_ids:
+        order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+        if not order:
+            continue
+
+        current_status = normalize_order_status(order.get('status', 'PLACED'))
+        next_status = current_status
+        if shipment_status == 'DISPATCHED' and current_status in {'PACKED', 'CONFIRMED', 'PLACED'}:
+            next_status = 'SHIPPED'
+        elif shipment_status == 'OUT_FOR_DELIVERY':
+            next_status = 'OUT_FOR_DELIVERY'
+        elif shipment_status == 'DELIVERED':
+            next_status = 'DELIVERED'
+
+        if next_status != current_status:
+            apply_order_status_update(
+                order,
+                next_status,
+                actor_id,
+                location=location,
+                performer_role=performer_role,
+                performer_email=performer_email,
+            )
+
+
+def assign_last_mile_partner_for_shipment(shipment: dict, destination: dict, destination_pincode: str) -> tuple[str | None, str | None]:
+    partners = list(
+        users_collection.find(
+            {'role': 'DELIVERY_ASSOCIATE', 'status': 'ACTIVE'},
+            {'_id': 0, 'id': 1, 'email': 1, 'profile_details': 1, 'city': 1, 'state': 1, 'is_online': 1},
+        )
+    )
+    if not partners:
+        return None, None
+
+    eligible_partners = []
+    for partner in partners:
+        profile = normalize_delivery_partner_profile_for_scope(partner.get('profile_details') or {}, is_demo_partner=is_demo_delivery_partner_account(partner))
+        if not bool(partner.get('is_online', True)):
+            continue
+        availability = str(profile.get('availability') or '').strip().lower()
+        if availability and availability != 'active':
+            continue
+        service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
+        if not is_delivery_partner_all_india(profile) and destination_pincode not in service_pincodes:
+            continue
+        eligible_partners.append(partner)
+
+    if not eligible_partners:
+        return None, None
+
+    workload_map = get_delivery_partner_workload()
+    ranked = sorted(
+        eligible_partners,
+        key=lambda partner: score_delivery_partner(partner, destination, destination_pincode, workload_map),
+        reverse=True,
+    )
+    selected = ranked[0]
+    selected_id = str(selected.get('id') or '').strip() or None
+    selected_email = str(selected.get('email') or '').strip().lower() or None
+    if not selected_id and not selected_email:
+        return None, None
+
+    orders_collection.update_many(
+        {'shipment_id': shipment.get('shipment_id')},
+        {
+            '$set': {
+                'assigned_delivery_id': selected_id,
+                'assigned_delivery_partner': selected_email,
+                'delivery_meta.assigned_at': now_utc().isoformat(),
+                'delivery_meta.assignment_source': 'shipment_arrived_at_city',
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    shipments_collection.update_one(
+        {'shipment_id': shipment.get('shipment_id')},
+        {
+            '$set': {
+                'assigned_partner_id': selected_id,
+                'assigned_partner_email': selected_email,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    return selected_id, selected_email
+
+
+def create_shipment_from_order(order: dict, current_user: dict | None = None, status: str = 'CREATED') -> dict:
+    destination = get_order_destination_location(order)
+    warehouse = get_warehouse_location(order)
+    shipment_id = str(order.get('shipment_id') or f'SHP-{uuid4().hex[:10].upper()}').strip()
+    destination_pincode = sanitize_pincode(order.get('destination_pincode', ''))
+    route = build_shipment_route(warehouse, destination)
+    current_status = normalize_shipment_status(status)
+    current_location, next_location = build_shipment_location(route, current_status, {'source_warehouse': warehouse.get('warehouse_id')})
+    shipment_document = {
+        'id': shipment_id,
+        'shipment_id': shipment_id,
+        'order_id': order.get('order_id'),
+        'source_warehouse': warehouse.get('city') and f"{warehouse.get('city')} Warehouse" or warehouse.get('warehouse_id') or 'Warehouse',
+        'source_warehouse_id': warehouse.get('warehouse_id'),
+        'destination_pincode': destination_pincode,
+        'destination_city': str(destination.get('city') or '').strip(),
+        'destination_state': str(destination.get('state') or '').strip(),
+        'status': current_status,
+        'current_location': current_location,
+        'next_location': next_location,
+        'assigned_partner_id': None,
+        'assigned_partner_email': None,
+        'route': route,
+        'created_at': now_utc(),
+        'updated_at': now_utc(),
+        'updated_by': str((current_user or {}).get('id') or (current_user or {}).get('email') or 'system'),
+    }
+    shipments_collection.update_one(
+        {'shipment_id': shipment_id},
+        {'$set': shipment_document, '$setOnInsert': {'created_at': now_utc()}},
+        upsert=True,
+    )
+    shipment = shipments_collection.find_one({'shipment_id': shipment_id}) or shipment_document
+    append_shipment_event(
+        shipment_id,
+        current_status,
+        current_location,
+        get_shipment_status_message(current_status),
+        order_id=str(order.get('order_id') or '').strip() or None,
+    )
+    orders_collection.update_one(
+        {'order_id': order.get('order_id')},
+        {
+            '$set': {
+                'shipment_id': shipment_id,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    return shipment
+
+
+def transition_shipment_status(
+    shipment: dict,
+    target_status: str,
+    actor_id: str,
+    performer_role: str,
+    performer_email: str,
+    location: str | None = None,
+) -> dict:
+    shipment_id = str(shipment.get('shipment_id') or '').strip()
+    if not shipment_id:
+        raise HTTPException(status_code=404, detail='Shipment not found.')
+
+    current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    next_status = normalize_shipment_status(target_status)
+    if current_status == next_status:
+        return shipments_collection.find_one({'shipment_id': shipment_id}) or shipment
+
+    valid_transitions = {
+        'CREATED': {'DISPATCHED'},
+        'DISPATCHED': {'IN_TRANSIT'},
+        'IN_TRANSIT': {'ARRIVED_AT_CITY'},
+        'ARRIVED_AT_CITY': {'OUT_FOR_DELIVERY'},
+        'OUT_FOR_DELIVERY': {'DELIVERED'},
+    }
+    if next_status not in valid_transitions.get(current_status, set()):
+        raise HTTPException(status_code=400, detail=f'Shipment cannot move from {current_status} to {next_status}.')
+
+    route = list(shipment.get('route') or [])
+    current_location, next_location = build_shipment_location(route, next_status, shipment)
+    location_value = str(location or current_location or 'Hub network').strip()
+
+    shipments_collection.update_one(
+        {'shipment_id': shipment_id},
+        {
+            '$set': {
+                'status': next_status,
+                'current_location': location_value,
+                'next_location': next_location,
+                'updated_at': now_utc(),
+                'updated_by': actor_id,
+            }
+        },
+    )
+    latest_shipment = shipments_collection.find_one({'shipment_id': shipment_id}) or dict(shipment, status=next_status)
+    append_shipment_event(
+        shipment_id,
+        next_status,
+        location_value,
+        get_shipment_status_message(next_status),
+        order_id=str(shipment.get('order_id') or '').strip() or None,
+    )
+
+    if next_status == 'ARRIVED_AT_CITY':
+        shipment_order_ids = get_shipment_order_ids(shipment_id)
+        reference_order = None
+        if shipment.get('order_id'):
+          reference_order = orders_collection.find_one({'order_id': shipment.get('order_id')})
+        if not reference_order and shipment_order_ids:
+            reference_order = orders_collection.find_one({'order_id': shipment_order_ids[0]})
+        destination = {
+            'city': str(shipment.get('destination_city') or (reference_order or {}).get('shipping_details', {}).get('city') or '').strip(),
+            'state': str(shipment.get('destination_state') or (reference_order or {}).get('shipping_details', {}).get('state') or '').strip(),
+        }
+        destination_pincode = sanitize_pincode(shipment.get('destination_pincode') or (reference_order or {}).get('destination_pincode', ''))
+        assign_last_mile_partner_for_shipment(latest_shipment, destination, destination_pincode)
+
+    sync_order_status_from_shipment(latest_shipment, next_status, location_value, performer_role, performer_email, actor_id)
+
+    if next_status in {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY'}:
+        for order_id in get_shipment_order_ids(shipment_id):
+            order = orders_collection.find_one({'order_id': order_id})
+            customer_id = str((order or {}).get('user_id') or (order or {}).get('customer_email') or '').strip() or None
+            create_notification(
+                event_type=next_status,
+                order_id=order_id,
+                message=get_shipment_status_message(next_status),
+                user_id=customer_id,
+            )
+
+    return shipments_collection.find_one({'shipment_id': shipment_id}) or latest_shipment
+
+
+def simulate_shipment_progress_once() -> None:
+    pending_shipments = list(
+        shipments_collection.find(
+            {'status': {'$in': ['CREATED', 'DISPATCHED', 'IN_TRANSIT']}},
+            {'_id': 0},
+        ).sort('updated_at', 1)
+    )
+    now_value = now_utc()
+    for shipment in pending_shipments:
+        updated_at = shipment.get('updated_at')
+        if isinstance(updated_at, datetime):
+            elapsed = (now_value - updated_at).total_seconds()
+        else:
+            elapsed = 0
+        if elapsed < 5:
+            continue
+
+        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+        next_status_map = {
+            'CREATED': 'DISPATCHED',
+            'DISPATCHED': 'IN_TRANSIT',
+            'IN_TRANSIT': 'ARRIVED_AT_CITY',
+        }
+        next_status = next_status_map.get(current_status)
+        if not next_status:
+            continue
+
+        transition_shipment_status(
+            shipment,
+            next_status,
+            actor_id='system',
+            performer_role='SYSTEM',
+            performer_email='system@local',
+            location=build_shipment_location(list(shipment.get('route') or []), next_status, shipment)[0],
+        )
 
 
 @app.post('/orders')
@@ -3643,6 +5045,16 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                 'product_exists': product_exists,
             }
         )
+
+    # Validate requested quantities against available stock
+    for item in materialized_items:
+        if item.get('product_exists'):
+            p = products_collection.find_one({'id': item['product_id']}, {'_id': 0})
+            stock_qty = int(p.get('stock_quantity') if p.get('stock_quantity') is not None else p.get('stock') or 0)
+            reserved = int(p.get('reserved_stock') or 0)
+            available = max(0, stock_qty - reserved)
+            if available < item['quantity']:
+                raise HTTPException(status_code=400, detail=f"Only {available} items available for product {item.get('name')} (requested {item.get('quantity')}).")
 
     first_product_id = next((item['product_id'] for item in materialized_items if item.get('product_exists')), materialized_items[0]['product_id'])
     user_location = get_location_for_pincode(cleaned_pincode)
@@ -3698,6 +5110,16 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
                 'quantity': item['quantity'],
             }
         )
+
+    # Decrement stock quantities for each ordered item
+    for item in materialized_items:
+        try:
+            products_collection.update_one(
+                {'id': item['product_id']},
+                {'$inc': {'stock_quantity': -int(item['quantity'])}},
+            )
+        except Exception:
+            pass
 
     append_order_status_history(
         order_id,
@@ -3840,7 +5262,9 @@ def get_order_tracking_status(order_id: str, current_user: dict = Depends(get_cu
     
     # Get status history from the dedicated history collection.
     status_history = get_order_status_history(order_id)
-    
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) if order.get('shipment_id') else None
+    shipment_events = get_shipment_events(str(order.get('shipment_id') or '')) if order.get('shipment_id') else []
+
     # Get delivery logs
     delivery_logs = list(delivery_logs_collection.find({'order_id': order_id}).sort('timestamp', 1))
     
@@ -3874,6 +5298,8 @@ def get_order_tracking_status(order_id: str, current_user: dict = Depends(get_cu
             for log in delivery_logs
         ],
         'status_timeline_steps': ORDER_STATUS_FLOW,
+        'shipment': serialize_shipment(shipment),
+        'shipment_events': shipment_events,
         'created_at': order.get('created_at').isoformat() if isinstance(order.get('created_at'), datetime) else order.get('created_at'),
         'updated_at': order.get('updated_at').isoformat() if isinstance(order.get('updated_at'), datetime) else order.get('updated_at'),
     }
@@ -3893,6 +5319,9 @@ def update_order_status(
     target_status = normalize_order_status(payload.status)
     actor_id = current_user.get('id') or current_user.get('email', 'system')
     performer_email = current_user.get('email', 'system@local').strip().lower()
+
+    if target_status == 'SHIPPED':
+        raise HTTPException(status_code=400, detail='Use shipment dispatch to move an order to SHIPPED.')
 
     if target_status not in STATUS_PERFORMER_ROLE_MAP:
         raise HTTPException(status_code=403, detail='Only staff can update order statuses.')
@@ -3987,7 +5416,9 @@ def pack_order(
         performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
-    return {'message': 'Order packed.', 'order': serialize_order(latest, include_shipment=True)}
+    shipment = create_shipment_from_order(latest, current_user, status='CREATED')
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
+    return {'message': 'Order packed and shipment created.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(shipment)}
 
 
 @app.post('/orders/{order_id}/pack')
@@ -4009,39 +5440,21 @@ def ship_order(
     if not order:
         raise HTTPException(status_code=404, detail='Order not found.')
 
-    shipment_id = order.get('shipment_id') or f'SHP-{uuid4().hex[:10].upper()}'
-    shipments_collection.update_one(
-        {'shipment_id': shipment_id},
-        {
-            '$set': {
-                'id': shipment_id,
-                'shipment_id': shipment_id,
-                'warehouse_id': order.get('warehouse_id'),
-                'courier_name': payload.courier_name.strip(),
-                'tracking_id': payload.tracking_id.strip() or f'TRK-{uuid4().hex[:12].upper()}',
-                'status': 'DISPATCHED',
-                'current_location': payload.current_location.strip() or 'Warehouse',
-                'updated_at': now_utc(),
-            },
-            '$setOnInsert': {'created_at': now_utc()},
-        },
-        upsert=True,
-    )
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        shipment = create_shipment_from_order(order, current_user, status='CREATED')
 
-    latest = apply_order_status_update(
-        order,
-        'SHIPPED',
-        str(current_user.get('id') or current_user.get('email', 'ops')),
-        location=payload.current_location.strip() or 'Warehouse dispatch',
+    location_value = payload.current_location.strip() if payload and payload.current_location else 'Warehouse dispatch'
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'ops')),
         performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value,
     )
-    orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
-        {'$set': {'shipment_id': shipment_id, 'updated_at': now_utc()}},
-    )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
-    return {'message': 'Order shipped.', 'order': serialize_order(latest, include_shipment=True)}
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Shipment dispatched.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
 
 
 @app.patch('/orders/{order_id}/out-for-delivery')
@@ -4057,20 +5470,24 @@ def mark_out_for_delivery(
     if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
         raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
 
-    current_status = normalize_order_status(order.get('status', 'PLACED'))
-    if current_status == 'OUT_FOR_DELIVERY':
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
+
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    if shipment_status == 'OUT_FOR_DELIVERY':
         raise HTTPException(status_code=409, detail='Order is already out for delivery.')
-    if current_status != 'SHIPPED':
-        raise HTTPException(status_code=400, detail='Order can only move to out for delivery from SHIPPED status.')
+    if shipment_status != 'ARRIVED_AT_CITY':
+        raise HTTPException(status_code=400, detail='Order can only move to out for delivery after the shipment reaches the city hub.')
 
     location_value = (payload.current_location if payload and payload.current_location else 'Last mile route').strip() if payload else 'Last mile route'
-    latest = apply_order_status_update(
-        order,
+    updated_shipment = transition_shipment_status(
+        shipment,
         'OUT_FOR_DELIVERY',
-        str(current_user.get('id') or current_user.get('email', 'delivery')),
-        location=location_value or 'Last mile route',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'delivery')),
         performer_role='DELIVERY_ASSOCIATE',
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value or 'Last mile route',
     )
     orders_collection.update_one(
         active_orders_filter({'order_id': order_id}),
@@ -4082,8 +5499,8 @@ def mark_out_for_delivery(
             }
         },
     )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
-    return {'message': 'Order marked out for delivery.', 'order': serialize_order(latest, include_shipment=True)}
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Order marked out for delivery.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
 
 
 @app.patch('/orders/{order_id}/deliver')
@@ -4099,20 +5516,24 @@ def mark_delivered(
     if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
         raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
 
-    current_status = normalize_order_status(order.get('status', 'PLACED'))
-    if current_status == 'DELIVERED':
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
+
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    if shipment_status == 'DELIVERED':
         raise HTTPException(status_code=409, detail='Order is already delivered.')
-    if current_status != 'OUT_FOR_DELIVERY':
-        raise HTTPException(status_code=400, detail='Order can only be delivered from OUT_FOR_DELIVERY status.')
+    if shipment_status != 'OUT_FOR_DELIVERY':
+        raise HTTPException(status_code=400, detail='Order can only be delivered from OUT_FOR_DELIVERY shipment status.')
 
     location_value = (payload.current_location if payload and payload.current_location else 'Customer address').strip() if payload else 'Customer address'
-    latest = apply_order_status_update(
-        order,
+    updated_shipment = transition_shipment_status(
+        shipment,
         'DELIVERED',
-        str(current_user.get('id') or current_user.get('email', 'delivery')),
-        location=location_value or 'Customer address',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'delivery')),
         performer_role='DELIVERY_ASSOCIATE',
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value or 'Customer address',
     )
     orders_collection.update_one(
         active_orders_filter({'order_id': order_id}),
@@ -4124,8 +5545,8 @@ def mark_delivered(
             }
         },
     )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
-    return {'message': 'Order delivered.', 'order': serialize_order(latest, include_shipment=True)}
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Order delivered.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
 
 
 @app.post('/orders/{order_id}/delivered')
@@ -4439,11 +5860,6 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
     if not order_batches:
         raise HTTPException(status_code=400, detail='Unable to group selected orders for shipment creation.')
 
-    shipment_entity_status = 'CREATED'
-
-    manual_partner = find_user_by_id_or_email(payload.assigned_delivery_id or '') if payload.assigned_delivery_id else None
-    manual_partner_email = manual_partner.get('email').strip().lower() if manual_partner else None
-    manual_partner_id = manual_partner.get('id') if manual_partner else None
     explicit_courier = str(payload.courier_name or '').strip()
     explicit_tracking = str(payload.tracking_id or '').strip()
     explicit_vehicle_type = normalize_shipment_vehicle_type(payload.vehicle_type, fallback='VAN')
@@ -4455,7 +5871,6 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
     for batch_index, batch_orders in enumerate(order_batches):
         primary_order = batch_orders[0]
         destination = get_order_destination_location(primary_order)
-        destination_pincode = sanitize_pincode(primary_order.get('destination_pincode', ''))
         warehouse = get_warehouse_location(primary_order)
         destination_state = requested_destination_state or str(destination.get('state') or '').strip()
         destination_city = requested_destination_city or str(destination.get('city') or '').strip()
@@ -4464,31 +5879,36 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
         shipment_id = f"SHP-{uuid4().hex[:10].upper()}"
         tracking_id = build_tracking_id_for_batch(explicit_tracking, batch_index)
         courier_name = explicit_courier if explicit_courier and explicit_courier != 'Assigned courier' else choose_courier_name(warehouse, destination)
-
-        auto_partner_id, auto_partner_email = auto_assign_delivery_partner(destination, destination_pincode)
-        assigned_partner_id = manual_partner_id or auto_partner_id
-        assigned_partner_email = manual_partner_email or auto_partner_email
+        route = build_shipment_route(warehouse, destination)
+        current_location, next_location = build_shipment_location(route, 'CREATED', {'source_warehouse': warehouse.get('warehouse_id')})
 
         shipments_collection.insert_one(
             {
                 'id': shipment_id,
                 'shipment_id': shipment_id,
+                'source_warehouse': warehouse.get('city') and f"{warehouse.get('city')} Warehouse" or warehouse.get('warehouse_id') or 'Warehouse',
+                'source_warehouse_id': warehouse.get('warehouse_id'),
+                'destination_pincode': sanitize_pincode(primary_order.get('destination_pincode', '')),
+                'destination_city': destination_city,
+                'destination_state': destination_state,
                 'tracking_id': tracking_id,
                 'warehouse_id': payload.warehouse_id or warehouse.get('warehouse_id'),
-                'status': shipment_entity_status,
+                'status': 'CREATED',
                 'courier_name': courier_name,
-                'destination_state': destination_state,
-                'destination_city': destination_city,
                 'destination': destination_label,
                 'vehicle_type': explicit_vehicle_type,
                 'shipment_notes': explicit_notes,
-                'route_city': destination_city,
-                'route_state': destination_state,
+                'current_location': current_location,
+                'next_location': next_location,
+                'assigned_partner_id': None,
+                'assigned_partner_email': None,
+                'route': route,
                 'created_at': now_utc(),
                 'updated_at': now_utc(),
                 'updated_by': current_user.get('id') or current_user.get('email', 'admin'),
             }
         )
+        append_shipment_event(shipment_id, 'CREATED', current_location, 'Shipment created and queued for dispatch.', order_id=primary_order.get('order_id'))
 
         batch_order_ids = []
         for order in batch_orders:
@@ -4510,8 +5930,8 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
                 {
                     '$set': {
                         'shipment_id': shipment_id,
-                        'assigned_delivery_partner': assigned_partner_email,
-                        'assigned_delivery_id': assigned_partner_id,
+                        'assigned_delivery_partner': None,
+                        'assigned_delivery_id': None,
                         'updated_at': now_utc(),
                     }
                 },
@@ -4527,7 +5947,7 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
 
     first_shipment = created_shipments[0]['shipment'] if created_shipments else None
     return {
-        'message': f'Shipment records created. Created {len(created_shipments)} shipment(s). Dispatch separately to mark orders as SHIPPED.',
+        'message': f'Shipment records created. Created {len(created_shipments)} shipment(s).',
         'shipment': first_shipment,
         'shipments': created_shipments,
         'order_ids': unique_order_ids,
@@ -4545,7 +5965,7 @@ def dispatch_shipment(
     if not shipment:
         raise HTTPException(status_code=404, detail='Shipment not found.')
 
-    shipment_status = normalize_shipment_entity_status(shipment.get('status', 'CREATED'))
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
     if shipment_status == 'DISPATCHED':
         raise HTTPException(status_code=409, detail='Shipment is already dispatched.')
     if shipment_status != 'CREATED':
@@ -4556,77 +5976,25 @@ def dispatch_shipment(
     if not order_ids:
         raise HTTPException(status_code=400, detail='No orders attached to this shipment.')
 
-    location_value = (payload.current_location if payload and payload.current_location else '').strip()
-    if not location_value:
-        location_value = str(shipment.get('current_location') or '').strip() or 'Warehouse dispatch'
+    location_value = (payload.current_location if payload and payload.current_location else '').strip() or str(shipment.get('current_location') or '').strip() or 'Warehouse dispatch'
 
-    dispatched_order_ids: list[str] = []
-    skipped_order_ids: list[str] = []
-    for order_id in order_ids:
-        order = orders_collection.find_one({'order_id': order_id})
-        if not order:
-            skipped_order_ids.append(order_id)
-            continue
-        if bool(order.get('is_deleted', False)):
-            skipped_order_ids.append(order_id)
-            continue
-
-        current_status = normalize_order_status(order.get('status', 'PLACED'))
-        if current_status in {'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'}:
-            dispatched_order_ids.append(order_id)
-            continue
-
-        if current_status != 'PACKED':
-            skipped_order_ids.append(order_id)
-            continue
-
-        apply_order_status_update(
-            order,
-            'SHIPPED',
-            str(current_user.get('id') or current_user.get('email', 'ops')),
-            location=location_value,
-            performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
-            performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        )
-        orders_collection.update_one(
-            {'order_id': order_id},
-            {
-                '$set': {
-                    'shipment_id': shipment_id,
-                    'updated_at': now_utc(),
-                }
-            },
-        )
-        dispatched_order_ids.append(order_id)
-
-    if not dispatched_order_ids:
-        raise HTTPException(status_code=400, detail='No PACKED orders available in this shipment for dispatch.')
-
-    shipments_collection.update_one(
-        {'shipment_id': shipment_id},
-        {
-            '$set': {
-                'status': 'DISPATCHED',
-                'current_location': location_value,
-                'updated_at': now_utc(),
-                'updated_by': current_user.get('id') or current_user.get('email', 'admin'),
-            }
-        },
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'admin')),
+        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value,
     )
-
-    for order_id in dispatched_order_ids:
-        create_notification(
-            event_type='SHIPPED',
-            order_id=order_id,
-            message=f'Order {order_id} has been dispatched and is now on the way.',
-            user_id=str(current_user.get('id') or current_user.get('email') or ''),
-        )
+    dispatched_order_ids = order_ids
+    skipped_order_ids: list[str] = []
 
     return {
         'message': f"Shipment dispatched. {len(dispatched_order_ids)} order(s) moved to SHIPPED.",
         'shipment_id': shipment_id,
         'dispatched_order_ids': dispatched_order_ids,
         'skipped_order_ids': skipped_order_ids,
+        'shipment': serialize_shipment(updated_shipment),
     }
 
 
@@ -4704,38 +6072,31 @@ def update_shipment_by_admin(
         raise HTTPException(status_code=404, detail='Order not found.')
 
     shipment_id = order.get('shipment_id') or f'SHP-{uuid4().hex[:10].upper()}'
-    shipment_payload = {
-        'id': shipment_id,
-        'shipment_id': shipment_id,
-        'warehouse_id': order.get('warehouse_id'),
-        'courier_name': payload.courier_name.strip(),
-        'tracking_id': payload.tracking_id.strip() or f'TRK-{uuid4().hex[:12].upper()}',
-        'status': 'DISPATCHED' if status_value == 'SHIPPED' else 'IN_TRANSIT',
-        'current_location': payload.current_location.strip() or 'Warehouse',
-        'updated_at': now_utc(),
-    }
+    shipment = shipments_collection.find_one({'shipment_id': shipment_id})
+    if not shipment:
+        shipment = create_shipment_from_order(order, current_user, status='CREATED')
 
     shipments_collection.update_one(
         {'shipment_id': shipment_id},
-        {'$set': shipment_payload, '$setOnInsert': {'created_at': now_utc()}},
-        upsert=True,
+        {
+            '$set': {
+                'courier_name': payload.courier_name.strip(),
+                'tracking_id': payload.tracking_id.strip() or f'TRK-{uuid4().hex[:12].upper()}',
+                'updated_at': now_utc(),
+            }
+        },
     )
-
-    latest = apply_order_status_update(
-        order,
-        status_value,
-        str(current_user.get('id') or current_user.get('email', 'admin')),
-        location=(payload.current_location or '').strip() or 'Shipment update',
+    updated_shipment = transition_shipment_status(
+        shipments_collection.find_one({'shipment_id': shipment_id}) or shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'admin')),
         performer_role=normalize_role(current_user.get('role', 'ADMIN')),
         performer_email=current_user.get('email', 'system@local').strip().lower(),
+        location=(payload.current_location or '').strip() or 'Warehouse dispatch',
     )
 
-    orders_collection.update_one(
-        {'order_id': order_id},
-        {'$set': {'shipment_id': shipment_id, 'updated_at': now_utc()}},
-    )
-    latest = orders_collection.find_one({'order_id': order_id})
-    return {'message': 'Shipment updated.', 'order': serialize_order(latest, include_shipment=True)}
+    latest = orders_collection.find_one({'order_id': order_id}) or order
+    return {'message': 'Shipment updated.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
 
 
 @app.get('/delivery/orders')
@@ -4861,6 +6222,9 @@ def update_delivery_profile(
     if payload.state is not None:
         profile_details['state'] = str(payload.state).strip()
 
+    if payload.is_online is not None:
+        profile_details['is_online'] = bool(payload.is_online)
+
     if payload.allow_all_india:
         if not is_demo_partner:
             raise HTTPException(status_code=403, detail='All-India delivery is reserved for the demo delivery partner only.')
@@ -4887,6 +6251,7 @@ def update_delivery_profile(
                 'phone_number': profile_details.get('phone_number') or current_user.get('phone_number'),
                 'city': profile_details.get('city') or current_user.get('city'),
                 'state': profile_details.get('state') or current_user.get('state'),
+                'is_online': bool(profile_details.get('is_online', current_user.get('is_online', False))),
                 'profile_details': profile_details,
                 'updated_at': now_utc(),
             }
@@ -5196,11 +6561,15 @@ def get_tracking(order_id: str, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail='Access denied.')
 
     logs = get_tracking_logs(order_id)
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) if order.get('shipment_id') else None
+    shipment_events = get_shipment_events(str(order.get('shipment_id') or '')) if order.get('shipment_id') else []
     return {
         'order_id': order_id,
         'current_status': normalize_order_status(order.get('status', 'PLACED')),
         'timeline_steps': ORDER_STATUS_FLOW,
         'logs': logs,
+        'shipment': serialize_shipment(shipment),
+        'shipment_events': shipment_events,
         'order': serialize_order(order, include_shipment=True),
     }
 

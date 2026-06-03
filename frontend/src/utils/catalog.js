@@ -58,6 +58,90 @@ export async function fetchCatalogProductById(productId) {
   return null
 }
 
+export async function fetchCatalogRelatedProducts(productId) {
+  for (const baseUrl of API_CANDIDATES) {
+    try {
+      const response = await fetch(`${baseUrl}/products/${productId}/related`)
+      if (!response.ok) {
+        if (response.status < 500) {
+          return []
+        }
+        continue
+      }
+
+      const data = await response.json()
+      return Array.isArray(data) ? data : []
+    } catch {
+      // Try next candidate base URL.
+    }
+  }
+
+  return []
+}
+
+function serializeQueryParams(params = {}) {
+  const searchParams = new URLSearchParams()
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return
+    }
+
+    if (Array.isArray(value)) {
+      const joined = value.filter(Boolean).join(',')
+      if (joined) {
+        searchParams.set(key, joined)
+      }
+      return
+    }
+
+    searchParams.set(key, String(value))
+  })
+
+  return searchParams.toString()
+}
+
+async function fetchDiscoveryList(path, params = {}) {
+  const queryString = serializeQueryParams(params)
+  const requestPath = queryString ? `${path}?${queryString}` : path
+
+  for (const baseUrl of API_CANDIDATES) {
+    try {
+      const response = await fetch(`${baseUrl}${requestPath}`)
+      if (!response.ok) {
+        if (response.status < 500) {
+          return []
+        }
+        continue
+      }
+
+      const data = await response.json()
+      return Array.isArray(data) ? data : data
+    } catch {
+      // Try next candidate base URL.
+    }
+  }
+
+  return []
+}
+
+export async function fetchCatalogRecommendedProducts(productId, params = {}) {
+  return fetchDiscoveryList(`/products/${productId}/recommended`, params)
+}
+
+export async function fetchRecommendationsForCustomer(customerId, params = {}) {
+  if (!customerId) return []
+  return fetchDiscoveryList(`/recommendations/${encodeURIComponent(String(customerId))}`, params)
+}
+
+export async function fetchCatalogFrequentlyBought(productId) {
+  return fetchDiscoveryList('/products/frequently-bought', { product_id: productId })
+}
+
+export async function fetchCatalogRecentlyViewed(productIds = []) {
+  return fetchDiscoveryList('/products/recently-viewed', { ids: productIds })
+}
+
 async function requestJson(path, options = {}) {
   for (const baseUrl of API_CANDIDATES) {
     try {

@@ -15,6 +15,7 @@ export default function Button({
   type = 'button',
   className = '',
   onClick,
+  disabled = false,
 }) {
   const classes = `btn btn-${variant} ${className}`.trim()
 
@@ -27,7 +28,7 @@ export default function Button({
   }
 
   return (
-    <motion.button type={type} className={classes} onClick={onClick} {...buttonMotionProps}>
+    <motion.button type={type} className={classes} onClick={onClick} disabled={disabled} aria-disabled={disabled} {...buttonMotionProps}>
       {children}
     </motion.button>
   )
