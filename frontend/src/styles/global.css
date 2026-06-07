@@ -880,28 +880,102 @@ textarea {
 .recommend-card { width:180px; flex:0 0 auto; max-width:100%; box-sizing:border-box; }
 
 /* New carousel styles */
-.recommend-carousel-controls { display:flex; align-items:center; gap:12px; }
-.recommend-carousel { display:flex; gap:12px; overflow-x:auto; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; padding:6px 4px; }
-.recommend-carousel::-webkit-scrollbar { height:8px; display:none; }
-.recommend-carousel > .recommend-card { scroll-snap-align: start; flex:0 0 auto; }
+.carousel-arrow {
+  background-color: #f0f0f0;
+  border-radius: 50%;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+.carousel-arrow:hover {
+  background-color: #e0e0e0;
+}
+.carousel-arrow:focus {
+  outline: 2px solid #0066ff;
+  outline-offset: 2px;
+}
+.recommend-carousel {
+  display: flex;
+  flex-wrap: nowrap; /* single row */
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  gap: 12px;
+  padding: 6px 4px;
+  padding-right: 2rem;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin; /* Firefox */
+  -ms-overflow-style: auto; /* IE and Edge */
+}
+.recommend-carousel::-webkit-scrollbar {
+  height: 8px;
+}
+.recommend-carousel::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
+  border-radius: 4px;
+}
+.recommend-carousel > .recommend-card { flex:0 0 auto; }
 
 /* Compact discovery product card tweaks */
-.discovery-card { width: 180px; border-radius:8px; overflow:hidden; background:var(--surface); box-shadow: var(--shadow-sm); display:flex; flex-direction:column; }
+.discovery-card { width: 100%; border-radius:8px; overflow:hidden; background:var(--surface); box-shadow: var(--shadow-sm); display:flex; flex-direction:column; }
 .discovery-card-media { position:relative; height:140px; overflow:hidden; }
 .discovery-card-image { width:100%; height:100%; object-fit:cover; display:block; }
-.discovery-card-badge { position:absolute; left:8px; top:8px; background:var(--brand); color:#fff; padding:4px 8px; border-radius:999px; font-weight:700; font-size:12px; }
-.discovery-card-discount { position:absolute; right:8px; top:8px; background:rgba(0,0,0,0.6); color:#fff; padding:4px 8px; border-radius:6px; font-size:12px; }
+.discovery-card-badge { position:absolute; left:8px; top:8px; background:var(--brand); color:#fff; padding:4px 8px; border-radius:999px; font-weight:700; font-size:10px; }
+.discovery-card-discount { position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.6); color:#fff; padding:4px 8px; border-radius:6px; font-size:10px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
+.buy-again-card { max-width: 220px; width: 100%; min-width: 200px; flex-shrink: 0; padding: 8px; }
+
+/* Ensure cards inside Buy Again respect the max width */
+.buy-again-card .discovery-card { width: 100%; max-width: 220px; }
+
+/* Fixed image height for cards */
+.buy-again-card .discovery-card-media { height: 180px; }
+/* Buy Again carousel layout */
+.buy-again-row .flex {
+  display: flex;
+  flex-direction: row !important;
+  overflow-x: auto;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.buy-again-row .flex::-webkit-scrollbar { display: none; }
+
+
+/* Align cards to left when few items */
+.horizontal-scroll { justify-content: flex-start; }
+
 .discovery-card-content { padding:8px; display:flex; flex-direction:column; gap:8px; }
 .discovery-card-content h3 { font-size:14px; line-height:1.2; height:2.4em; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .discovery-card-price-row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
 .discovery-card-price { font-weight:700; color:var(--ink); }
-.discovery-card-actions { display:flex; gap:8px; }
+.discovery-card-actions {
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.discovery-card-actions button {
+  width:100%;
+  padding:6px 0;
+  font-size:12px;
+}
 
 /* Hide native scrollbar for modern browsers */
-.recommend-carousel, .horizontal-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.overflow-x-auto { overflow-x: auto; }
+.gap-4 { gap: 1rem; }
+.pb-4 { padding-bottom: 1rem; }
+.scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }
 
 /* Toast */
-.app-toast { position: fixed; right: 18px; bottom: 18px; background: #111827; color: #fff; padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow-md); z-index: 2000; }
+.buy-again-row > .flex { flex-direction: row; }
+
 .muted { color:var(--ink-soft); }
 
 /* Modal polish */
@@ -2962,8 +3036,8 @@ textarea {
 
 .discovery-card-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 8px;
   padding-top: 2px;
 }
 
@@ -5778,4 +5852,11 @@ textarea.field:focus {
     top: 10px;
     width: 100px;
   }
+}
+
+/* Buy Again card layout */
+.buy-again-card {
+  flex-shrink: 0;
+  min-width: 200px;
+  max-width: 220px;
 }

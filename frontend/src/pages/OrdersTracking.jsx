@@ -290,10 +290,10 @@ export default function OrdersTracking() {
         {activeTab === 'buyagain' ? (
           <div className="buy-again-row">
             <h3>Buy Again</h3>
-            <div className="horizontal-scroll">
+            <div className="flex overflow-x-auto gap-4 pb-4 scrollbar-hide after:content-[''] after:w-6 after:md:w-12 after:flex-shrink-0">
               {buyAgainItems.map((it) => (
-                <div key={`${it.product_id || it.id}-${it.name}`} style={{ width: 200, padding: 8 }}>
-                  <DiscoveryProductCard product={{ id: it.product_id || it.id, title: it.name, image: it.image, price: it.price }} onAddToCart={() => { window.location.assign('/cart') }} />
+                <div key={`${it.product_id || it.id}-${it.name}`} className="buy-again-card flex-shrink-0 w-[200px] md:w-[220px]">
+                  <DiscoveryProductCard product={{ id: it.product_id || it.id, title: it.name, image: it.image, price: it.price, delivery_badge: 'Free Delivery' }} onAddToCart={() => { window.location.assign('/cart') }} />
                 </div>
               ))}
             </div>
@@ -433,32 +433,28 @@ export default function OrdersTracking() {
         ) : null}
 
         {/* Recommendations carousel */}
-        <div className="recommended-section">
+        <section className="recommended-section" role="region" aria-roledescription="carousel" aria-label="Recommended products">
           <h3>Recommended based on your shopping trends</h3>
-          <div className="recommend-carousel-controls">
-            <button className="btn btn-secondary" onClick={() => { if (recsRef.current) recsRef.current.scrollBy({ left: -recsRef.current.clientWidth * 0.8, behavior: 'smooth' }) }} aria-label="Previous">◀</button>
-            <div className="recommend-carousel" ref={recsRef}>
-              {recsLoading ? <p>Loading recommendations...</p> : null}
-              {!recsLoading && recommendations.length === 0 ? <p className="muted">No recommendations yet — shop to get personalized picks.</p> : null}
-              {recommendations.map((p) => (
-                <div key={p.id} className="recommend-card">
-                  <DiscoveryProductCard
-                    product={{ id: p.id, title: p.title || p.name, image: p.image, price: p.price, mrp: p.mrp || 0, discount: p.discount_percent || 0, rating: p.rating || 0, badge: p.badge || '' }}
-                    onAddToCart={() => {
-                      setToastMessage('✅ Added to cart')
-                      setTimeout(() => setToastMessage(''), 3000)
-                    }}
-                    onToggleWishlist={() => {
-                      setToastMessage('❤️ Added to wishlist')
-                      setTimeout(() => setToastMessage(''), 3000)
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-            <button className="btn btn-secondary" onClick={() => { if (recsRef.current) recsRef.current.scrollBy({ left: recsRef.current.clientWidth * 0.8, behavior: 'smooth' }) }} aria-label="Next">▶</button>
+          <div className="recommend-carousel flex overflow-x-auto gap-4 pb-4" ref={recsRef}>
+            {recsLoading ? <p>Loading recommendations...</p> : null}
+            {!recsLoading && recommendations.length === 0 ? <p className="muted">No recommendations yet — shop to get personalized picks.</p> : null}
+            {recommendations.map((p) => (
+              <div key={p.id} className="buy-again-card">
+                <DiscoveryProductCard
+                  product={{ id: p.id, title: p.title || p.name, image: p.image, price: p.price, mrp: p.mrp || 0, discount: p.discount_percent || 0, rating: p.rating || 0, badge: p.badge || '' }}
+                  onAddToCart={() => {
+                    setToastMessage('✅ Added to cart')
+                    setTimeout(() => setToastMessage(''), 3000)
+                  }}
+                  onToggleWishlist={() => {
+                    setToastMessage('❤️ Added to wishlist')
+                    setTimeout(() => setToastMessage(''), 3000)
+                  }}
+                />
+              </div>
+            ))}
           </div>
-        </div>
+        </section>
 
         {modalOrder ? (
           <div className="modal-overlay" role="dialog" aria-modal="true">
