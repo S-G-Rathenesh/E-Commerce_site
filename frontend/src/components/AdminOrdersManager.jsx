@@ -6,6 +6,7 @@ import { formatStatusLabel, getSlaState, normalizeOrderStatus } from '../utils/a
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const WS_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace('http', 'ws')
 const COURIERS = ['BlueDart', 'Delhivery', 'DTDC', 'Ecom Express']
+const VEHICLE_TYPES = ['TRUCK', 'VAN', 'BIKE']
 const ADMIN_STATUSES = ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 const ORDER_TABS = ['ALL', 'PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'REJECTED', 'CANCELLED']
 const TIMELINE_STEPS = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
@@ -38,6 +39,21 @@ export default function AdminOrdersManager({ compact = false }) {
   const [trackingLogsByOrder, setTrackingLogsByOrder] = useState({})
   const [trackingStatusByOrder, setTrackingStatusByOrder] = useState({})
   const [lastSyncedAt, setLastSyncedAt] = useState('')
+
+  // --- Ops-parity shipment state ---
+  const [packedOrders, setPackedOrders] = useState([])
+  const [selectedPackedOrders, setSelectedPackedOrders] = useState([])
+  const [shipments, setShipments] = useState([])
+  const [shipmentForm, setShipmentForm] = useState({
+    destination_state: '',
+    destination_city: '',
+    vehicle_type: 'VAN',
+    shipment_notes: '',
+    courier_name: COURIERS[0],
+    tracking_id: '',
+  })
+  const [dispatchingShipmentId, setDispatchingShipmentId] = useState('')
+
   const wsRef = useRef(null)
   const reconnectRef = useRef(null)
 
@@ -119,17 +135,130 @@ export default function AdminOrdersManager({ compact = false }) {
     }
   }
 
+  const loadPackedOrdersAndShipments = async () => {
+    try {
+      const [packedResponse, shipmentsResponse] = await Promise.all([
+        fetch(`${API_BASE}/operations/packed-orders`, { headers: buildAuthHeaders(), cache: 'no-store' }),
+        fetch(`${API_BASE}/operations/shipments`, { headers: buildAuthHeaders(), cache: 'no-store' }),
+      ])
+      const [packedData, shipmentsData] = await Promise.all([
+        packedResponse.json(),
+        shipmentsResponse.json(),
+      ])
+      if (packedResponse.ok) {
+        const nextPacked = Array.isArray(packedData?.orders) ? packedData.orders : []
+        setPackedOrders(nextPacked)
+        setSelectedPackedOrders((current) => current.filter((id) => nextPacked.some((o) => o.order_id === id)))
+      }
+      if (shipmentsResponse.ok) {
+        setShipments(Array.isArray(shipmentsData?.shipments) ? shipmentsData.shipments : [])
+      }
+    } catch {
+      // non-fatal — shipment list is supplemental
+    }
+  }
+
+  const createOpsShipment = async () => {
+    if (!selectedPackedOrders.length) {
+      setMessage('Select one or more packed orders to create a shipment.')
+      return
+    }
+    try {
+      const response = await fetch(`${API_BASE}/shipments`, {
+        method: 'POST',
+        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        cache: 'no-store',
+        body: JSON.stringify({
+          order_ids: selectedPackedOrders,
+          destination_state: shipmentForm.destination_state,
+          destination_city: shipmentForm.destination_city,
+          vehicle_type: shipmentForm.vehicle_type,
+          shipment_notes: shipmentForm.shipment_notes,
+          courier_name: shipmentForm.courier_name,
+          tracking_id: shipmentForm.tracking_id,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setMessage(data?.detail || 'Failed to create shipment.')
+        return
+      }
+      setMessage(data?.message || `Shipment(s) created for ${selectedPackedOrders.length} order(s).`)
+      setSelectedPackedOrders([])
+      setShipmentForm({ destination_state: '', destination_city: '', vehicle_type: 'VAN', shipment_notes: '', courier_name: COURIERS[0], tracking_id: '' })
+      await Promise.all([loadOrders(), loadPackedOrdersAndShipments()])
+    } catch {
+      setMessage('Failed to create shipment.')
+    }
+  }
+
+  const autoCreateOpsShipment = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/shipments/auto`, {
+        method: 'POST',
+        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        cache: 'no-store',
+        body: JSON.stringify({}),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setMessage(data?.detail || 'Failed to auto-create shipments.')
+        return
+      }
+      const count = Number(data?.shipments_created || 0)
+      setMessage(count > 0 ? `Auto shipment complete — ${count} shipment(s) created.` : (data?.message || 'No packed orders available.'))
+      await Promise.all([loadOrders(), loadPackedOrdersAndShipments()])
+    } catch {
+      setMessage('Failed to auto-create shipments.')
+    }
+  }
+
+  const dispatchOpsShipment = async (shipmentId) => {
+    if (dispatchingShipmentId === shipmentId) return
+    setDispatchingShipmentId(shipmentId)
+    try {
+      const response = await fetch(`${API_BASE}/shipments/${encodeURIComponent(shipmentId)}/dispatch`, {
+        method: 'POST',
+        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        cache: 'no-store',
+        body: JSON.stringify({ current_location: 'Admin dispatch bay' }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setMessage(data?.detail || 'Failed to dispatch shipment.')
+        return
+      }
+      setMessage(data?.message || 'Shipment dispatched.')
+      await Promise.all([loadOrders(), loadPackedOrdersAndShipments()])
+    } catch {
+      setMessage('Failed to dispatch shipment.')
+    } finally {
+      setDispatchingShipmentId('')
+    }
+  }
+
+  const toggleAllPacked = () => {
+    if (selectedPackedOrders.length === packedOrders.length && packedOrders.length > 0) {
+      setSelectedPackedOrders([])
+    } else {
+      setSelectedPackedOrders(packedOrders.map((o) => o.order_id))
+    }
+  }
+
   useEffect(() => {
     loadOrders()
+    loadPackedOrdersAndShipments()
   }, [])
 
   useEffect(() => {
     const intervalId = setInterval(() => {
       loadOrders()
+      loadPackedOrdersAndShipments()
     }, 10000)
 
     const syncOnFocus = () => {
       loadOrders()
+      loadPackedOrdersAndShipments()
     }
 
     window.addEventListener('focus', syncOnFocus)
@@ -251,69 +380,9 @@ export default function AdminOrdersManager({ compact = false }) {
     })
   }
 
-  const createShipment = async () => {
-    if (!selectedOrders.length) {
-      setMessage('Select one or more packed orders to create a shipment.')
-      return
-    }
+  const createShipment = createOpsShipment
 
-    try {
-      const response = await fetch(`${API_BASE}/shipments`, {
-        method: 'POST',
-        headers: buildAuthHeaders({
-          'Content-Type': 'application/json',
-        }),
-        cache: 'no-store',
-        body: JSON.stringify({
-          order_ids: selectedOrders,
-          courier_name: shipmentDraft.courier_name,
-          tracking_id: shipmentDraft.tracking_id,
-          status: 'CREATED',
-        }),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        setMessage(data?.detail || 'Failed to create shipment.')
-        return
-      }
-      const shipmentCount = Number(data?.shipments_created || 1)
-      setMessage(`Shipment records created for ${selectedOrders.length} packed order(s). Use Ship to dispatch and move to SHIPPED.`)
-      setSelectedOrders([])
-      setShipmentDraft((current) => ({ ...current, tracking_id: '' }))
-      await loadOrders()
-    } catch {
-      setMessage('Failed to create shipment.')
-    }
-  }
-
-  const autoCreateShipment = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/shipments/auto`, {
-        method: 'POST',
-        headers: buildAuthHeaders({
-          'Content-Type': 'application/json',
-        }),
-        cache: 'no-store',
-        body: JSON.stringify({}),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        setMessage(data?.detail || 'Failed to auto-create shipments.')
-        return
-      }
-      const shipmentCount = Number(data?.shipments_created || 0)
-      if (shipmentCount <= 0) {
-        setMessage(data?.message || 'No packed orders available for auto shipment creation.')
-      } else {
-        setMessage(`Auto shipment complete. Created ${shipmentCount} shipment(s).`)
-      }
-      setSelectedOrders([])
-      setShipmentDraft((current) => ({ ...current, tracking_id: '' }))
-      await loadOrders()
-    } catch {
-      setMessage('Failed to auto-create shipments.')
-    }
-  }
+  const autoCreateShipment = autoCreateOpsShipment
 
   const loadTrackingLogs = async (orderId) => {
     try {
@@ -539,6 +608,7 @@ export default function AdminOrdersManager({ compact = false }) {
                 <th>Select</th>
                 <th>Order ID</th>
                 <th>Customer</th>
+                <th>Products</th>
                 <th>Order Date & Time</th>
                 <th>Status</th>
                 <th style={{ textAlign: 'right' }}>Amount</th>
@@ -549,6 +619,14 @@ export default function AdminOrdersManager({ compact = false }) {
             <tbody>
               {displayedOrders.map((order) => {
                 const eligibleForShipment = ['PACKED'].includes(String(order.status || '').toUpperCase())
+                const shipping = order.shipping_details || {}
+                const customerName = String(shipping.full_name || order.customer_name || '').trim()
+                const customerPhone = String(shipping.phone || order.phone || '').trim()
+                const customerCity = String(shipping.city || '').trim()
+                const customerAddress = String(shipping.address || '').trim()
+                const customerPincode = String(shipping.pincode || order.destination_pincode || '').trim()
+                const orderItems = Array.isArray(order.items) ? order.items : []
+
                 return (
                   <tr key={`table-${order.order_id}`}>
                     <td>
@@ -559,8 +637,54 @@ export default function AdminOrdersManager({ compact = false }) {
                         disabled={!eligibleForShipment}
                       />
                     </td>
-                    <td>{order.order_id}</td>
-                    <td>{order.customer_email}</td>
+                    <td>
+                      <span className="admin-order-id">{order.order_id}</span>
+                    </td>
+
+                    {/* ── Customer: name + phone + address ── */}
+                    <td>
+                      <div className="admin-customer-cell">
+                        {customerName ? (
+                          <span className="admin-customer-name">{customerName}</span>
+                        ) : (
+                          <span className="admin-customer-email">{order.customer_email}</span>
+                        )}
+                        {customerPhone ? (
+                          <span className="admin-customer-phone">📞 {customerPhone}</span>
+                        ) : null}
+                        {customerCity || customerAddress ? (
+                          <span className="admin-customer-address">
+                            📍 {[customerAddress, customerCity, customerPincode].filter(Boolean).join(', ')}
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+
+                    {/* ── Products: thumbnail + name + qty ── */}
+                    <td>
+                      <div className="admin-products-cell">
+                        {orderItems.length > 0 ? orderItems.map((item, idx) => (
+                          <div key={`${order.order_id}-item-${idx}`} className="admin-product-chip">
+                            {item.image ? (
+                              <img
+                                src={item.image}
+                                alt={item.name || 'Product'}
+                                className="admin-product-thumb"
+                              />
+                            ) : (
+                              <div className="admin-product-thumb admin-product-thumb-placeholder">📦</div>
+                            )}
+                            <div className="admin-product-chip-info">
+                              <span className="admin-product-chip-name">{item.name || `Product ${item.product_id}`}</span>
+                              <span className="admin-product-chip-qty">Qty: {item.quantity}</span>
+                            </div>
+                          </div>
+                        )) : (
+                          <span className="admin-no-items">—</span>
+                        )}
+                      </div>
+                    </td>
+
                     <td>{formatDateTime(order.created_at)}</td>
                     <td><StatusBadge status={order.status} /></td>
                     <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</td>
@@ -625,23 +749,31 @@ export default function AdminOrdersManager({ compact = false }) {
           <div>
             <p className="eyebrow">SHIPMENTS</p>
             <h3>Create shipment</h3>
-            <p>Select packed orders and generate shipments in bulk.</p>
+            <p>Select packed orders and group them into a shipment — identical to the Operations staff workflow.</p>
           </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={toggleAllPacked}
+            disabled={packedOrders.length === 0}
+          >
+            {selectedPackedOrders.length === packedOrders.length && packedOrders.length > 0
+              ? 'Clear selection'
+              : 'Select all packed'}
+          </button>
         </div>
+
+        {/* ── Shipment form ── */}
         <div className="admin-orders-grid">
           <label className="field-group">
             <span className="field-label">Courier</span>
             <select
               className="field"
-              value={shipmentDraft.courier_name}
-              onChange={(event) =>
-                setShipmentDraft((current) => ({ ...current, courier_name: event.target.value }))
-              }
+              value={shipmentForm.courier_name}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, courier_name: e.target.value }))}
             >
               {COURIERS.map((courier) => (
-                <option key={courier} value={courier}>
-                  {courier}
-                </option>
+                <option key={courier} value={courier}>{courier}</option>
               ))}
             </select>
           </label>
@@ -650,21 +782,197 @@ export default function AdminOrdersManager({ compact = false }) {
             <span className="field-label">Tracking ID (optional)</span>
             <input
               className="field"
-              value={shipmentDraft.tracking_id}
-              onChange={(event) =>
-                setShipmentDraft((current) => ({ ...current, tracking_id: event.target.value }))
-              }
+              value={shipmentForm.tracking_id}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, tracking_id: e.target.value }))}
               placeholder="Leave blank to auto-generate"
             />
           </label>
 
-          <button type="button" className="btn btn-primary" onClick={createShipment}>
+          <label className="field-group">
+            <span className="field-label">Destination state</span>
+            <input
+              className="field"
+              value={shipmentForm.destination_state}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, destination_state: e.target.value }))}
+              placeholder="e.g. Karnataka"
+            />
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Destination city</span>
+            <input
+              className="field"
+              value={shipmentForm.destination_city}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, destination_city: e.target.value }))}
+              placeholder="e.g. Bengaluru"
+            />
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Vehicle type</span>
+            <select
+              className="field"
+              value={shipmentForm.vehicle_type}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, vehicle_type: e.target.value }))}
+            >
+              {VEHICLE_TYPES.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field-group">
+            <span className="field-label">Shipment notes</span>
+            <textarea
+              className="field"
+              rows={2}
+              value={shipmentForm.shipment_notes}
+              onChange={(e) => setShipmentForm((c) => ({ ...c, shipment_notes: e.target.value }))}
+              placeholder="Optional handling or dispatch notes"
+            />
+          </label>
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={createOpsShipment}
+            disabled={packedOrders.length === 0}
+          >
             Create Shipment for Selected Orders
           </button>
 
-          <button type="button" className="btn btn-secondary" onClick={autoCreateShipment}>
+          <button type="button" className="btn btn-secondary" onClick={autoCreateOpsShipment}>
             Auto Create Shipment
           </button>
+        </div>
+
+        {/* ── Packed orders list ── */}
+        <div className="admin-ops-packed-list">
+          {packedOrders.length === 0 ? (
+            <p className="empty-state">No packed orders available for shipment creation.</p>
+          ) : (
+            packedOrders.map((order) => {
+              const shipping = order.shipping_details || {}
+              const customerName = String(shipping.full_name || order.customer_name || order.customer_email || '').trim()
+              const orderItems = Array.isArray(order.items) ? order.items : []
+              return (
+                <article key={order.order_id} className="admin-ops-packed-card">
+                  <label className="admin-ops-packed-select">
+                    <input
+                      type="checkbox"
+                      checked={selectedPackedOrders.includes(order.order_id)}
+                      onChange={() =>
+                        setSelectedPackedOrders((current) =>
+                          current.includes(order.order_id)
+                            ? current.filter((id) => id !== order.order_id)
+                            : [...current, order.order_id]
+                        )
+                      }
+                    />
+                    <span className="admin-order-id">{order.order_id}</span>
+                  </label>
+
+                  <div className="admin-ops-packed-meta">
+                    <div className="admin-customer-cell">
+                      <span className="admin-customer-name">{customerName}</span>
+                      {shipping.phone ? <span className="admin-customer-phone">📞 {shipping.phone}</span> : null}
+                      {shipping.city ? <span className="admin-customer-address">📍 {[shipping.address, shipping.city, shipping.pincode || order.destination_pincode].filter(Boolean).join(', ')}</span> : null}
+                    </div>
+
+                    <div className="admin-ops-packed-items">
+                      {orderItems.slice(0, 3).map((item, idx) => (
+                        <div key={idx} className="admin-product-chip">
+                          {item.image ? (
+                            <img src={item.image} alt={item.name} className="admin-product-thumb" />
+                          ) : (
+                            <div className="admin-product-thumb admin-product-thumb-placeholder">📦</div>
+                          )}
+                          <div className="admin-product-chip-info">
+                            <span className="admin-product-chip-name">{item.name || `Product ${item.product_id}`}</span>
+                            <span className="admin-product-chip-qty">Qty: {item.quantity}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="admin-ops-packed-stats">
+                      <span>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</span>
+                      <span>{order.destination_pincode || '—'}</span>
+                      <span>{order.warehouse_id || 'Auto warehouse'}</span>
+                    </div>
+                  </div>
+
+                  <StatusBadge status={order.status} />
+                </article>
+              )
+            })
+          )}
+        </div>
+      </section>
+
+      {/* ── Shipment list with dispatch ── */}
+      <section className="section-card panel-stack section card">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">DISPATCH</p>
+            <h3>Shipment list</h3>
+            <p>Dispatch CREATED shipments to move linked orders to SHIPPED.</p>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={loadPackedOrdersAndShipments}>
+            Refresh shipments
+          </button>
+        </div>
+
+        <div className="admin-orders-stack">
+          {shipments.length === 0 ? (
+            <p className="empty-state">No shipments created yet.</p>
+          ) : (
+            shipments.map((shipment) => (
+              <article key={shipment.shipment_id} className="section-card panel-stack">
+                <div className="section-head">
+                  <div>
+                    <h3 style={{ fontFamily: 'monospace', fontSize: '14px' }}>{shipment.shipment_id}</h3>
+                    <p>
+                      {[shipment.destination_city, shipment.destination_state].filter(Boolean).join(', ') ||
+                        shipment.destination || 'Destination pending'}
+                    </p>
+                    <p>Vehicle: {shipment.vehicle_type || 'VAN'} · Courier: {shipment.courier_name || '—'} · Orders: {shipment.order_count ?? 0}</p>
+                    {shipment.shipment_notes ? <p>{shipment.shipment_notes}</p> : null}
+                  </div>
+                  <StatusBadge status={shipment.status} />
+                </div>
+
+                <div className="admin-orders-grid">
+                  <div className="field-group">
+                    <span className="field-label">Created at</span>
+                    <p>{formatDateTime(shipment.created_at)}</p>
+                  </div>
+                  <div className="field-group">
+                    <span className="field-label">Tracking ID</span>
+                    <p>{shipment.tracking_id || 'Auto-assigned'}</p>
+                  </div>
+                  <div className="field-group">
+                    <span className="field-label">Current location</span>
+                    <p>{shipment.current_location || '—'}</p>
+                  </div>
+                  {String(shipment.status || '').toUpperCase() === 'CREATED' ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => dispatchOpsShipment(shipment.shipment_id)}
+                      disabled={dispatchingShipmentId === shipment.shipment_id}
+                    >
+                      {dispatchingShipmentId === shipment.shipment_id ? 'Dispatching...' : 'Dispatch Shipment'}
+                    </button>
+                  ) : (
+                    <button type="button" className="btn btn-secondary" disabled>
+                      ✓ Dispatched
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))
+          )}
         </div>
       </section>
 
@@ -703,7 +1011,21 @@ export default function AdminOrdersManager({ compact = false }) {
                     />
                   </label>
                   <h3>{order.order_id}</h3>
-                  <p>{order.customer_email}</p>
+                  {(() => {
+                    const s = order.shipping_details || {}
+                    const name = String(s.full_name || order.customer_name || '').trim()
+                    const phone = String(s.phone || '').trim()
+                    const city = String(s.city || '').trim()
+                    const addr = String(s.address || '').trim()
+                    const pin = String(s.pincode || order.destination_pincode || '').trim()
+                    return (
+                      <div className="admin-customer-cell admin-customer-cell-inline">
+                        {name ? <span className="admin-customer-name">{name}</span> : <span className="admin-customer-email">{order.customer_email}</span>}
+                        {phone ? <span className="admin-customer-phone">📞 {phone}</span> : null}
+                        {city || addr ? <span className="admin-customer-address">📍 {[addr, city, pin].filter(Boolean).join(', ')}</span> : null}
+                      </div>
+                    )
+                  })()}
                   <p>Placed on: {formatDateTime(order.created_at)}</p>
                 </div>
                 <div className="row-gap">
@@ -880,7 +1202,21 @@ export default function AdminOrdersManager({ compact = false }) {
                 <div>
                   <p className="eyebrow">STATUS DETAILS</p>
                   <h3>{modalOrder.order_id}</h3>
-                  <p>{modalOrder.customer_email}</p>
+                  {(() => {
+                    const s = modalOrder.shipping_details || {}
+                    const name = String(s.full_name || modalOrder.customer_name || '').trim()
+                    const phone = String(s.phone || '').trim()
+                    const city = String(s.city || '').trim()
+                    const addr = String(s.address || '').trim()
+                    const pin = String(s.pincode || modalOrder.destination_pincode || '').trim()
+                    return (
+                      <div className="admin-customer-cell admin-customer-cell-inline">
+                        {name ? <span className="admin-customer-name">{name}</span> : <span className="admin-customer-email">{modalOrder.customer_email}</span>}
+                        {phone ? <span className="admin-customer-phone">📞 {phone}</span> : null}
+                        {city || addr ? <span className="admin-customer-address">📍 {[addr, city, pin].filter(Boolean).join(', ')}</span> : null}
+                      </div>
+                    )
+                  })()}
                 </div>
                 <button type="button" className="btn btn-secondary" onClick={closeTrackingModal}>
                   Close

@@ -451,6 +451,41 @@ export default function ProductDetails() {
     toast.success(message)
   }
 
+  const handleBuyNow = () => {
+    const role = normalizeRole(currentUser?.role)
+    if (!currentUser || role !== 'user') {
+      const message = 'Please login to buy products.'
+      setActionMessage(message)
+      toast(message)
+      navigate('/login')
+      return
+    }
+
+    const available = Number(product?.available_stock || 0)
+    if (available <= 0) {
+      const message = 'This product is currently out of stock.'
+      setActionMessage(message)
+      toast(message)
+      return
+    }
+
+    // Write a single-item buy-now session so Checkout can pick it up
+    const buyNowItem = {
+      id: Number(product.id),
+      name: String(product.name || 'Product'),
+      category: String(product.category || ''),
+      productType: String(product.productType || ''),
+      subType: String(product.subType || ''),
+      image: String(product.image || ''),
+      price: Number(product.price) || 0,
+      size: selectedSize,
+      quantity,
+      inStock: true,
+    }
+    sessionStorage.setItem('veloura_buy_now', JSON.stringify(buyNowItem))
+    navigate('/checkout')
+  }
+
   const handleAddRelatedToCart = (relatedProduct) => {
     const role = normalizeRole(currentUser?.role)
 
@@ -677,6 +712,17 @@ export default function ProductDetails() {
                 disabled={Number(product?.available_stock || 0) <= 0}
               >
                 {Number(product?.available_stock || 0) <= 0 ? 'Unavailable' : 'Add to Cart'}
+              </Button>
+            </div>
+
+            <div className="detail-buy-now-row">
+              <Button
+                variant="accent"
+                className="btn-wide detail-buy-now-btn"
+                onClick={handleBuyNow}
+                disabled={Number(product?.available_stock || 0) <= 0}
+              >
+                {Number(product?.available_stock || 0) <= 0 ? 'Out of Stock' : 'Buy Now'}
               </Button>
             </div>
             

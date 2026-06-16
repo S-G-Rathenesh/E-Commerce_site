@@ -5860,3 +5860,352 @@ textarea.field:focus {
   min-width: 200px;
   max-width: 220px;
 }
+
+/* ============================================================
+   BUY NOW — Product Details & Checkout
+   ============================================================ */
+
+/* btn-accent: warm orange, distinct from the blue btn-primary */
+.btn-accent {
+  background: linear-gradient(135deg, #ff6b00, #ff9a00);
+  color: #fff;
+  font-weight: 700;
+  border: none;
+  box-shadow: 0 2px 8px rgba(255, 107, 0, 0.28);
+  transition: background 0.22s ease, box-shadow 0.22s ease, transform 0.18s ease;
+}
+
+.btn-accent:hover:not(:disabled) {
+  background: linear-gradient(135deg, #e85f00, #f08c00);
+  box-shadow: 0 4px 14px rgba(255, 107, 0, 0.38);
+}
+
+.btn-accent:disabled {
+  background: #d1d5db;
+  color: #9ca3af;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* Row that wraps the Buy Now button, full-width below the cart row */
+.detail-buy-now-row {
+  margin-top: 10px;
+}
+
+.detail-buy-now-row .detail-buy-now-btn {
+  width: 100%;
+  padding: 13px 20px;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  border-radius: 10px;
+}
+
+/* Checkout buy-now banner strip */
+.checkout-buy-now-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  margin-bottom: 20px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #fff7ed, #ffedd5);
+  border: 1px solid #fed7aa;
+  color: #9a3412;
+}
+
+.checkout-buy-now-banner span {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.checkout-buy-now-banner p {
+  margin: 0;
+  color: #9a3412;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.checkout-buy-now-banner strong {
+  color: #7c2d12;
+}
+
+.checkout-buy-now-banner .btn-link {
+  color: #c2410c;
+  font-weight: 700;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ============================================================
+   ADMIN ORDERS TABLE — Customer info + Product thumbnails
+   ============================================================ */
+
+/* Customer cell: stacked name / phone / address */
+.admin-customer-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 160px;
+}
+
+.admin-customer-cell-inline {
+  min-width: 0;
+}
+
+.admin-customer-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.admin-customer-email {
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.admin-customer-phone {
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.admin-customer-address {
+  font-size: 11px;
+  color: #94a3b8;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Order ID */
+.admin-order-id {
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* Products cell: one chip per item */
+.admin-products-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+  max-width: 260px;
+}
+
+.admin-product-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.admin-product-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--border-soft);
+}
+
+.admin-product-thumb-placeholder {
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  background: var(--surface-soft);
+}
+
+.admin-product-chip-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.admin-product-chip-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.admin-product-chip-qty {
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.admin-no-items {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* ============================================================
+   ADMIN — Ops-parity shipment section
+   ============================================================ */
+
+/* Packed orders list */
+.admin-ops-packed-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.admin-ops-packed-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-sm);
+}
+
+.admin-ops-packed-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.admin-ops-packed-select input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--brand);
+}
+
+.admin-ops-packed-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.admin-ops-packed-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-ops-packed-stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.admin-ops-packed-stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@media (max-width: 640px) {
+  .admin-ops-packed-card {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* ============================================================
+   BULK STOCK UPDATE MODAL
+   ============================================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 11, 13, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.modal-content {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  animation: slideUp 0.25s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.modal-content .section-head {
+  margin-bottom: 16px;
+}
+
+.modal-content .field-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+
+/* Ensure modal appears above everything */
+.modal-overlay {
+  z-index: 9999;
+}
+
+/* Focus trap for accessibility */
+.modal-content:focus {
+  outline: none;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 560px) {
+  .modal-content {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 40px);
+  }
+  
+  .modal-content .section-head {
+    flex-wrap: wrap;
+  }
+  
+  .modal-content .section-head h2 {
+    font-size: 22px;
+  }
+}

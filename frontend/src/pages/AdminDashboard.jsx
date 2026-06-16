@@ -398,10 +398,19 @@ export default function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recentOrders.map((order) => (
+                  {recentOrders.map((order) => {
+                    const shipping = order.shipping_details || {}
+                    const customerDisplay = String(shipping.full_name || order.customer_name || order.customer_email || '').trim()
+                    const customerPhone = String(shipping.phone || '').trim()
+                    return (
                     <tr key={order.order_id}>
                       <td>{order.order_id}</td>
-                      <td>{order.customer_email}</td>
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                          <span style={{ fontWeight: 700, fontSize: '13px' }}>{customerDisplay}</span>
+                          {customerPhone ? <span style={{ fontSize: '12px', color: 'var(--ink-soft)' }}>📞 {customerPhone}</span> : null}
+                        </div>
+                      </td>
                       <td>{formatDateTime(order.created_at)}</td>
                       <td><StatusBadge status={order.status} /></td>
                       <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || order.order_value || 0).toLocaleString('en-IN')}</td>
@@ -411,7 +420,8 @@ export default function AdminDashboard() {
                         </Button>
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

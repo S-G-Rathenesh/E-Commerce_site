@@ -2890,58 +2890,64 @@ def seed_products() -> None:
         if not product_id:
             continue
 
+        # Only insert seed products if they don't exist — never overwrite merchant products
+        existing = products_collection.find_one({'id': product_id})
+        if existing:
+            continue  # Skip: product already exists (may be modified or a merchant product)
+
         payload['merchant_id'] = str(payload.get('merchant_id') or 'USR-DEMO-ADMIN-01').strip() or 'USR-DEMO-ADMIN-01'
         payload['review_status'] = normalize_product_review_status(payload.get('review_status', 'APPROVED'))
+        payload['created_at'] = now_utc()
+        
+        # Set default stock if not specified (prevent "Out of Stock" for all seed products)
+        if 'stock' not in payload and 'stock_quantity' not in payload:
+            payload['stock'] = 50  # Default stock for seed products
 
-        products_collection.update_one(
-            {'id': product_id},
-            {
-                '$set': payload,
-                '$setOnInsert': {'created_at': now_utc()},
-            },
-            upsert=True,
-        )
+        products_collection.insert_one(payload)
 
 
 def seed_users() -> None:
     for _, account in SEED_USERS.items():
         email = account['email'].strip().lower()
+        
+        # Only insert seed users if they don't exist — never overwrite real user data
+        existing = users_collection.find_one({'email': email})
+        if existing:
+            # User already exists — skip to preserve their profile data, settings, etc.
+            continue
+        
         profile_details = account.get('profile_details') if isinstance(account.get('profile_details'), dict) else {}
         bank_details = profile_details.get('bank_details') if isinstance(profile_details.get('bank_details'), dict) else {}
-        users_collection.update_one(
-            {'email': email},
-            {
-                '$set': {
-                    'id': account.get('id') or f"USR-{uuid4().hex[:10].upper()}",
-                    'name': account['full_name'],
-                    'full_name': account['full_name'],
-                    'email': email,
-                    'provider': account.get('provider', 'email'),
-                    'role': normalize_role(account.get('role', 'CUSTOMER')),
-                    'status': normalize_account_status(account.get('status', 'ACTIVE')),
-                    'merchant_status': normalize_merchant_status(
-                        account.get('merchant_status', 'APPROVED' if normalize_role(account.get('role', 'CUSTOMER')) == 'ADMIN' else 'PENDING')
-                    ),
-                    'phone_number': str(account.get('phone_number') or '').strip(),
-                    'profile_details': {
-                        'store_name': str(profile_details.get('store_name') or '').strip(),
-                        'gst_number': str(profile_details.get('gst_number') or '').strip(),
-                        'logo_url': str(profile_details.get('logo_url') or '').strip(),
-                        'bank_details': {
-                            'account_holder_name': str(bank_details.get('account_holder_name') or '').strip(),
-                            'bank_name': str(bank_details.get('bank_name') or '').strip(),
-                            'account_number': str(bank_details.get('account_number') or '').strip(),
-                            'ifsc_code': str(bank_details.get('ifsc_code') or '').strip(),
-                        },
-                    },
-                    'password_hash': hash_password(account['password']),
-                    'updated_at': now_utc(),
+        
+        user_document = {
+            'id': account.get('id') or f"USR-{uuid4().hex[:10].upper()}",
+            'name': account['full_name'],
+            'full_name': account['full_name'],
+            'email': email,
+            'provider': account.get('provider', 'email'),
+            'role': normalize_role(account.get('role', 'CUSTOMER')),
+            'status': normalize_account_status(account.get('status', 'ACTIVE')),
+            'merchant_status': normalize_merchant_status(
+                account.get('merchant_status', 'APPROVED' if normalize_role(account.get('role', 'CUSTOMER')) == 'ADMIN' else 'PENDING')
+            ),
+            'phone_number': str(account.get('phone_number') or '').strip(),
+            'profile_details': {
+                'store_name': str(profile_details.get('store_name') or '').strip(),
+                'gst_number': str(profile_details.get('gst_number') or '').strip(),
+                'logo_url': str(profile_details.get('logo_url') or '').strip(),
+                'bank_details': {
+                    'account_holder_name': str(bank_details.get('account_holder_name') or '').strip(),
+                    'bank_name': str(bank_details.get('bank_name') or '').strip(),
+                    'account_number': str(bank_details.get('account_number') or '').strip(),
+                    'ifsc_code': str(bank_details.get('ifsc_code') or '').strip(),
                 },
-                '$unset': {'password': ''},
-                '$setOnInsert': {'created_at': now_utc()},
             },
-            upsert=True,
-        )
+            'password_hash': hash_password(account['password']),
+            'created_at': now_utc(),
+            'updated_at': now_utc(),
+        }
+        
+        users_collection.insert_one(user_document)
 
 
 def seed_platform_defaults() -> None:
@@ -2995,6 +3001,31 @@ def backfill_product_review_status() -> None:
     )
 
 
+def backfill_seed_product_stock() -> None:
+    """One-time backfill to add stock to seed products that have 0 or no stock"""
+    seed_product_ids = [product['id'] for product in SEED_PRODUCTS]
+    
+    # Update seed products that have 0 or missing stock
+    products_collection.update_many(
+        {
+            'id': {'$in': seed_product_ids},
+            '$or': [
+                {'stock': {'$exists': False}},
+                {'stock': 0},
+                {'stock_quantity': {'$exists': False}},
+                {'stock_quantity': 0},
+            ]
+        },
+        {
+            '$set': {
+                'stock': 50,
+                'stock_quantity': 50,
+                'updated_at': now_utc()
+            }
+        }
+    )
+
+
 def seed_shipments() -> None:
     for shipment in SEED_SHIPMENTS:
         shipment_payload = dict(shipment)
@@ -3008,13 +3039,15 @@ def seed_shipments() -> None:
 
 def seed_orders() -> None:
     for order in SEED_ORDERS:
+        # Only insert demo orders if they do not exist yet — never overwrite real workflow state
+        existing = orders_collection.find_one({'order_id': order['order_id']})
+        if existing:
+            continue  # Skip: order already exists (may have real status/history)
         order_payload = dict(order)
         order_created_at = order_payload.pop('created_at', None)
-        orders_collection.update_one(
-            {'order_id': order['order_id']},
-            {'$set': order_payload, '$setOnInsert': {'created_at': order_created_at or now_utc()}},
-            upsert=True,
-        )
+        order_payload['created_at'] = order_created_at or now_utc()
+        order_payload['is_deleted'] = False
+        orders_collection.insert_one(order_payload)
 
 
 def backfill_order_items_and_logs() -> None:
@@ -3057,34 +3090,47 @@ def backfill_order_items_and_logs() -> None:
 
 
 def backfill_orders_workflow_state() -> None:
-    projection = {'_id': 1, 'order_id': 1, 'status': 1, 'payment_method': 1, 'status_timestamps': 1}
+    projection = {'_id': 1, 'order_id': 1, 'status': 1, 'payment_method': 1, 'status_timestamps': 1, 'updated_at': 1}
     for order in orders_collection.find({}, projection):
         order_id = order.get('order_id')
         if not order_id:
             continue
 
-        normalized_status = normalize_order_status(order.get('status', 'PLACED'))
-        existing_timestamps = order.get('status_timestamps') or {}
-        if not isinstance(existing_timestamps, dict):
-            existing_timestamps = {}
-        if normalized_status not in existing_timestamps:
-            existing_timestamps[normalized_status] = now_utc().isoformat()
+        # Only backfill if missing fields, don't overwrite existing workflow state
+        update_fields = {}
+        
+        # Normalize status only if missing or invalid
+        current_status = order.get('status')
+        if not current_status:
+            update_fields['status'] = normalize_order_status('PLACED')
+        
+        # Backfill timestamps only if missing
+        existing_timestamps = order.get('status_timestamps')
+        if not existing_timestamps or not isinstance(existing_timestamps, dict):
+            normalized_status = normalize_order_status(current_status or 'PLACED')
+            update_fields['status_timestamps'] = {normalized_status: now_utc().isoformat()}
+        elif current_status:
+            # Add current status to timestamps if missing
+            normalized_status = normalize_order_status(current_status)
+            if normalized_status not in existing_timestamps:
+                existing_timestamps[normalized_status] = now_utc().isoformat()
+                update_fields['status_timestamps'] = existing_timestamps
 
-        payment_method = normalize_payment_method(order.get('payment_method') or 'COD')
+        # Normalize payment method only if missing
+        if not order.get('payment_method'):
+            update_fields['payment_method'] = normalize_payment_method('COD')
 
-        orders_collection.update_one(
-            {'_id': order['_id']},
-            {
-                '$set': {
-                    'status': normalized_status,
-                    'status_timestamps': existing_timestamps,
-                    'payment_method': payment_method,
-                    'updated_at': now_utc(),
-                }
-            },
-        )
+        # Only update if there are fields to backfill
+        if update_fields:
+            update_fields['updated_at'] = now_utc()
+            orders_collection.update_one(
+                {'_id': order['_id']},
+                {'$set': update_fields}
+            )
 
+        # Create initial payment record if missing
         if payments_collection.count_documents({'order_id': order_id}) == 0:
+            payment_method = normalize_payment_method(order.get('payment_method') or 'COD')
             initial_payment_status = 'PENDING' if payment_method == 'COD' else 'SUCCESS'
             set_payment_status(order_id, initial_payment_status, method=payment_method)
 
@@ -3099,6 +3145,14 @@ def backfill_demo_seed_tracking_state() -> None:
         order = orders_collection.find_one({'order_id': order_id})
         if not order:
             continue
+
+        # Skip if order has real workflow history (not just seed baseline)
+        history_count = order_status_history_collection.count_documents({'order_id': order_id})
+        updated_by = order.get('updated_by', '')
+        
+        # If history count > 1 or updated_by is not system/seed, this is a real order now
+        if history_count > 1 or (updated_by and updated_by not in ['system-seed', 'seed-backfill', 'system']):
+            continue  # Don't reset orders with real workflow progress
 
         created_at = order.get('created_at') or now_utc()
         orders_collection.update_one(
@@ -3304,6 +3358,7 @@ def seed_collections() -> None:
     backfill_merchant_statuses()
     backfill_product_merchant_ids()
     backfill_product_review_status()
+    backfill_seed_product_stock()  # Add stock to seed products with 0 stock
     seed_shipments()
     seed_orders()
     seed_warehouses()
@@ -5782,7 +5837,7 @@ def cleanup_order_and_shipment_data(
 
 
 @app.get('/operations/orders')
-def get_operations_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF'))):
+def get_operations_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
     _ = current_user
     orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED'})).sort('created_at', -1))
     return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
@@ -6022,7 +6077,7 @@ def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict
 
 
 @app.get('/operations/packed-orders')
-def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF'))):
+def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
     _ = current_user
     orders = list(
         orders_collection.find(
@@ -6042,7 +6097,7 @@ def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPE
 
 
 @app.get('/operations/shipments')
-def get_operations_shipments(current_user: dict = Depends(require_roles('OPERATIONS_STAFF'))):
+def get_operations_shipments(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
     _ = current_user
     shipments = list(shipments_collection.find({}).sort('created_at', -1))
     enriched_shipments = []

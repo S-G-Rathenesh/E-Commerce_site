@@ -3,6 +3,7 @@ import PageWrapper from '../components/PageWrapper'
 import { getStoredUser } from '../utils/auth'
 import { useEffect, useState } from 'react'
 import Input from '../components/Input'
+import toast from 'react-hot-toast'
 import { clearSavedDefaultAddress, getSavedDefaultAddress, saveDefaultAddress } from '../utils/profileAddress'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -194,20 +195,18 @@ export default function Profile() {
         setShowAddForm(false)
         resetForm()
         await loadPaymentMethods()
-        alert('Payment method saved successfully!')
+        toast.success('Payment method saved.')
       } else {
         const error = await response.json()
-        alert(`Error: ${error.detail || 'Failed to save payment method'}`)
+        toast.error(error.detail || 'Failed to save payment method.')
       }
     } catch (error) {
-      console.error('Error saving payment method:', error)
-      alert('Failed to save payment method')
+      toast.error('Failed to save payment method.')
     }
   }
 
   async function handleDeletePaymentMethod(methodId) {
-    if (!confirm('Are you sure you want to delete this payment method?')) return
-
+    if (!window.confirm('Delete this payment method?')) return
     try {
       const token = localStorage.getItem('auth_token')
       const response = await fetch(`${API_BASE}/payment-methods/${methodId}`, {
@@ -216,11 +215,10 @@ export default function Profile() {
       })
       if (response.ok) {
         await loadPaymentMethods()
-        alert('Payment method deleted successfully!')
+        toast.success('Payment method deleted.')
       }
-    } catch (error) {
-      console.error('Error deleting payment method:', error)
-      alert('Failed to delete payment method')
+    } catch {
+      toast.error('Failed to delete payment method.')
     }
   }
 
@@ -229,17 +227,14 @@ export default function Profile() {
       const token = localStorage.getItem('auth_token')
       const response = await fetch(`${API_BASE}/payment-methods/${methodId}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ is_default: true }),
       })
       if (response.ok) {
         await loadPaymentMethods()
       }
-    } catch (error) {
-      console.error('Error setting default payment method:', error)
+    } catch {
+      // ignore
     }
   }
 
@@ -391,240 +386,159 @@ export default function Profile() {
       {/* Payment Methods Section */}
       <section className="section-card panel-stack">
         <div className="section-head">
-          <h3>Saved Payment Methods</h3>
-          <button
-            onClick={() => setShowAddForm(!showAddForm)}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '14px',
-              fontWeight: '500',
-            }}
-          >
-            {showAddForm ? 'Cancel' : '+ Add Payment Method'}
-          </button>
+          <div>
+            <p className="eyebrow">Payments</p>
+            <h3>Saved payment methods</h3>
+          </div>
+          <Button variant="secondary" onClick={() => setShowAddForm(!showAddForm)}>
+            {showAddForm ? 'Cancel' : '+ Add Method'}
+          </Button>
         </div>
 
-        {/* Add Payment Method Form */}
-        {showAddForm && (
-          <form onSubmit={handleSavePaymentMethod} style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500' }}>
-                Payment Method Type
-              </label>
+        {showAddForm ? (
+          <form className="panel-stack form-grid" onSubmit={handleSavePaymentMethod}>
+            <label className="field-group">
+              <span className="field-label">Payment type</span>
               <select
+                className="field"
                 value={formData.method_type}
                 onChange={(e) => setFormData({ ...formData, method_type: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '8px',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  fontSize: '14px',
-                }}
               >
                 <option value="UPI">UPI</option>
-                <option value="CARD">Credit/Debit Card</option>
+                <option value="CARD">Credit / Debit Card</option>
                 <option value="NETBANKING">Net Banking</option>
                 <option value="WALLET">Wallet</option>
               </select>
-            </div>
+            </label>
 
             <Input
               label="Nickname (optional)"
               value={formData.nickname}
-              onChange={(event) => setFormData({ ...formData, nickname: event.target.value })}
-              placeholder="e.g., My UPI, Office Card"
+              onChange={(e) => setFormData({ ...formData, nickname: e.target.value })}
+              placeholder="e.g. My UPI, Office Card"
             />
 
-            {formData.method_type === 'UPI' && (
+            {formData.method_type === 'UPI' ? (
               <Input
                 label="UPI ID"
                 value={formData.upi_id}
-                onChange={(event) => setFormData({ ...formData, upi_id: event.target.value })}
+                onChange={(e) => setFormData({ ...formData, upi_id: e.target.value })}
                 placeholder="name@bankname"
                 required
               />
-            )}
+            ) : null}
 
-            {formData.method_type === 'CARD' && (
+            {formData.method_type === 'CARD' ? (
               <>
                 <Input
-                  label="Card Number"
+                  label="Card number"
                   value={formData.card_number}
-                  onChange={(event) => setFormData({ ...formData, card_number: event.target.value.replace(/\D/g, '') })}
+                  onChange={(e) => setFormData({ ...formData, card_number: e.target.value.replace(/\D/g, '') })}
                   placeholder="1234 5678 9012 3456"
-                  maxLength="19"
                   required
                 />
                 <Input
-                  label="Card Holder Name"
+                  label="Card holder name"
                   value={formData.card_holder_name}
-                  onChange={(event) => setFormData({ ...formData, card_holder_name: event.target.value })}
+                  onChange={(e) => setFormData({ ...formData, card_holder_name: e.target.value })}
                   placeholder="John Doe"
                   required
                 />
                 <Input
                   label="Expiry (MM/YY)"
                   value={formData.card_expiry}
-                  onChange={(event) => setFormData({ ...formData, card_expiry: event.target.value })}
+                  onChange={(e) => setFormData({ ...formData, card_expiry: e.target.value })}
                   placeholder="12/25"
-                  maxLength="5"
                   required
                 />
               </>
-            )}
+            ) : null}
 
-            {formData.method_type === 'NETBANKING' && (
+            {formData.method_type === 'NETBANKING' ? (
               <Input
-                label="Bank Name"
+                label="Bank name"
                 value={formData.bank_name}
-                onChange={(event) => setFormData({ ...formData, bank_name: event.target.value })}
+                onChange={(e) => setFormData({ ...formData, bank_name: e.target.value })}
                 placeholder="HDFC Bank"
                 required
               />
-            )}
+            ) : null}
 
-            {formData.method_type === 'WALLET' && (
-              <select
-                value={formData.wallet_provider}
-                onChange={(e) => setFormData({ ...formData, wallet_provider: e.target.value })}
-                style={{
-                  width: '100%',
-                  padding: '8px',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  fontSize: '14px',
-                  marginBottom: '16px',
-                }}
-                required
-              >
-                <option value="">Select Wallet</option>
-                <option value="Google Pay">Google Pay</option>
-                <option value="Apple Pay">Apple Pay</option>
-                <option value="Amazon Pay">Amazon Pay</option>
-                <option value="PayTM">PayTM</option>
-                <option value="PhonePe">PhonePe</option>
-              </select>
-            )}
+            {formData.method_type === 'WALLET' ? (
+              <label className="field-group">
+                <span className="field-label">Wallet provider</span>
+                <select
+                  className="field"
+                  value={formData.wallet_provider}
+                  onChange={(e) => setFormData({ ...formData, wallet_provider: e.target.value })}
+                  required
+                >
+                  <option value="">Select wallet</option>
+                  <option value="Google Pay">Google Pay</option>
+                  <option value="PhonePe">PhonePe</option>
+                  <option value="Paytm">Paytm</option>
+                  <option value="Amazon Pay">Amazon Pay</option>
+                </select>
+              </label>
+            ) : null}
 
-            <label style={{ display: 'flex', alignItems: 'center', marginBottom: '16px' }}>
+            <label className="field-group" style={{ flexDirection: 'row', alignItems: 'center', gap: '10px' }}>
               <input
                 type="checkbox"
                 checked={formData.is_default}
                 onChange={(e) => setFormData({ ...formData, is_default: e.target.checked })}
-                style={{ marginRight: '8px', cursor: 'pointer' }}
               />
-              <span style={{ fontSize: '14px' }}>Set as default payment method</span>
+              <span className="field-label" style={{ margin: 0 }}>Set as default</span>
             </label>
 
-            <button
-              type="submit"
-              style={{
-                width: '100%',
-                padding: '10px',
-                backgroundColor: '#28a745',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '14px',
-                fontWeight: '500',
-              }}
-            >
-              Save Payment Method
-            </button>
-          </form>
-        )}
-
-        {/* Payment Methods List */}
-        <div>
-          {loading ? (
-            <p>Loading payment methods...</p>
-          ) : paymentMethods.length === 0 ? (
-            <p style={{ color: '#666', fontSize: '14px' }}>No saved payment methods. Add one to make checkout faster!</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '12px' }}>
-              {paymentMethods.map((method) => (
-                <div
-                  key={method.id}
-                  style={{
-                    padding: '16px',
-                    border: '1px solid #ddd',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    backgroundColor: method.is_default ? '#e7f3ff' : '#fff',
-                  }}
-                >
-                  <div>
-                    <p style={{ fontWeight: '500', marginBottom: '4px' }}>
-                      {method.nickname}
-                      {method.is_default && (
-                        <span
-                          style={{
-                            marginLeft: '8px',
-                            padding: '2px 8px',
-                            backgroundColor: '#007bff',
-                            color: 'white',
-                            borderRadius: '12px',
-                            fontSize: '12px',
-                            fontWeight: 'bold',
-                          }}
-                        >
-                          DEFAULT
-                        </span>
-                      )}
-                    </p>
-                    <p style={{ fontSize: '13px', color: '#666', margin: '0' }}>
-                      {method.method_type === 'UPI' && `UPI: ${method.upi_id}`}
-                      {method.method_type === 'CARD' && `Card ending in ${method.card_last4} - ${method.card_holder_name}`}
-                      {method.method_type === 'NETBANKING' && `${method.bank_name}`}
-                      {method.method_type === 'WALLET' && `${method.wallet_provider}`}
-                    </p>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {!method.is_default && (
-                      <button
-                        onClick={() => handleSetDefault(method.id)}
-                        style={{
-                          padding: '6px 12px',
-                          backgroundColor: '#6c757d',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px',
-                        }}
-                      >
-                        Set Default
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleDeletePaymentMethod(method.id)}
-                      style={{
-                        padding: '6px 12px',
-                        backgroundColor: '#dc3545',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
+            <div className="row-gap">
+              <Button type="submit" variant="primary">Save method</Button>
+              <Button variant="secondary" onClick={() => { setShowAddForm(false); resetForm() }}>Cancel</Button>
             </div>
-          )}
-        </div>
+          </form>
+        ) : null}
+
+        {loading ? <p>Loading payment methods...</p> : null}
+
+        {!loading && paymentMethods.length === 0 ? (
+          <p className="empty-state">No saved methods yet. Add one to speed up checkout.</p>
+        ) : null}
+
+        {!loading && paymentMethods.length > 0 ? (
+          <div className="profile-payment-list">
+            {paymentMethods.map((method) => (
+              <div
+                key={method.id}
+                className={`profile-payment-card ${method.is_default ? 'profile-payment-card-default' : ''}`}
+              >
+                <div className="profile-payment-info">
+                  <div className="profile-payment-name">
+                    {method.nickname || method.method_type}
+                    {method.is_default ? (
+                      <span className="profile-payment-default-badge">DEFAULT</span>
+                    ) : null}
+                  </div>
+                  <p className="profile-payment-detail">
+                    {method.method_type === 'UPI' && `UPI: ${method.upi_id}`}
+                    {method.method_type === 'CARD' && `Card ending in ${method.card_last4} · ${method.card_holder_name}`}
+                    {method.method_type === 'NETBANKING' && method.bank_name}
+                    {method.method_type === 'WALLET' && method.wallet_provider}
+                  </p>
+                </div>
+                <div className="row-gap">
+                  {!method.is_default ? (
+                    <Button variant="secondary" onClick={() => handleSetDefault(method.id)}>
+                      Set default
+                    </Button>
+                  ) : null}
+                  <Button variant="secondary" onClick={() => handleDeletePaymentMethod(method.id)}>
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
     </PageWrapper>
   )

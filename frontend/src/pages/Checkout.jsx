@@ -57,7 +57,21 @@ export default function Checkout() {
   const navigate = useNavigate()
 
   const currentUser = getStoredUser()
-  const cartItems = getCartItems(currentUser)
+
+  // --- Buy Now support: if a buy-now item is in sessionStorage, use it instead of cart ---
+  const buyNowItem = useMemo(() => {
+    try {
+      const raw = sessionStorage.getItem('veloura_buy_now')
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      return parsed?.id ? parsed : null
+    } catch {
+      return null
+    }
+  }, [])
+
+  const isBuyNow = Boolean(buyNowItem)
+  const cartItems = isBuyNow ? [buyNowItem] : getCartItems(currentUser)
   const subtotal = useMemo(
     () => cartItems.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1), 0),
     [cartItems],
@@ -300,6 +314,8 @@ export default function Checkout() {
 
       clearCart({ user: currentUser })
       setMessage(data?.message || 'Order placed successfully.')
+      // Clear buy-now session regardless of mode
+      sessionStorage.removeItem('veloura_buy_now')
       navigate('/orders/tracking')
     } catch (error) {
       setMessage(error?.message || 'Unable to place order right now.')
@@ -310,6 +326,24 @@ export default function Checkout() {
 
   return (
     <PageWrapper className="page-customer page-checkout" eyebrow="Checkout" title="Secure checkout" description="A centered, consistent checkout experience with structured sections and one primary action style.">
+      {isBuyNow ? (
+        <div className="checkout-buy-now-banner">
+          <span>⚡</span>
+          <p>
+            You're buying <strong>{buyNowItem.name}</strong> — Size {buyNowItem.size}, Qty {buyNowItem.quantity}.{' '}
+            <button
+              type="button"
+              className="btn btn-link"
+              onClick={() => {
+                sessionStorage.removeItem('veloura_buy_now')
+                navigate(-1)
+              }}
+            >
+              Go back
+            </button>
+          </p>
+        </div>
+      ) : null}
       <div className="checkout-grid">
         <section className="panel panel-stack checkout-form-card">
           <h2>Shipping details</h2>

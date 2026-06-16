@@ -85,6 +85,8 @@ export default function ManageProducts() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [imageUploading, setImageUploading] = useState(false)
+  const [bulkStockModalOpen, setBulkStockModalOpen] = useState(false)
+  const [bulkStockValue, setBulkStockValue] = useState('')
 
   const refreshProducts = async () => {
     setLoading(true)
@@ -255,6 +257,33 @@ export default function ManageProducts() {
     }
   }
 
+  const openBulkStockModal = () => {
+    if (!selectedIds.length) {
+      toast.error('Select at least one product first.')
+      return
+    }
+    setBulkStockValue('')
+    setBulkStockModalOpen(true)
+  }
+
+  const closeBulkStockModal = () => {
+    setBulkStockModalOpen(false)
+    setBulkStockValue('')
+  }
+
+  const handleBulkStockUpdate = async (event) => {
+    event.preventDefault()
+    const stockValue = normalizeStock(bulkStockValue)
+    
+    if (stockValue < 0) {
+      toast.error('Stock quantity must be 0 or greater.')
+      return
+    }
+
+    await bulkUpdateStock(stockValue)
+    closeBulkStockModal()
+  }
+
   return (
     <PageWrapper
       className="page-merchant"
@@ -292,6 +321,9 @@ export default function ManageProducts() {
         <div className="admin-controls-row">
           <button type="button" className="btn btn-secondary" onClick={toggleSelectAllVisible} disabled={saving}>
             Select visible
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={openBulkStockModal} disabled={saving}>
+            Bulk update stock
           </button>
           <button type="button" className="btn btn-secondary" onClick={() => bulkUpdateStock(1)} disabled={saving}>
             Bulk activate
@@ -496,6 +528,55 @@ export default function ManageProducts() {
             </div>
           </form>
         </aside>
+      ) : null}
+
+      {bulkStockModalOpen ? (
+        <div className="modal-overlay" onClick={closeBulkStockModal}>
+          <div className="modal-content card panel panel-stack" onClick={(e) => e.stopPropagation()}>
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Bulk operation</p>
+                <h2>Update stock quantity</h2>
+              </div>
+              <button type="button" className="btn btn-secondary" onClick={closeBulkStockModal} disabled={saving}>
+                Close
+              </button>
+            </div>
+
+            <p className="empty-state" style={{ marginBottom: 0 }}>
+              {selectedIds.length} product{selectedIds.length === 1 ? '' : 's'} selected
+            </p>
+
+            <form onSubmit={handleBulkStockUpdate} className="panel-stack">
+              <label className="field-group">
+                <span className="field-label">Stock quantity</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  className="field"
+                  value={bulkStockValue}
+                  onChange={(event) => setBulkStockValue(event.target.value)}
+                  placeholder="Enter stock quantity (e.g., 100)"
+                  autoFocus
+                  required
+                />
+                <span className="field-hint">
+                  Set to 0 to deactivate products. Set to 1+ to activate and set stock level.
+                </span>
+              </label>
+
+              <div className="row-gap">
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? 'Updating...' : 'Update stock'}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={closeBulkStockModal} disabled={saving}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       ) : null}
     </PageWrapper>
   )

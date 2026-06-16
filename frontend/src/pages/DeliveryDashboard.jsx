@@ -472,8 +472,6 @@ export default function DeliveryDashboard() {
             const isDelivered = status === 'DELIVERED'
             const isActionLoading = Boolean(actionLoadingByOrder[order.order_id])
 
-            console.log('ORDER STATUS:', order.status)
-
             return (
               <article key={order.order_id} className={`section-card panel-stack delivery-order-card ${queueState === 'OUT_FOR_DELIVERY' ? 'delivery-order-card-active' : ''}`}>
                 <div className="section-head">
