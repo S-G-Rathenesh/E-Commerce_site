@@ -867,6 +867,27 @@ textarea {
 .badge-cancelled { background:#f3f4f6; color:#6b7280; }
 .badge-default { background:var(--surface-soft); color:var(--ink-soft); }
 
+/* Shipment automation status indicators */
+.automation-status {
+  margin-top: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0ea5e9;
+  background: linear-gradient(90deg, #e0f2fe, #dbeafe);
+  border-radius: 6px;
+  display: inline-block;
+}
+.automation-status::before {
+  content: '';
+  display: inline-block;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .order-specs { margin-top:12px; padding-top:8px; border-top:1px dashed var(--border-soft); }
 .spec-table { display:grid; gap:6px; margin-top:8px; }
 .spec-row { display:flex; gap:10px; align-items:center; }

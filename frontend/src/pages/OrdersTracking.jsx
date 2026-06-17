@@ -41,32 +41,71 @@ function getPrimaryItem(order) {
 }
 
 function getShipmentStatus(order) {
-  return normalizeStatus(order?.shipment?.status || order?.status)
+  // Priority: shipment status > order status
+  const shipmentStatus = normalizeStatus(order?.shipment?.status || '')
+  const orderStatus = normalizeStatus(order?.status || '')
+  
+  // If shipment exists and has status, use it
+  if (shipmentStatus && shipmentStatus !== 'CREATED') {
+    return shipmentStatus
+  }
+  
+  // Otherwise use order status
+  return orderStatus
 }
 
 function getTrackerActiveIndex(order) {
   const status = getShipmentStatus(order)
-  if (status === 'DELIVERED') return 4
-  if (status === 'OUT_FOR_DELIVERY') return 3
-  if (status === 'SHIPPED' || status === 'PACKED' || status === 'DISPATCHED') return 2
-  if (status === 'CONFIRMED') return 1
-  if (status === 'PLACED') return 0
+  const orderStatus = normalizeStatus(order?.status || '')
+  
+  // Use combined logic for better accuracy
+  if (status === 'DELIVERED' || orderStatus === 'DELIVERED') return 4
+  if (status === 'OUT_FOR_DELIVERY' || orderStatus === 'OUT_FOR_DELIVERY') return 3
+  if (status === 'SHIPPED' || status === 'DISPATCHED' || status === 'IN_TRANSIT' || status === 'ARRIVED_AT_CITY' || orderStatus === 'SHIPPED') return 2
+  if (status === 'PACKED' || orderStatus === 'PACKED') return 2
+  if (status === 'CONFIRMED' || orderStatus === 'CONFIRMED') return 1
+  if (status === 'PLACED' || orderStatus === 'PLACED') return 0
   return -1
 }
 
 function formatTrackerMessage(order) {
   const status = getShipmentStatus(order)
-  const lastEvent = Array.isArray(order?.shipment_events) && order.shipment_events.length > 0 ? order.shipment_events[order.shipment_events.length - 1] : null
+  const orderStatus = normalizeStatus(order?.status || '')
+  const shipment = order?.shipment || {}
+  const lastEvent = Array.isArray(order?.shipment_events) && order.shipment_events.length > 0 
+    ? order.shipment_events[order.shipment_events.length - 1] 
+    : null
   const deliveredAt = order?.status_timestamps?.DELIVERED || order?.updated_at || lastEvent?.timestamp
 
-  if (status === 'DELIVERED') return `Delivered on ${formatDateTime(deliveredAt)}`
-  if (status === 'OUT_FOR_DELIVERY') return 'Out for delivery today'
-  if (status === 'SHIPPED' || status === 'DISPATCHED') return lastEvent?.message || 'Shipment dispatched'
-  if (status === 'PACKED') return lastEvent?.message || 'Shipment packed and ready'
-  if (status === 'CONFIRMED') return lastEvent?.message || 'Order confirmed'
-  if (status === 'PLACED') return 'Order placed successfully'
-  if (status === 'CANCELLED') return 'Order cancelled'
-  return lastEvent?.message || 'Shipment in progress'
+  // Check both shipment and order status
+  if (status === 'DELIVERED' || orderStatus === 'DELIVERED') {
+    return `Delivered on ${formatDateTime(deliveredAt)}`
+  }
+  if (status === 'OUT_FOR_DELIVERY' || orderStatus === 'OUT_FOR_DELIVERY') {
+    return lastEvent?.message || 'Out for delivery today'
+  }
+  if (status === 'ARRIVED_AT_CITY') {
+    return lastEvent?.message || 'Arrived at destination city hub'
+  }
+  if (status === 'IN_TRANSIT') {
+    return lastEvent?.message || shipment.current_location || 'Shipment in transit'
+  }
+  if (status === 'DISPATCHED' || status === 'SHIPPED' || orderStatus === 'SHIPPED') {
+    return lastEvent?.message || shipment.current_location || 'Shipment dispatched'
+  }
+  if (status === 'PACKED' || orderStatus === 'PACKED') {
+    return lastEvent?.message || 'Shipment packed and ready'
+  }
+  if (status === 'CONFIRMED' || orderStatus === 'CONFIRMED') {
+    return lastEvent?.message || 'Order confirmed'
+  }
+  if (status === 'PLACED' || orderStatus === 'PLACED') {
+    return 'Order placed successfully'
+  }
+  if (status === 'CANCELLED') {
+    return 'Order cancelled'
+  }
+  return lastEvent?.message || shipment.current_location || 'Shipment in progress'
 }
 
 export default function OrdersTracking() {

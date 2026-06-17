@@ -3478,6 +3478,34 @@ def get_merchant_shipping_settings(merchant_id: str) -> dict | None:
     )
 
 
+async def auto_dispatch_shipment_after_delay(shipment_id: str, delay_seconds: int = 3) -> None:
+    """
+    AUTO-DISPATCH: Automatically dispatch shipment after a short delay
+    Called when order is packed to simulate real-world warehouse processing
+    """
+    await asyncio.sleep(delay_seconds)
+    try:
+        shipment = shipments_collection.find_one({'shipment_id': shipment_id})
+        if not shipment:
+            return
+        
+        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+        if current_status != 'CREATED':
+            return
+        
+        # Auto-dispatch with system actor
+        transition_shipment_status(
+            shipment,
+            'DISPATCHED',
+            actor_id='system-auto-dispatch',
+            performer_role='SYSTEM',
+            performer_email='system@local',
+            location='Warehouse auto-dispatch',
+        )
+    except Exception:
+        pass
+
+
 def start_shipment_simulator() -> None:
     global shipment_simulation_started
     global shipment_simulation_task
@@ -3495,7 +3523,8 @@ def start_shipment_simulator() -> None:
                     simulate_shipment_progress_once()
                 except Exception:
                     pass
-                await asyncio.sleep(5)
+                # AGGRESSIVE: Check every 1 second instead of 5
+                await asyncio.sleep(1)
         except asyncio.CancelledError:
             return
 
@@ -5030,6 +5059,11 @@ def transition_shipment_status(
 
 
 def simulate_shipment_progress_once() -> None:
+    """
+    AGGRESSIVE AUTOMATION: Rapidly move shipments through transit stages
+    CREATED → DISPATCHED → IN_TRANSIT → ARRIVED_AT_CITY (auto-assigns delivery partner)
+    Delays reduced to 1-2 seconds for real-world e-commerce speed
+    """
     pending_shipments = list(
         shipments_collection.find(
             {'status': {'$in': ['CREATED', 'DISPATCHED', 'IN_TRANSIT']}},
@@ -5043,10 +5077,14 @@ def simulate_shipment_progress_once() -> None:
             elapsed = (now_value - updated_at).total_seconds()
         else:
             elapsed = 0
-        if elapsed < 5:
+        
+        # AGGRESSIVE: 1-2 second delay instead of 5 seconds
+        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+        required_delay = 1 if current_status == 'CREATED' else 2
+        
+        if elapsed < required_delay:
             continue
 
-        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
         next_status_map = {
             'CREATED': 'DISPATCHED',
             'DISPATCHED': 'IN_TRANSIT',
@@ -5471,9 +5509,22 @@ def pack_order(
         performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
         performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
     )
+    
+    # AUTO-CREATE SHIPMENT: Create shipment when packed
     shipment = create_shipment_from_order(latest, current_user, status='CREATED')
+    
+    # AUTO-DISPATCH IMMEDIATELY: Dispatch the shipment right away
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'system')),
+        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location='Warehouse dispatch',
+    )
+    
     latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
-    return {'message': 'Order packed and shipment created.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(shipment)}
+    return {'message': 'Order packed, shipment created and dispatched automatically.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
 
 
 @app.post('/orders/{order_id}/pack')
