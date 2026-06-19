@@ -5349,6 +5349,30 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
             user_id=str(current_user.get('id') or current_user.get('email') or ''),
         )
 
+    # AUTO-PROCESS: Immediately confirm → pack → create+dispatch shipment so it flows to delivery
+    try:
+        placed_order = orders_collection.find_one({'order_id': order_id}) or order_document
+        # CONFIRM
+        placed_order = apply_order_status_update(
+            placed_order, 'CONFIRMED', 'system-auto',
+            location='Auto-confirmed', performer_role='ADMIN', performer_email='system@local',
+        )
+        placed_order = orders_collection.find_one({'order_id': order_id}) or placed_order
+        # PACK + create shipment + dispatch
+        placed_order = apply_order_status_update(
+            placed_order, 'PACKED', 'system-auto',
+            location='Auto-packed', performer_role='OPERATIONS_STAFF', performer_email='system@local',
+        )
+        placed_order = orders_collection.find_one({'order_id': order_id}) or placed_order
+        new_shipment = create_shipment_from_order(placed_order, None, status='CREATED')
+        transition_shipment_status(
+            new_shipment, 'DISPATCHED',
+            actor_id='system-auto', performer_role='SYSTEM', performer_email='system@local',
+            location='Warehouse auto-dispatch',
+        )
+    except Exception:
+        pass  # If auto-process fails, order stays at PLACED — admin can process manually
+
     latest = orders_collection.find_one({'order_id': order_id})
     return {'message': 'Order placed successfully.', 'order': serialize_order(latest, include_shipment=True)}
 
@@ -5656,18 +5680,40 @@ def mark_out_for_delivery(
     shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
     if shipment_status == 'OUT_FOR_DELIVERY':
         raise HTTPException(status_code=409, detail='Order is already out for delivery.')
-    if shipment_status != 'ARRIVED_AT_CITY':
-        raise HTTPException(status_code=400, detail='Order can only move to out for delivery after the shipment reaches the city hub.')
+    # Allow starting delivery from DISPATCHED, IN_TRANSIT, or ARRIVED_AT_CITY
+    valid_start_statuses = {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY'}
+    if shipment_status not in valid_start_statuses:
+        raise HTTPException(status_code=400, detail='Order can only move to out for delivery after the shipment has been dispatched.')
 
     location_value = (payload.current_location if payload and payload.current_location else 'Last mile route').strip() if payload else 'Last mile route'
-    updated_shipment = transition_shipment_status(
-        shipment,
-        'OUT_FOR_DELIVERY',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'delivery')),
-        performer_role='DELIVERY_ASSOCIATE',
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        location=location_value or 'Last mile route',
-    )
+    actor_id = str(current_user.get('id') or current_user.get('email', 'delivery'))
+    performer_email = str(current_user.get('email', 'system@local')).strip().lower()
+
+    # Auto-advance shipment through intermediate stages to reach OUT_FOR_DELIVERY
+    shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or shipment
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    advance_stages = []
+    if shipment_status == 'DISPATCHED':
+        advance_stages = ['IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
+    elif shipment_status == 'IN_TRANSIT':
+        advance_stages = ['ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
+    else:
+        advance_stages = ['OUT_FOR_DELIVERY']
+
+    updated_shipment = shipment
+    for stage in advance_stages:
+        try:
+            updated_shipment = transition_shipment_status(
+                updated_shipment,
+                stage,
+                actor_id=actor_id,
+                performer_role='DELIVERY_ASSOCIATE',
+                performer_email=performer_email,
+                location=location_value if stage == 'OUT_FOR_DELIVERY' else (updated_shipment.get('current_location') or 'Hub network'),
+            )
+            updated_shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or updated_shipment
+        except Exception:
+            break
     orders_collection.update_one(
         active_orders_filter({'order_id': order_id}),
         {
@@ -5748,7 +5794,7 @@ def mark_out_for_delivery_alias(
         raise HTTPException(status_code=404, detail='Order not found.')
 
     current_status = normalize_order_status(order.get('status', 'PLACED'))
-    if current_status != 'SHIPPED':
+    if current_status not in {'SHIPPED', 'DISPATCHED'}:
         raise HTTPException(status_code=400, detail='Order not ready for delivery')
 
     return mark_out_for_delivery(order_id, payload, current_user)
@@ -6294,7 +6340,7 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
     user_id = current_user.get('id')
     
     # Fetch orders assigned to this delivery partner
-    # Include: SHIPPED (with shipment ARRIVED_AT_CITY), OUT_FOR_DELIVERY, DELIVERED, DELIVERY_FAILED
+    # Include all statuses from SHIPPED onward, plus DISPATCHED in case of sync lag
     orders = list(
         orders_collection.find(
             active_orders_filter({
@@ -6302,7 +6348,7 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
                     {'assigned_delivery_partner': email},
                     {'assigned_delivery_id': user_id},
                 ],
-                'status': {'$in': ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
+                'status': {'$in': ['DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
             })
         ).sort('updated_at', -1)
     )
@@ -6311,14 +6357,13 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
     for order in orders:
         payload = serialize_order(order, include_shipment=True)
         
-        # Filter: only show orders with shipment status ARRIVED_AT_CITY or later stages
         shipment_status = str((payload.get('shipment') or {}).get('status') or '').upper()
         order_status = str(payload.get('status') or '').upper()
         
-        # Skip orders that haven't reached the city yet
-        # Show if: shipment ARRIVED_AT_CITY/OUT_FOR_DELIVERY/DELIVERED OR order OUT_FOR_DELIVERY/DELIVERED
-        valid_shipment_statuses = {'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'}
-        valid_order_statuses = {'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}
+        # Show orders that are assigned to this partner and have been dispatched or further
+        # Include all shipment stages from DISPATCHED onward so partner sees incoming orders
+        valid_shipment_statuses = {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'}
+        valid_order_statuses = {'DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}
         
         if shipment_status not in valid_shipment_statuses and order_status not in valid_order_statuses:
             continue
@@ -6364,7 +6409,107 @@ def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASS
     return {'orders': enriched_orders}
 
 
-@app.get('/delivery/profile')
+@app.get('/delivery/pincode-orders')
+def get_delivery_pincode_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    """
+    Returns all active (non-delivered, non-cancelled) orders whose destination_pincode
+    is in the delivery partner's service_pincodes list — regardless of assignment.
+    This lets the partner see and self-assign orders that belong to their coverage area.
+    """
+    email = current_user['email'].strip().lower()
+    user_id = current_user.get('id')
+    profile = normalize_delivery_partner_profile_for_scope(
+        current_user.get('profile_details') or {},
+        is_demo_partner=is_demo_delivery_partner_account(current_user),
+    )
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
+
+    if not service_pincodes and not is_delivery_partner_all_india(profile):
+        return {'orders': [], 'message': 'No service pincodes configured in your profile.'}
+
+    # Build the query: all non-terminal orders for this partner's pincodes
+    active_statuses = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'DISPATCHED', 'OUT_FOR_DELIVERY']
+    if is_delivery_partner_all_india(profile):
+        pincode_filter = active_orders_filter({'status': {'$in': active_statuses}})
+    else:
+        pincode_filter = active_orders_filter({
+            'destination_pincode': {'$in': service_pincodes},
+            'status': {'$in': active_statuses},
+        })
+
+    orders = list(orders_collection.find(pincode_filter).sort('created_at', -1).limit(100))
+
+    enriched = []
+    for order in orders:
+        payload = serialize_order(order, include_shipment=True)
+        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
+        customer_name = str(shipping.get('full_name') or payload.get('customer_email') or 'Customer').strip()
+        delivery_address = ', '.join(filter(None, [
+            str(shipping.get('address') or '').strip(),
+            str(shipping.get('city') or '').strip(),
+            str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
+        ]))
+        payload['customer_name'] = customer_name
+        payload['delivery_address'] = delivery_address
+        payload['order_value'] = float(payload.get('total_amount') or 0)
+        assigned_to_me = (
+            payload.get('assigned_delivery_partner') == email
+            or payload.get('assigned_delivery_id') == user_id
+        )
+        payload['assigned_to_me'] = assigned_to_me
+        enriched.append(payload)
+
+    return {'orders': enriched}
+
+
+@app.post('/delivery/orders/{order_id}/self-assign')
+def self_assign_delivery_order(order_id: str, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    """
+    Lets a delivery partner self-assign an unassigned order whose destination_pincode
+    is in their service_pincodes list.
+    """
+    email = current_user['email'].strip().lower()
+    user_id = current_user.get('id')
+    profile = normalize_delivery_partner_profile_for_scope(
+        current_user.get('profile_details') or {},
+        is_demo_partner=is_demo_delivery_partner_account(current_user),
+    )
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
+
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    order_pincode = str(order.get('destination_pincode') or order.get('shipping_details', {}).get('pincode') or '').strip()
+    if not is_delivery_partner_all_india(profile) and order_pincode not in service_pincodes:
+        raise HTTPException(status_code=403, detail='This order is outside your service pincode coverage.')
+
+    # Ensure order has a shipment — create one if missing
+    if not order.get('shipment_id'):
+        order_status = normalize_order_status(order.get('status', 'PLACED'))
+        if order_status == 'PLACED':
+            order = apply_order_status_update(order, 'CONFIRMED', 'system-auto', location='Auto-confirmed', performer_role='ADMIN', performer_email='system@local')
+            order = orders_collection.find_one({'order_id': order_id}) or order
+        if normalize_order_status(order.get('status', 'PLACED')) in {'PLACED', 'CONFIRMED'}:
+            order = apply_order_status_update(order, 'PACKED', 'system-auto', location='Auto-packed', performer_role='OPERATIONS_STAFF', performer_email='system@local')
+            order = orders_collection.find_one({'order_id': order_id}) or order
+        new_shipment = create_shipment_from_order(order, None, status='CREATED')
+        transition_shipment_status(new_shipment, 'DISPATCHED', actor_id='system-auto', performer_role='SYSTEM', performer_email='system@local', location='Warehouse auto-dispatch')
+
+    orders_collection.update_one(
+        active_orders_filter({'order_id': order_id}),
+        {
+            '$set': {
+                'assigned_delivery_partner': email,
+                'assigned_delivery_id': user_id,
+                'delivery_meta.assigned_at': now_utc().isoformat(),
+                'delivery_meta.assignment_source': 'self_assigned',
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    latest = orders_collection.find_one({'order_id': order_id}) or order
+    return {'message': 'Order self-assigned successfully.', 'order': serialize_order(latest, include_shipment=True)}
 def get_delivery_profile(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
     profile_details = normalize_delivery_profile_details(current_user.get('profile_details') or {})
     return {
@@ -6428,22 +6573,32 @@ def update_delivery_profile(
     if payload.is_online is not None:
         profile_details['is_online'] = bool(payload.is_online)
 
-    # Handle service pincodes - remove All India feature
-    service_pincodes = parse_service_pincodes(payload.service_pincodes)
-    if not service_pincodes:
-        raise HTTPException(status_code=400, detail='At least one service pincode is required.')
-    
-    for service_pincode in service_pincodes:
-        if not is_valid_indian_pincode(service_pincode):
-            raise HTTPException(status_code=400, detail=f'Invalid pincode: {service_pincode}. Each service pincode must be a valid 6-digit pincode.')
-    
-    # Save pincodes - no All India feature
-    profile_details['allow_all_india'] = False
-    profile_details['service_scope'] = 'LOCAL'
-    profile_details['service_pincodes'] = service_pincodes
-    profile_details['service_pincode'] = service_pincodes[0] if service_pincodes else None
-    
-    print(f"[PROFILE_UPDATE] Saving pincodes for {current_user.get('email')}: {service_pincodes}")
+    # Handle service pincodes — only update if explicitly provided in this request
+    if payload.service_pincodes is not None:
+        service_pincodes = parse_service_pincodes(payload.service_pincodes)
+        if not service_pincodes:
+            raise HTTPException(status_code=400, detail='At least one service pincode is required.')
+
+        for service_pincode in service_pincodes:
+            if not is_valid_indian_pincode(service_pincode):
+                raise HTTPException(status_code=400, detail=f'Invalid pincode: {service_pincode}. Each service pincode must be a valid 6-digit pincode.')
+
+        # Save pincodes
+        profile_details['allow_all_india'] = False
+        profile_details['service_scope'] = 'LOCAL'
+        profile_details['service_pincodes'] = service_pincodes
+        profile_details['service_pincode'] = service_pincodes[0] if service_pincodes else None
+        print(f"[PROFILE_UPDATE] Saving pincodes for {current_user.get('email')}: {service_pincodes}")
+    else:
+        # Keep existing pincodes unchanged; ensure fields are consistent
+        existing_pincodes = parse_service_pincodes(
+            profile_details.get('service_pincodes') or profile_details.get('service_pincode')
+        )
+        if existing_pincodes:
+            profile_details['service_pincodes'] = existing_pincodes
+            profile_details['service_pincode'] = existing_pincodes[0]
+        profile_details['allow_all_india'] = False
+        profile_details['service_scope'] = 'LOCAL'
 
     users_collection.update_one(
         {'id': current_user.get('id')},

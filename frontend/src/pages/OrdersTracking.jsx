@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useRef } from 'react'
 import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders } from '../utils/auth'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
+import DeliveryRating from '../components/DeliveryRating'
 import { fetchCatalogProducts, fetchRecommendationsForCustomer } from '../utils/catalog'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -465,6 +466,11 @@ export default function OrdersTracking() {
                       </div>
                     ) : null}
                   </div>
+
+                  {/* Delivery rating — shown only for delivered orders */}
+                  {(normalizeStatus(order?.status) === 'DELIVERED' || getShipmentStatus(order) === 'DELIVERED') ? (
+                    <DeliveryRating orderId={order.order_id} />
+                  ) : null}
                 </article>
               )
             })}
