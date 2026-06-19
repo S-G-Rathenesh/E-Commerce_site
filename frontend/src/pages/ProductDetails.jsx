@@ -274,6 +274,13 @@ export default function ProductDetails() {
   const [activeImageIndex, setActiveImageIndex] = useState(0)
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [actionMessage, setActionMessage] = useState('')
+  const [productReviews, setProductReviews] = useState([])
+  const [reviewsLoading, setReviewsLoading] = useState(true)
+  const [reviewStats, setReviewStats] = useState({
+    total_reviews: 0,
+    average_rating: 0,
+    rating_distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+  })
 
   useEffect(() => {
     let active = true
@@ -284,13 +291,14 @@ export default function ProductDetails() {
       setRelatedLoading(true)
       setRecommendedLoading(true)
       setRecentlyViewedLoading(true)
+      setReviewsLoading(true)
 
       try {
         const recentSeedIds = readRecentlyViewedIds().filter((value) => value !== Number(id))
         const cartIds = discoveryProductsToIdList(getCartItems(currentUser))
         const wishlistIds = discoveryProductsToIdList(getWishlistItems({ user: currentUser }))
 
-        const [productResult, bundleResult, relatedResult, recommendedResult, recentlyViewedResult] = await Promise.allSettled([
+        const [productResult, bundleResult, relatedResult, recommendedResult, recentlyViewedResult, reviewsResult] = await Promise.allSettled([
           fetchCatalogProductById(id),
           fetchCatalogFrequentlyBought(id),
           fetchCatalogRelatedProducts(id),
@@ -300,6 +308,7 @@ export default function ProductDetails() {
             viewed_ids: recentSeedIds,
           }),
           fetchCatalogRecentlyViewed(recentSeedIds),
+          fetch(`${API_BASE}/products/${id}/reviews`).then(res => res.json()),
         ])
 
         if (!active) {
@@ -311,6 +320,7 @@ export default function ProductDetails() {
         const relatedData = relatedResult.status === 'fulfilled' ? relatedResult.value : []
         const recommendedData = recommendedResult.status === 'fulfilled' ? recommendedResult.value : []
         const recentlyViewedData = recentlyViewedResult.status === 'fulfilled' ? recentlyViewedResult.value : []
+        const reviewsData = reviewsResult.status === 'fulfilled' ? reviewsResult.value : { reviews: [], total_reviews: 0, average_rating: 0, rating_distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } }
 
         if (productData?.id) {
           recordRecentlyViewedId(productData.id)
@@ -322,12 +332,19 @@ export default function ProductDetails() {
         setRecommendedProducts(Array.isArray(recommendedData) ? recommendedData.map(normalizeDiscoveryProduct).filter(Boolean) : [])
         const fallbackRecent = Array.isArray(recentlyViewedData) ? recentlyViewedData.map(normalizeDiscoveryProduct).filter(Boolean) : []
         setRecentlyViewedProducts(fallbackRecent.length > 0 ? fallbackRecent : relatedData.map(normalizeDiscoveryProduct).filter(Boolean).slice(0, 4))
+        setProductReviews(reviewsData.reviews || [])
+        setReviewStats({
+          total_reviews: reviewsData.total_reviews || 0,
+          average_rating: reviewsData.average_rating || 0,
+          rating_distribution: reviewsData.rating_distribution || { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+        })
         setActiveImageIndex(0)
       } finally {
         if (active) {
           setLoading(false)
           setBundleLoading(false)
           setRelatedLoading(false)
+          setReviewsLoading(false)
           setRecommendedLoading(false)
           setRecentlyViewedLoading(false)
         }
@@ -836,33 +853,38 @@ export default function ProductDetails() {
       <AnimatedSection as="section" className="detail-reviews" delay={0.06}>
         <div className="detail-reviews-head">
           <div>
-            <h2>Client Reviews</h2>
+            <h2>Customer Reviews</h2>
             <p>
-              <span>{renderedStars}</span> 4.8 out of 5 (128 reviews)
+              <span>{renderedStars}</span> {reviewStats.average_rating.toFixed(1)} out of 5 ({reviewStats.total_reviews} {reviewStats.total_reviews === 1 ? 'review' : 'reviews'})
             </p>
           </div>
-          <button type="button" className="btn btn-secondary">
-            Write a Review
-          </button>
         </div>
 
-        <div className="detail-review-grid">
-          {reviews.map((review) => (
-            <article key={review.id} className="detail-review-card">
-              <div className="detail-review-meta">
-                <div className="detail-review-avatar">{review.name.slice(0, 2).toUpperCase()}</div>
-                <div>
-                  <h3>{review.name}</h3>
-                  <p>
-                    {review.tag} • {review.age}
-                  </p>
+        {reviewsLoading ? (
+          <p>Loading reviews...</p>
+        ) : productReviews.length > 0 ? (
+          <div className="detail-review-grid">
+            {productReviews.map((review) => (
+              <article key={review.review_id} className="detail-review-card">
+                <div className="detail-review-meta">
+                  <div className="detail-review-avatar">{review.customer_name.slice(0, 2).toUpperCase()}</div>
+                  <div>
+                    <h3>{review.customer_name}</h3>
+                    <p>
+                      Verified Buyer • {new Date(review.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </p>
+                  </div>
+                  <strong>{'★'.repeat(review.rating)}{'☆'.repeat(5 - review.rating)}</strong>
                 </div>
-                <strong>{'★'.repeat(review.rating)}</strong>
-              </div>
-              <p>{review.text}</p>
-            </article>
-          ))}
-        </div>
+                {review.review_text && <p>{review.review_text}</p>}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="no-reviews-message">
+            <p>No reviews yet. Be the first to review this product!</p>
+          </div>
+        )}
 
         <div className="detail-review-foot">
           <Link to="/products" className="btn btn-link">

@@ -3,6 +3,7 @@ import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders } from '../utils/auth'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
 import DeliveryRating from '../components/DeliveryRating'
+import ProductReview from '../components/ProductReview'
 import { fetchCatalogProducts, fetchRecommendationsForCustomer } from '../utils/catalog'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -119,6 +120,8 @@ export default function OrdersTracking() {
   const [activeTab, setActiveTab] = useState('orders')
   const [expandedSpecs, setExpandedSpecs] = useState({})
   const [modalOrder, setModalOrder] = useState(null)
+  const [reviewProductId, setReviewProductId] = useState(null)
+  const [reviewOrderId, setReviewOrderId] = useState(null)
   const [recommendations, setRecommendations] = useState([])
   const [recsLoading, setRecsLoading] = useState(false)
   const [toastMessage, setToastMessage] = useState('')
@@ -298,6 +301,16 @@ export default function OrdersTracking() {
 
   const openDetailsModal = (order) => setModalOrder(order)
   const closeDetailsModal = () => setModalOrder(null)
+  
+  const openReviewForm = (productId, orderId) => {
+    setReviewProductId(productId)
+    setReviewOrderId(orderId)
+  }
+  
+  const closeReviewForm = () => {
+    setReviewProductId(null)
+    setReviewOrderId(null)
+  }
 
   return (
     <PageWrapper eyebrow="Orders" title="My Orders" description="Your purchases and tracking summarized in a clean, Amazon-style layout.">
@@ -432,7 +445,9 @@ export default function OrdersTracking() {
                       {status === 'DELIVERED' ? (
                         <>
                           <button className="btn btn-primary" onClick={() => window.location.assign('/products')}>Buy Again</button>
-                          <button className="btn btn-secondary">Write Review</button>
+                          <button className="btn btn-secondary" onClick={() => openReviewForm(primary.product_id || primary.id, order.order_id)}>
+                            ⭐ Write Review
+                          </button>
                           <button className="btn btn-secondary" onClick={() => window.location.assign(`/product/${primary.product_id || primary.id}`)}>View Product</button>
                         </>
                       ) : status === 'SHIPPED' ? (
@@ -466,6 +481,19 @@ export default function OrdersTracking() {
                       </div>
                     ) : null}
                   </div>
+
+                  {/* Product Review Form - shown only for DELIVERED orders */}
+                  {status === 'DELIVERED' && reviewProductId === (primary.product_id || primary.id) && reviewOrderId === order.order_id ? (
+                    <ProductReview
+                      productId={primary.product_id || primary.id}
+                      orderId={order.order_id}
+                      onSubmitSuccess={() => {
+                        closeReviewForm()
+                        setToastMessage('✅ Review submitted successfully!')
+                        setTimeout(() => setToastMessage(''), 3000)
+                      }}
+                    />
+                  ) : null}
 
                   {/* Delivery rating — shown only for delivered orders */}
                   {(normalizeStatus(order?.status) === 'DELIVERED' || getShipmentStatus(order) === 'DELIVERED') ? (

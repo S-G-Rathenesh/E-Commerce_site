@@ -522,6 +522,13 @@ class WishlistRequest(BaseModel):
     product_id: int
 
 
+class ProductReviewRequest(BaseModel):
+    rating: int  # 1-5 stars
+    review_text: str | None = None
+    order_id: str
+
+
+
 SEED_PRODUCTS = [
     {
         'id': 1,
@@ -1028,6 +1035,7 @@ delivery_coverage_collection = database['delivery_coverage']
 payments_collection = database['payments']
 returns_collection = database['returns']
 notifications_collection = database['notifications']
+product_reviews_collection = database['product_reviews']
 wishlists_collection = database['wishlists']
 # NEW: Shipping system collections
 merchant_shipping_settings_collection = database['merchant_shipping_settings']
@@ -3809,6 +3817,163 @@ def get_recently_viewed(ids: str | None = None):
     return get_recently_viewed_products(parse_id_list(ids))
 
 
+# ============================================================================
+# PRODUCT REVIEWS ENDPOINTS
+# ============================================================================
+
+@app.post('/products/{product_id}/reviews')
+def create_product_review(
+    product_id: int,
+    payload: ProductReviewRequest,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Submit a product review with star rating and optional text feedback"""
+    # Validate rating
+    if not (1 <= payload.rating <= 5):
+        raise HTTPException(status_code=400, detail='Rating must be between 1 and 5 stars')
+    
+    # Check if product exists
+    product = products_collection.find_one({'id': product_id})
+    if not product and product_id not in [p['id'] for p in SEED_PRODUCTS]:
+        raise HTTPException(status_code=404, detail='Product not found')
+    
+    # Check if order exists and belongs to user
+    order = orders_collection.find_one({
+        'order_id': payload.order_id,
+        '$or': [
+            {'customer_email': current_user['email']},
+            {'user_id': current_user.get('id')},
+            {'user_id': current_user['email']}
+        ]
+    })
+    
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found or does not belong to you')
+    
+    # Check if order contains this product
+    product_in_order = False
+    for item in order.get('items', []):
+        if int(item.get('product_id', 0)) == int(product_id):
+            product_in_order = True
+            break
+    
+    if not product_in_order:
+        raise HTTPException(status_code=400, detail='You can only review products you have purchased')
+    
+    # Check if order is delivered
+    if normalize_order_status(order.get('status', '')) != 'DELIVERED':
+        raise HTTPException(status_code=400, detail='You can only review products from delivered orders')
+    
+    # Check if user already reviewed this product from this order
+    existing_review = product_reviews_collection.find_one({
+        'product_id': product_id,
+        'order_id': payload.order_id,
+        'customer_email': current_user['email']
+    })
+    
+    if existing_review:
+        # Update existing review
+        product_reviews_collection.update_one(
+            {'_id': existing_review['_id']},
+            {
+                '$set': {
+                    'rating': payload.rating,
+                    'review_text': (payload.review_text or '').strip(),
+                    'updated_at': now_utc().isoformat(),
+                }
+            }
+        )
+        return {'message': 'Review updated successfully', 'review_id': str(existing_review['_id'])}
+    
+    # Create new review
+    review_id = str(uuid4())
+    review_document = {
+        'review_id': review_id,
+        'product_id': product_id,
+        'order_id': payload.order_id,
+        'customer_email': current_user['email'],
+        'customer_name': current_user.get('full_name') or current_user.get('name') or 'Customer',
+        'customer_id': current_user.get('id'),
+        'rating': payload.rating,
+        'review_text': (payload.review_text or '').strip(),
+        'status': 'APPROVED',  # Auto-approve for now
+        'helpful_count': 0,
+        'created_at': now_utc().isoformat(),
+        'updated_at': now_utc().isoformat(),
+    }
+    
+    product_reviews_collection.insert_one(review_document)
+    
+    # Update product average rating
+    update_product_rating(product_id)
+    
+    return {
+        'message': 'Review submitted successfully',
+        'review_id': review_id,
+    }
+
+
+@app.get('/products/{product_id}/reviews')
+def get_product_reviews(product_id: int, limit: int = 20, offset: int = 0):
+    """Get all reviews for a product"""
+    reviews = list(
+        product_reviews_collection.find(
+            {'product_id': product_id, 'status': 'APPROVED'},
+            {'_id': 0}
+        )
+        .sort('created_at', -1)
+        .skip(offset)
+        .limit(limit)
+    )
+    
+    # Get review stats
+    all_reviews = list(product_reviews_collection.find(
+        {'product_id': product_id, 'status': 'APPROVED'},
+        {'rating': 1}
+    ))
+    
+    total_reviews = len(all_reviews)
+    average_rating = sum(r['rating'] for r in all_reviews) / total_reviews if total_reviews > 0 else 0
+    
+    # Rating distribution
+    rating_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    for review in all_reviews:
+        rating_counts[review['rating']] = rating_counts.get(review['rating'], 0) + 1
+    
+    return {
+        'reviews': reviews,
+        'total_reviews': total_reviews,
+        'average_rating': round(average_rating, 1),
+        'rating_distribution': rating_counts,
+    }
+
+
+def update_product_rating(product_id: int):
+    """Update product's average rating and review count"""
+    reviews = list(product_reviews_collection.find(
+        {'product_id': product_id, 'status': 'APPROVED'},
+        {'rating': 1}
+    ))
+    
+    if not reviews:
+        return
+    
+    total_reviews = len(reviews)
+    average_rating = sum(r['rating'] for r in reviews) / total_reviews
+    
+    # Update product in database
+    products_collection.update_one(
+        {'id': product_id},
+        {
+            '$set': {
+                'rating': round(average_rating, 1),
+                'review_count': total_reviews,
+                'updated_at': now_utc(),
+            }
+        }
+    )
+
+
 @app.get('/recommendations/{customer_id}')
 def get_recommendations_for_customer(customer_id: str, limit: int = 15):
     """Return a ranked list of recommended products for a customer.
@@ -5019,13 +5184,27 @@ def create_shipment_from_order(order: dict, current_user: dict | None = None, st
         'assigned_partner_id': None,
         'assigned_partner_email': None,
         'route': route,
+        'tracking_id': f'TRK-{uuid4().hex[:12].upper()}',
+        'courier_name': 'BlueDart',
+        'vehicle_type': 'VAN',
         'created_at': now_utc(),
         'updated_at': now_utc(),
         'updated_by': str((current_user or {}).get('id') or (current_user or {}).get('email') or 'system'),
     }
+    
+    # Remove created_at and tracking_id from document before update - will be set by $setOnInsert
+    created_at_value = shipment_document.pop('created_at')
+    tracking_id_value = shipment_document.pop('tracking_id')
+    
     shipments_collection.update_one(
         {'shipment_id': shipment_id},
-        {'$set': shipment_document, '$setOnInsert': {'created_at': now_utc()}},
+        {
+            '$set': shipment_document,
+            '$setOnInsert': {
+                'created_at': created_at_value,
+                'tracking_id': tracking_id_value,
+            }
+        },
         upsert=True,
     )
     shipment = shipments_collection.find_one({'shipment_id': shipment_id}) or shipment_document
@@ -5349,29 +5528,8 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
             user_id=str(current_user.get('id') or current_user.get('email') or ''),
         )
 
-    # AUTO-PROCESS: Immediately confirm → pack → create+dispatch shipment so it flows to delivery
-    try:
-        placed_order = orders_collection.find_one({'order_id': order_id}) or order_document
-        # CONFIRM
-        placed_order = apply_order_status_update(
-            placed_order, 'CONFIRMED', 'system-auto',
-            location='Auto-confirmed', performer_role='ADMIN', performer_email='system@local',
-        )
-        placed_order = orders_collection.find_one({'order_id': order_id}) or placed_order
-        # PACK + create shipment + dispatch
-        placed_order = apply_order_status_update(
-            placed_order, 'PACKED', 'system-auto',
-            location='Auto-packed', performer_role='OPERATIONS_STAFF', performer_email='system@local',
-        )
-        placed_order = orders_collection.find_one({'order_id': order_id}) or placed_order
-        new_shipment = create_shipment_from_order(placed_order, None, status='CREATED')
-        transition_shipment_status(
-            new_shipment, 'DISPATCHED',
-            actor_id='system-auto', performer_role='SYSTEM', performer_email='system@local',
-            location='Warehouse auto-dispatch',
-        )
-    except Exception:
-        pass  # If auto-process fails, order stays at PLACED — admin can process manually
+    # Order stays at PLACED status - admin must manually confirm
+    # Manual workflow: PLACED → admin confirms → CONFIRMED → operations packs → PACKED → auto-create shipment → SHIPPED
 
     latest = orders_collection.find_one({'order_id': order_id})
     return {'message': 'Order placed successfully.', 'order': serialize_order(latest, include_shipment=True)}
@@ -5789,14 +5947,7 @@ def mark_out_for_delivery_alias(
     payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    current_status = normalize_order_status(order.get('status', 'PLACED'))
-    if current_status not in {'SHIPPED', 'DISPATCHED'}:
-        raise HTTPException(status_code=400, detail='Order not ready for delivery')
-
+    # Delegate to the main function which has proper shipment status validation
     return mark_out_for_delivery(order_id, payload, current_user)
 
 
@@ -6484,17 +6635,36 @@ def self_assign_delivery_order(order_id: str, current_user: dict = Depends(requi
     if not is_delivery_partner_all_india(profile) and order_pincode not in service_pincodes:
         raise HTTPException(status_code=403, detail='This order is outside your service pincode coverage.')
 
-    # Ensure order has a shipment — create one if missing
+    # Ensure order has a shipment — create one if missing for backward compatibility
     if not order.get('shipment_id'):
         order_status = normalize_order_status(order.get('status', 'PLACED'))
-        if order_status == 'PLACED':
-            order = apply_order_status_update(order, 'CONFIRMED', 'system-auto', location='Auto-confirmed', performer_role='ADMIN', performer_email='system@local')
-            order = orders_collection.find_one({'order_id': order_id}) or order
-        if normalize_order_status(order.get('status', 'PLACED')) in {'PLACED', 'CONFIRMED'}:
-            order = apply_order_status_update(order, 'PACKED', 'system-auto', location='Auto-packed', performer_role='OPERATIONS_STAFF', performer_email='system@local')
-            order = orders_collection.find_one({'order_id': order_id}) or order
-        new_shipment = create_shipment_from_order(order, None, status='CREATED')
-        transition_shipment_status(new_shipment, 'DISPATCHED', actor_id='system-auto', performer_role='SYSTEM', performer_email='system@local', location='Warehouse auto-dispatch')
+        
+        # Only auto-create shipment for PACKED or higher status orders
+        if order_status in {'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY'}:
+            try:
+                # Create shipment from order details
+                new_shipment = create_shipment_from_order(order, current_user, status='CREATED')
+                
+                # Auto-dispatch the shipment
+                updated_shipment = transition_shipment_status(
+                    new_shipment,
+                    'DISPATCHED',
+                    actor_id=str(current_user.get('id') or current_user.get('email', 'system')),
+                    performer_role='DELIVERY_ASSOCIATE',
+                    performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+                    location='Delivery partner accepting order',
+                )
+                
+                # Reload order to get updated shipment_id
+                order = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+            except Exception as e:
+                import traceback
+                print(f"Error creating shipment for order {order_id}: {str(e)}")
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f'Failed to create shipment: {str(e)}')
+        else:
+            # Order is not yet packed - cannot be assigned to delivery partner
+            raise HTTPException(status_code=400, detail='Order must be confirmed and packed before delivery partner assignment. Contact operations.')
 
     orders_collection.update_one(
         active_orders_filter({'order_id': order_id}),
