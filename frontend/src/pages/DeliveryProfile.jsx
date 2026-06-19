@@ -39,9 +39,7 @@ function buildFormFromProfile(nextUser, nextProfile, currentForm = EMPTY_PROFILE
     profile_image_url: nextProfile?.profile_image_url || currentForm.profile_image_url || '',
     city: nextProfile?.city || nextUser?.city || currentForm.city || '',
     state: nextProfile?.state || nextUser?.state || currentForm.state || '',
-    allow_all_india:
-      Boolean(nextProfile?.allow_all_india || String(nextProfile?.service_scope || '').toUpperCase() === 'ALL_INDIA') ||
-      currentForm.allow_all_india,
+    allow_all_india: false,
     service_pincodes:
       Array.isArray(nextProfile?.service_pincodes) && nextProfile.service_pincodes.length > 0
         ? nextProfile.service_pincodes
@@ -67,14 +65,11 @@ export default function DeliveryProfile() {
 
   const profileDetails = currentUser?.profile_details || {}
   const coverageLabel = useMemo(() => {
-    if (form.allow_all_india) {
-      return 'All India coverage enabled'
-    }
     if (form.service_pincodes.length === 0) {
       return 'Add at least one service pincode'
     }
-    return `${form.service_pincodes.length} service pincodes active`
-  }, [form.allow_all_india, form.service_pincodes.length])
+    return `${form.service_pincodes.length} service pincode${form.service_pincodes.length === 1 ? '' : 's'} active`
+  }, [form.service_pincodes.length])
 
   const refreshAccessToken = async () => {
     const user = getStoredUser()
@@ -205,12 +200,12 @@ export default function DeliveryProfile() {
     }
     setForm((current) => {
       if (current.service_pincodes.includes(cleaned)) {
+        setMessage(`Pincode ${cleaned} is already in your service list.`)
         return current
       }
       return {
         ...current,
         service_pincodes: [...current.service_pincodes, cleaned],
-        allow_all_india: false,
       }
     })
     setNewPincode('')
@@ -224,20 +219,19 @@ export default function DeliveryProfile() {
     }))
   }
 
-  const handleToggleAllIndia = () => {
-    setForm((current) => ({
-      ...current,
-      allow_all_india: !current.allow_all_india,
-      service_pincodes: !current.allow_all_india ? [] : current.service_pincodes,
-    }))
-  }
-
   const handleSaveProfile = async (event) => {
     event.preventDefault()
     if (imageUploading) {
       setMessage('Please wait for the image upload to finish before saving.')
       return
     }
+    
+    // Validate at least one pincode
+    if (form.service_pincodes.length === 0) {
+      setMessage('Please add at least one service pincode.')
+      return
+    }
+    
     setSaving(true)
     setMessage('')
 
@@ -252,8 +246,8 @@ export default function DeliveryProfile() {
         profile_image_url: form.profile_image_url,
         city: form.city,
         state: form.state,
-        allow_all_india: form.allow_all_india,
-        service_pincodes: form.allow_all_india ? [] : form.service_pincodes,
+        allow_all_india: false,
+        service_pincodes: form.service_pincodes,
       }
 
       const response = await requestWithAuth(`${API_BASE}/delivery/profile`, {
@@ -286,7 +280,6 @@ export default function DeliveryProfile() {
         service_pincodes: Array.isArray(data?.profile_details?.service_pincodes)
           ? data.profile_details.service_pincodes
           : current.service_pincodes,
-        allow_all_india: Boolean(data?.profile_details?.allow_all_india || current.allow_all_india),
       }))
       window.localStorage.removeItem(draftStorageKey)
       setMessage('Delivery profile saved successfully.')
@@ -346,12 +339,6 @@ export default function DeliveryProfile() {
                 </div>
               </div>
               <label className="field-group">
-                <span className="field-label">Service coverage</span>
-                <button type="button" className={`btn ${form.allow_all_india ? 'btn-primary' : 'btn-secondary'}`} onClick={handleToggleAllIndia}>
-                  {form.allow_all_india ? 'All India enabled' : 'Switch to All India'}
-                </button>
-              </label>
-              <label className="field-group">
                 <span className="field-label">Add service pincode</span>
                 <div className="row-gap">
                   <input
@@ -359,9 +346,8 @@ export default function DeliveryProfile() {
                     value={newPincode}
                     onChange={(event) => setNewPincode(sanitizePincode(event.target.value))}
                     placeholder="560001"
-                    disabled={form.allow_all_india}
                   />
-                  <button type="button" className="btn btn-secondary" onClick={handleAddPincode} disabled={form.allow_all_india}>
+                  <button type="button" className="btn btn-secondary" onClick={handleAddPincode}>
                     Add
                   </button>
                 </div>

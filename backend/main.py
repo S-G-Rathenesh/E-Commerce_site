@@ -828,8 +828,9 @@ SEED_USERS = {
             'vehicle_number': 'KA01DEMO01',
             'driving_license_number': 'DL-DEMO-2026',
             'availability': 'FULL_TIME',
-            'service_scope': 'ALL_INDIA',
-            'allow_all_india': True,
+            'service_scope': 'LOCAL',
+            'allow_all_india': False,
+            'service_pincodes': ['560001', '560002', '560003', '560004', '560005'],
         },
     },
     'ops.demo@veloura.com': {
@@ -2605,10 +2606,16 @@ def get_location_for_pincode(pincode: str) -> dict:
 
 
 def delivery_bucket(user_location: dict, warehouse: dict) -> int:
-    if user_location['city'] == warehouse['city'] and user_location['state'] == warehouse['state']:
-        return 0
-    if user_location['state'] == warehouse['state']:
-        return 1
+    user_city = str(user_location.get('city', '')).strip()
+    user_state = str(user_location.get('state', '')).strip()
+    warehouse_city = str(warehouse.get('city', '')).strip()
+    warehouse_state = str(warehouse.get('state', '')).strip()
+    
+    if user_city and warehouse_city and user_state and warehouse_state:
+        if user_city == warehouse_city and user_state == warehouse_state:
+            return 0
+        if user_state == warehouse_state:
+            return 1
     return 2
 
 
@@ -2625,11 +2632,14 @@ def choose_best_warehouse(product_id: int, user_location: dict) -> dict:
         }
         return fallback
 
+    # Safe pincode comparison with fallback
+    user_pincode = str(user_location.get('pincode', '560001'))[:3]
+    
     ranked = sorted(
         candidates,
         key=lambda warehouse: (
             delivery_bucket(user_location, warehouse),
-            abs(int(user_location['pincode'][:3]) - int(str(warehouse['pincode'])[:3])),
+            abs(int(user_pincode) - int(str(warehouse.get('pincode', '560001'))[:3])),
         ),
     )
     return ranked[0]
@@ -2713,10 +2723,34 @@ def chunk_orders(values: list[dict], size: int) -> list[list[dict]]:
 
 
 def get_order_destination_location(order: dict) -> dict:
-    destination_pincode = sanitize_pincode(order.get('destination_pincode', ''))
+    """Extract destination location from order with multiple fallback sources"""
+    # Try to get from shipping_details first (most accurate)
+    shipping = order.get('shipping_details') or {}
+    city_from_shipping = str(shipping.get('city') or '').strip()
+    state_from_shipping = str(shipping.get('state') or '').strip()
+    
+    # If shipping has both city and state, use them
+    if city_from_shipping and state_from_shipping:
+        return {
+            'city': city_from_shipping,
+            'state': state_from_shipping,
+            'pincode': sanitize_pincode(shipping.get('pincode') or order.get('destination_pincode', ''))
+        }
+    
+    # Otherwise, resolve from pincode
+    destination_pincode = sanitize_pincode(order.get('destination_pincode') or shipping.get('pincode') or '')
     if not is_valid_indian_pincode(destination_pincode):
         destination_pincode = '560001'
-    return get_location_for_pincode(destination_pincode)
+    
+    location = get_location_for_pincode(destination_pincode)
+    
+    # Override with shipping details if available
+    if city_from_shipping:
+        location['city'] = city_from_shipping
+    if state_from_shipping:
+        location['state'] = state_from_shipping
+    
+    return location
 
 
 def get_warehouse_location(order: dict) -> dict:
@@ -2741,6 +2775,7 @@ def get_warehouse_location(order: dict) -> dict:
 
 
 def group_orders_for_shipments(orders: list[dict], max_orders_per_shipment: int) -> list[list[dict]]:
+    """Group orders by destination (warehouse, state, city) for shipment creation"""
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     for order in orders:
         destination = get_order_destination_location(order)
@@ -2748,11 +2783,22 @@ def group_orders_for_shipments(orders: list[dict], max_orders_per_shipment: int)
         city_key = normalize_city_name(destination.get('city', '')).lower()
         state_key = normalize_state_name(destination.get('state', '')).lower()
         group_key = (warehouse_id, state_key, city_key)
+        
+        # Debug logging
+        print(f"[GROUP_ORDERS] Order {order.get('order_id')}: warehouse={warehouse_id}, state={state_key}, city={city_key}")
+        print(f"[GROUP_ORDERS] Destination from order: {destination}")
+        
         grouped.setdefault(group_key, []).append(order)
+
+    print(f"[GROUP_ORDERS] Created {len(grouped)} shipment groups from {len(orders)} orders")
+    for group_key, group_orders in grouped.items():
+        print(f"[GROUP_ORDERS] Group {group_key}: {len(group_orders)} orders")
 
     batches: list[list[dict]] = []
     for group_orders in grouped.values():
         batches.extend(chunk_orders(group_orders, max_orders_per_shipment))
+    
+    print(f"[GROUP_ORDERS] Final batches: {len(batches)} shipments will be created")
     return batches
 
 
@@ -2918,20 +2964,28 @@ def seed_users() -> None:
         
         profile_details = account.get('profile_details') if isinstance(account.get('profile_details'), dict) else {}
         bank_details = profile_details.get('bank_details') if isinstance(profile_details.get('bank_details'), dict) else {}
+        user_role = normalize_role(account.get('role', 'CUSTOMER'))
         
-        user_document = {
-            'id': account.get('id') or f"USR-{uuid4().hex[:10].upper()}",
-            'name': account['full_name'],
-            'full_name': account['full_name'],
-            'email': email,
-            'provider': account.get('provider', 'email'),
-            'role': normalize_role(account.get('role', 'CUSTOMER')),
-            'status': normalize_account_status(account.get('status', 'ACTIVE')),
-            'merchant_status': normalize_merchant_status(
-                account.get('merchant_status', 'APPROVED' if normalize_role(account.get('role', 'CUSTOMER')) == 'ADMIN' else 'PENDING')
-            ),
-            'phone_number': str(account.get('phone_number') or '').strip(),
-            'profile_details': {
+        # Build profile_details based on role
+        if user_role == 'DELIVERY_ASSOCIATE':
+            # Delivery partner profile
+            user_profile = {
+                'phone_number': str(profile_details.get('phone_number') or account.get('phone_number') or '').strip(),
+                'vehicle_type': str(profile_details.get('vehicle_type') or '').strip().upper(),
+                'vehicle_number': str(profile_details.get('vehicle_number') or '').strip().upper(),
+                'driving_license_number': str(profile_details.get('driving_license_number') or '').strip().upper(),
+                'availability': str(profile_details.get('availability') or 'FULL_TIME').strip().upper(),
+                'service_scope': str(profile_details.get('service_scope') or 'LOCAL').strip().upper(),
+                'allow_all_india': bool(profile_details.get('allow_all_india', False)),
+                'service_pincodes': profile_details.get('service_pincodes') or [],
+                'profile_image_url': str(profile_details.get('profile_image_url') or '').strip(),
+                'city': str(profile_details.get('city') or '').strip(),
+                'state': str(profile_details.get('state') or '').strip(),
+                'is_online': bool(profile_details.get('is_online', True)),
+            }
+        else:
+            # Merchant/admin profile
+            user_profile = {
                 'store_name': str(profile_details.get('store_name') or '').strip(),
                 'gst_number': str(profile_details.get('gst_number') or '').strip(),
                 'logo_url': str(profile_details.get('logo_url') or '').strip(),
@@ -2941,7 +2995,24 @@ def seed_users() -> None:
                     'account_number': str(bank_details.get('account_number') or '').strip(),
                     'ifsc_code': str(bank_details.get('ifsc_code') or '').strip(),
                 },
-            },
+            }
+        
+        user_document = {
+            'id': account.get('id') or f"USR-{uuid4().hex[:10].upper()}",
+            'name': account['full_name'],
+            'full_name': account['full_name'],
+            'email': email,
+            'provider': account.get('provider', 'email'),
+            'role': user_role,
+            'status': normalize_account_status(account.get('status', 'ACTIVE')),
+            'merchant_status': normalize_merchant_status(
+                account.get('merchant_status', 'APPROVED' if user_role == 'ADMIN' else 'PENDING')
+            ),
+            'phone_number': str(account.get('phone_number') or profile_details.get('phone_number') or '').strip(),
+            'city': str(profile_details.get('city') or '').strip(),
+            'state': str(profile_details.get('state') or '').strip(),
+            'is_online': bool(profile_details.get('is_online', True)) if user_role == 'DELIVERY_ASSOCIATE' else False,
+            'profile_details': user_profile,
             'password_hash': hash_password(account['password']),
             'created_at': now_utc(),
             'updated_at': now_utc(),
@@ -4876,8 +4947,9 @@ def assign_last_mile_partner_for_shipment(shipment: dict, destination: dict, des
         profile = normalize_delivery_partner_profile_for_scope(partner.get('profile_details') or {}, is_demo_partner=is_demo_delivery_partner_account(partner))
         if not bool(partner.get('is_online', True)):
             continue
-        availability = str(profile.get('availability') or '').strip().lower()
-        if availability and availability != 'active':
+        availability = str(profile.get('availability') or '').strip().upper()
+        # Accept FULL_TIME, PART_TIME, ACTIVE, or empty (defaults to available)
+        if availability and availability not in {'FULL_TIME', 'PART_TIME', 'ACTIVE', 'AVAILABLE'}:
             continue
         service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
         if not is_delivery_partner_all_india(profile) and destination_pincode not in service_pincodes:
@@ -5158,6 +5230,7 @@ def create_order(payload: CreateOrderRequest, current_user: dict = Depends(requi
         'full_name': str(shipping_payload.get('full_name') or current_user.get('full_name') or current_user.get('name') or '').strip(),
         'phone': sanitize_phone_number(str(shipping_payload.get('phone') or current_user.get('phone_number') or '').strip()),
         'city': str(shipping_payload.get('city') or user_location.get('city') or '').strip(),
+        'state': str(shipping_payload.get('state') or user_location.get('state') or '').strip(),
         'address': str(shipping_payload.get('address') or '').strip(),
         'pincode': cleaned_pincode,
     }
@@ -6107,6 +6180,8 @@ def dispatch_shipment(
 @app.post('/shipments/auto')
 def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))):
     packed_orders = list(orders_collection.find(active_orders_filter({'status': 'PACKED'})).sort('created_at', 1))
+    print(f"[AUTO_CREATE_SHIPMENTS] Found {len(packed_orders)} PACKED orders")
+    
     if not packed_orders:
         return {
             'message': 'No packed orders available for auto shipment creation.',
@@ -6114,6 +6189,11 @@ def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict
             'shipments_created': 0,
             'order_ids': [],
         }
+
+    for order in packed_orders:
+        print(f"[AUTO_CREATE_SHIPMENTS] Order {order.get('order_id')}: shipment_id={order.get('shipment_id')}, destination_pincode={order.get('destination_pincode')}")
+        shipping = order.get('shipping_details') or {}
+        print(f"[AUTO_CREATE_SHIPMENTS] Shipping details: city={shipping.get('city')}, state={shipping.get('state')}, pincode={shipping.get('pincode')}")
 
     order_ids = [order['order_id'] for order in packed_orders]
     request_payload = CreateShipmentRequest(
@@ -6124,7 +6204,9 @@ def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict
         assigned_delivery_id=None,
         max_orders_per_shipment=payload.max_orders_per_shipment,
     )
-    return create_shipment(request_payload, current_user)
+    result = create_shipment(request_payload, current_user)
+    print(f"[AUTO_CREATE_SHIPMENTS] Result: {result.get('shipments_created')} shipments created")
+    return result
 
 
 @app.get('/operations/packed-orders')
@@ -6210,21 +6292,37 @@ def update_shipment_by_admin(
 def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
     email = current_user['email'].strip().lower()
     user_id = current_user.get('id')
+    
+    # Fetch orders assigned to this delivery partner
+    # Include: SHIPPED (with shipment ARRIVED_AT_CITY), OUT_FOR_DELIVERY, DELIVERED, DELIVERY_FAILED
     orders = list(
         orders_collection.find(
             active_orders_filter({
                 '$or': [
                     {'assigned_delivery_partner': email},
                     {'assigned_delivery_id': user_id},
-                ]
-                ,
+                ],
                 'status': {'$in': ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
             })
         ).sort('updated_at', -1)
     )
+    
     enriched_orders = []
     for order in orders:
         payload = serialize_order(order, include_shipment=True)
+        
+        # Filter: only show orders with shipment status ARRIVED_AT_CITY or later stages
+        shipment_status = str((payload.get('shipment') or {}).get('status') or '').upper()
+        order_status = str(payload.get('status') or '').upper()
+        
+        # Skip orders that haven't reached the city yet
+        # Show if: shipment ARRIVED_AT_CITY/OUT_FOR_DELIVERY/DELIVERED OR order OUT_FOR_DELIVERY/DELIVERED
+        valid_shipment_statuses = {'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'}
+        valid_order_statuses = {'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}
+        
+        if shipment_status not in valid_shipment_statuses and order_status not in valid_order_statuses:
+            continue
+        
         shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
         customer = users_collection.find_one({'email': str(payload.get('customer_email') or '').strip().lower()}, {'_id': 0}) or {}
         customer_profile = customer.get('profile_details') if isinstance(customer.get('profile_details'), dict) else {}
@@ -6281,7 +6379,6 @@ def update_delivery_profile(
     current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
 ):
     profile_details = dict(current_user.get('profile_details') or {})
-    is_demo_partner = is_demo_delivery_partner_account(current_user)
 
     if payload.full_name is not None:
         full_name = str(payload.full_name).strip()
@@ -6331,24 +6428,23 @@ def update_delivery_profile(
     if payload.is_online is not None:
         profile_details['is_online'] = bool(payload.is_online)
 
-    if payload.allow_all_india:
-        if not is_demo_partner:
-            raise HTTPException(status_code=403, detail='All-India delivery is reserved for the demo delivery partner only.')
-        profile_details['allow_all_india'] = True
-        profile_details['service_scope'] = 'ALL_INDIA'
-        profile_details['service_pincodes'] = []
-    else:
-        service_pincodes = parse_service_pincodes(payload.service_pincodes)
-        if service_pincodes:
-            for service_pincode in service_pincodes:
-                if not is_valid_indian_pincode(service_pincode):
-                    raise HTTPException(status_code=400, detail='Each service pincode must be a valid 6-digit pincode.')
-            profile_details['allow_all_india'] = False
-            profile_details['service_scope'] = 'LOCAL'
-            profile_details['service_pincodes'] = service_pincodes
-            profile_details['service_pincode'] = service_pincodes[0]
+    # Handle service pincodes - remove All India feature
+    service_pincodes = parse_service_pincodes(payload.service_pincodes)
+    if not service_pincodes:
+        raise HTTPException(status_code=400, detail='At least one service pincode is required.')
+    
+    for service_pincode in service_pincodes:
+        if not is_valid_indian_pincode(service_pincode):
+            raise HTTPException(status_code=400, detail=f'Invalid pincode: {service_pincode}. Each service pincode must be a valid 6-digit pincode.')
+    
+    # Save pincodes - no All India feature
+    profile_details['allow_all_india'] = False
+    profile_details['service_scope'] = 'LOCAL'
+    profile_details['service_pincodes'] = service_pincodes
+    profile_details['service_pincode'] = service_pincodes[0] if service_pincodes else None
+    
+    print(f"[PROFILE_UPDATE] Saving pincodes for {current_user.get('email')}: {service_pincodes}")
 
-    profile_details = normalize_delivery_partner_profile_for_scope(profile_details, is_demo_partner)
     users_collection.update_one(
         {'id': current_user.get('id')},
         {

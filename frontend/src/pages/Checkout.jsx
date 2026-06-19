@@ -279,6 +279,7 @@ export default function Checkout() {
           full_name: fullName,
           phone,
           city,
+          state: '', // Add state field (can be extracted from pincode on backend)
           address,
         },
       }
@@ -318,7 +319,8 @@ export default function Checkout() {
       sessionStorage.removeItem('veloura_buy_now')
       navigate('/orders/tracking')
     } catch (error) {
-      setMessage(error?.message || 'Unable to place order right now.')
+      console.error('Order placement error:', error)
+      setMessage(`Failed to fetch: ${error?.message || 'Network error. Please check if the backend server is running.'} Check console for details.`)
     } finally {
       setPlacing(false)
     }

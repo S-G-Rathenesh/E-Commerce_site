@@ -129,7 +129,9 @@ export default function DeliveryEstimate({ productId, currentUser, orderTotal = 
             setDeliveryResult(null)
             setRequestError({
               requestKey,
-              message: error.message || 'Unable to estimate delivery right now.',
+              message: error.message === 'Failed to fetch' 
+                ? 'Unable to connect to server. Please ensure backend is running.'
+                : (error.message || 'Unable to estimate delivery right now.'),
             })
           }
         })

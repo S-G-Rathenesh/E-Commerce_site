@@ -339,6 +339,7 @@ export default function AdminOrdersManager({ compact = false }) {
   }
 
   const openTrackingModal = (orderId) => {
+    console.log('Opening tracking modal for order:', orderId)
     setActiveOrderId(orderId)
     setStatusModalOrderId(orderId)
     loadTrackingStatus(orderId)
@@ -386,44 +387,56 @@ export default function AdminOrdersManager({ compact = false }) {
 
   const loadTrackingLogs = async (orderId) => {
     try {
+      console.log('Loading tracking logs for order:', orderId)
       const response = await fetch(`${API_BASE}/admin/tracking-logs?order_id=${encodeURIComponent(orderId)}`, {
         headers: buildAuthHeaders(),
         cache: 'no-store',
       })
       const data = await response.json()
+      console.log('Tracking logs response:', { ok: response.ok, status: response.status, data })
       if (!response.ok) {
+        console.error('Failed to load tracking logs:', data?.detail)
         setMessage(data?.detail || 'Unable to load tracking logs.')
         return
       }
+      const logs = Array.isArray(data?.logs) ? data.logs : []
+      console.log('Setting tracking logs:', logs)
       setTrackingLogsByOrder((current) => ({
         ...current,
-        [orderId]: Array.isArray(data?.logs) ? data.logs : [],
+        [orderId]: logs,
       }))
-    } catch {
+    } catch (error) {
+      console.error('Error loading tracking logs:', error)
       setMessage('Unable to load tracking logs.')
     }
   }
 
   const loadTrackingStatus = async (orderId) => {
     try {
+      console.log('Loading tracking status for order:', orderId)
       const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/tracking`, {
         headers: buildAuthHeaders(),
         cache: 'no-store',
       })
       const data = await response.json()
+      console.log('Tracking status response:', { ok: response.ok, status: response.status, data })
       if (!response.ok) {
+        console.error('Failed to load tracking status:', data?.detail)
         setMessage(data?.detail || 'Unable to load order status timeline.')
         return
       }
 
+      const statusHistory = Array.isArray(data?.order?.status_history) ? data.order.status_history : []
+      console.log('Extracted status_history:', statusHistory)
       setTrackingStatusByOrder((current) => ({
         ...current,
         [orderId]: {
           ...(data || {}),
-          status_history: Array.isArray(data?.order?.status_history) ? data.order.status_history : [],
+          status_history: statusHistory,
         },
       }))
-    } catch {
+    } catch (error) {
+      console.error('Error loading tracking status:', error)
       setMessage('Unable to load order status timeline.')
     }
   }
@@ -1164,6 +1177,10 @@ export default function AdminOrdersManager({ compact = false }) {
         const modalOrder = orders.find((order) => order.order_id === statusModalOrderId)
         const modalStatus = trackingStatusByOrder[statusModalOrderId]
         const modalLogs = trackingLogsByOrder[statusModalOrderId] || []
+        console.log('Modal render - statusModalOrderId:', statusModalOrderId)
+        console.log('Modal render - modalOrder found:', !!modalOrder)
+        console.log('Modal render - modalStatus:', modalStatus)
+        console.log('Modal render - modalLogs count:', modalLogs.length)
         const modalStepIndex = modalOrder ? TIMELINE_STEPS.indexOf(normalizeOrderStatus(modalOrder.status)) : -1
         const statusHistory = Array.isArray(modalStatus?.status_history) ? modalStatus.status_history : []
         const latestHistoryByStatus = statusHistory.reduce((accumulator, entry) => {
@@ -1174,6 +1191,41 @@ export default function AdminOrdersManager({ compact = false }) {
           return accumulator
         }, {})
         const progressRatio = modalStepIndex <= 0 ? 0 : Math.min(1, modalStepIndex / (TIMELINE_STEPS.length - 1))
+
+        if (!modalOrder) {
+          console.warn('Modal order not found in orders array for ID:', statusModalOrderId)
+          return (
+            <div
+              role="presentation"
+              onClick={closeTrackingModal}
+              style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(15, 23, 42, 0.62)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '24px',
+                zIndex: 60,
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Order not found"
+                onClick={(event) => event.stopPropagation()}
+                className="section-card panel-stack"
+                style={{ maxWidth: '520px', width: '100%', padding: '32px' }}
+              >
+                <h3>Order Not Found</h3>
+                <p>Unable to load order details. The order may have been deleted or you may need to refresh the page.</p>
+                <button type="button" className="btn btn-primary" onClick={closeTrackingModal}>
+                  Close
+                </button>
+              </div>
+            </div>
+          )
+        }
 
         return modalOrder ? (
           <div
