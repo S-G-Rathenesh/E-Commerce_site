@@ -240,7 +240,7 @@ export default function DeliveryRegister() {
   }
 
   return (
-    <div className="auth-shell">
+    <div className="auth-shell auth-shell-delivery">
       <section className="auth-portal auth-portal-long" aria-label="Delivery account registration portal">
         <aside className="auth-portal-hero auth-portal-hero-signup">
           <div className="auth-hero-head">

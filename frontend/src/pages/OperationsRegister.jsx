@@ -171,7 +171,7 @@ export default function OperationsRegister() {
   }
 
   return (
-    <div className="auth-shell">
+    <div className="auth-shell auth-shell-operations">
       <section className="auth-portal auth-portal-long" aria-label="Operations account registration portal">
         <aside className="auth-portal-hero auth-portal-hero-signup">
           <div className="auth-hero-head">

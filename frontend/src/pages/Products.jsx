@@ -6,13 +6,9 @@ import PageWrapper from '../components/PageWrapper'
 import Input from '../components/Input'
 import AnimatedSection from '../components/AnimatedSection'
 import SkeletonProductCard from '../components/SkeletonProductCard'
-import { products as seedProducts } from '../data/products'
 import { getStoredUser } from '../utils/auth'
 import { addToWishlist, getWishlistItems } from '../utils/wishlist'
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
-const MIN_BACKEND_PRODUCTS = 30
-const REQUIRED_SECTIONS = ['women', 'men', 'kids']
+import { fetchCatalogProducts } from '../utils/catalog'
 
 const normalize = (value) => String(value || '').trim().toLowerCase()
 
@@ -33,7 +29,7 @@ export default function Products() {
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('featured')
   const [maxPrice, setMaxPrice] = useState(10000)
-  const [items, setItems] = useState(seedProducts)
+  const [items, setItems] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [wishlistedIds, setWishlistedIds] = useState(() => {
@@ -52,34 +48,22 @@ export default function Products() {
   const activeSubType = searchParams.get('subtype') || 'All'
 
   useEffect(() => {
-    fetch(`${API_BASE}/products`)
-      .then((response) => (response.ok ? response.json() : Promise.reject()))
-      .then((data) => {
-        if (!Array.isArray(data) || data.length === 0) {
-          setItems(seedProducts)
-          return
-        }
+    let mounted = true
 
-        const hasMarketplaceShape = data.some(
-          (item) => item?.section && item?.category && (item?.productType || item?.subType),
-        )
+    const loadCatalog = async () => {
+      const data = await fetchCatalogProducts()
+      if (!mounted) {
+        return
+      }
+      setItems(data)
+      setIsLoading(false)
+    }
 
-        const sectionsInPayload = new Set(data.map((item) => normalize(item?.section)))
-        const hasRequiredSections = REQUIRED_SECTIONS.every((sectionName) => sectionsInPayload.has(sectionName))
-        const hasUsefulCatalogVolume = data.length >= MIN_BACKEND_PRODUCTS
+    loadCatalog()
 
-        if (hasMarketplaceShape && hasRequiredSections && hasUsefulCatalogVolume) {
-          setItems(data)
-        } else {
-          setItems(seedProducts)
-        }
-      })
-      .catch(() => {
-        setItems(seedProducts)
-      })
-      .finally(() => {
-        setIsLoading(false)
-      })
+    return () => {
+      mounted = false
+    }
   }, [])
 
   useEffect(() => {

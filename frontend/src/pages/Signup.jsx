@@ -139,7 +139,7 @@ export default function Signup() {
   }
 
   return (
-    <div className="auth-shell">
+    <div className="auth-shell auth-shell-customer">
       <section className="auth-portal auth-portal-long" aria-label="Account registration portal">
         <aside className="auth-portal-hero auth-portal-hero-signup">
           <div className="auth-hero-head">

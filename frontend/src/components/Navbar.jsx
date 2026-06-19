@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { products as seedProducts } from '../data/products'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
+import { fetchCatalogProducts } from '../utils/catalog'
+import { fetchPublicPlatformSettings, getCachedBranding, getSuperAdminSecretPath, onBrandingUpdated } from '../utils/platform'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -21,6 +22,9 @@ const uniqueValues = (values) => [...new Set(values.filter(Boolean))]
 
 const normalizeRole = (role) => {
   const next = String(role || '').trim().toLowerCase()
+  if (next === 'super_admin' || next === 'superadmin') {
+    return 'super_admin'
+  }
   if (next === 'merchant' || next === 'admin') {
     return 'admin'
   }
@@ -38,6 +42,8 @@ const normalizeRole = (role) => {
 
 export default function Navbar() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const [branding, setBranding] = useState(getCachedBranding())
+  const [catalogProducts, setCatalogProducts] = useState([])
   const [activeMegaMenu, setActiveMegaMenu] = useState('')
   const [isCartPulse, setIsCartPulse] = useState(false)
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0)
@@ -45,9 +51,9 @@ export default function Navbar() {
   const [notifications, setNotifications] = useState([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
-  const [staffStatus, setStaffStatus] = useState(String(getStoredUser()?.staff_status || 'ONLINE').toUpperCase())
   const navigate = useNavigate()
   const location = useLocation()
+  const superAdminSecretPath = getSuperAdminSecretPath()
   const closeMenuTimerRef = useRef(null)
   const cartPulseTimerRef = useRef(null)
   const notificationsMenuRef = useRef(null)
@@ -128,7 +134,7 @@ export default function Navbar() {
 
   const megaMenuData = useMemo(() => {
     return navItems.reduce((accumulator, section) => {
-      const sectionItems = seedProducts.filter((item) => normalize(item.section) === normalize(section))
+      const sectionItems = catalogProducts.filter((item) => normalize(item.section) === normalize(section))
       const categories = uniqueValues(sectionItems.map((item) => item.category))
 
       accumulator[section] = categories.map((category) => {
@@ -143,7 +149,7 @@ export default function Navbar() {
 
       return accumulator
     }, {})
-  }, [])
+  }, [catalogProducts])
 
   const activeColumns = megaMenuData[activeMegaMenu] || []
 
@@ -241,9 +247,56 @@ export default function Navbar() {
     loadNotifications()
   }, [currentUser])
 
+  useEffect(() => {
+    let mounted = true
+
+    const loadCatalog = async () => {
+      const data = await fetchCatalogProducts()
+      if (!mounted) {
+        return
+      }
+      setCatalogProducts(Array.isArray(data) ? data : [])
+    }
+
+    loadCatalog()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+
+    const loadBranding = async () => {
+      try {
+        const nextBranding = await fetchPublicPlatformSettings()
+        if (!mounted) {
+          return
+        }
+        setBranding(nextBranding)
+      } catch {
+        if (!mounted) {
+          return
+        }
+        setBranding(getCachedBranding())
+      }
+    }
+
+    const unsubscribe = onBrandingUpdated((event) => {
+      setBranding(event?.detail || getCachedBranding())
+    })
+
+    loadBranding()
+
+    return () => {
+      mounted = false
+      unsubscribe()
+    }
+  }, [])
+
   const pendingCustomersAttentionCount = pendingApprovalsCount + pendingReturnsCount
   const unreadNotifications = notifications.filter((note) => !note.is_read).length
-  const staffStatusLabel = staffStatus === 'OFFLINE' ? 'Offline' : 'Online'
 
   useEffect(() => {
     closeMegaMenu()
@@ -276,6 +329,7 @@ export default function Navbar() {
   const displayName = (currentUser?.full_name || '').trim() || 'Guest'
   const role = normalizeRole(currentUser?.role)
   const isAdmin = role === 'admin'
+  const isSuperAdmin = role === 'super_admin'
   const isDelivery = role === 'delivery'
   const isOperations = role === 'operations'
   const isCustomer = role === 'user'
@@ -291,17 +345,6 @@ export default function Navbar() {
     navigate('/login')
   }
 
-  const handleStaffStatusChange = (value) => {
-    const nextStatus = String(value || 'ONLINE').toUpperCase()
-    setStaffStatus(nextStatus)
-    const nextUser = {
-      ...(currentUser || {}),
-      staff_status: nextStatus,
-    }
-    setCurrentUser(nextUser)
-    setStoredUser(nextUser)
-  }
-
   const markNotificationsRead = async () => {
     try {
       await fetch(`${API_BASE}/notifications/mark-all-read`, {
@@ -314,6 +357,72 @@ export default function Navbar() {
     }
   }
 
+  const markNotificationRead = async (notificationId) => {
+    try {
+      await fetch(`${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read`, {
+        method: 'PUT',
+        headers: buildAuthHeaders(),
+      })
+      setNotifications((current) =>
+        current.map((note) => (note.id === notificationId ? { ...note, is_read: true } : note)),
+      )
+      window.dispatchEvent(new Event('notifications-changed'))
+    } catch {
+      // ignore notification read sync failures
+    }
+  }
+
+  const handleNotificationSelect = async (note, onSelect) => {
+    await markNotificationRead(note.id)
+    if (typeof onSelect === 'function') {
+      onSelect(note)
+    }
+    setNotificationsOpen(false)
+  }
+
+  const renderNotificationsMenu = ({ maxItems = 5, onSelect } = {}) => (
+    <div className="staff-notification-wrap" ref={notificationsMenuRef}>
+      <button
+        type="button"
+        className="nav-action staff-icon-button nav-notification-button"
+        onClick={() => {
+          setNotificationsOpen((current) => !current)
+          setProfileMenuOpen(false)
+          void markNotificationsRead()
+        }}
+        aria-label="View notifications"
+        aria-expanded={notificationsOpen}
+      >
+        <span aria-hidden="true">🔔</span>
+        {unreadNotifications > 0 ? <span className="nav-badge">{unreadNotifications}</span> : null}
+      </button>
+
+      <div
+        className={`dropdown-menu staff-dropdown nav-notification-dropdown ${notificationsOpen ? 'staff-dropdown-open' : ''}`}
+        role="menu"
+        aria-label="Notifications"
+      >
+        {notifications.length > 0 ? (
+          notifications.slice(0, maxItems).map((note) => (
+            <button
+              key={note.id}
+              type="button"
+              className={`staff-notification-item staff-notification-button ${note.is_read ? 'staff-notification-read' : 'staff-notification-unread'}`}
+              onClick={() => {
+                void handleNotificationSelect(note, onSelect)
+              }}
+            >
+              <p>{note.title || note.message}</p>
+              <small>{note.created_at ? new Date(note.created_at).toLocaleString() : 'Just now'}</small>
+            </button>
+          ))
+        ) : (
+          <p className="staff-dropdown-empty">No notifications</p>
+        )}
+      </div>
+    </div>
+  )
+
   const handleProtectedNav = (path) => {
     if (!currentUser && (path === '/wishlist' || path === '/cart')) {
       navigate('/login')
@@ -321,7 +430,9 @@ export default function Navbar() {
     }
 
     if ((role === 'admin' || role === 'delivery' || role === 'operations') && (path === '/wishlist' || path === '/cart')) {
-      if (role === 'admin') {
+      if (role === 'super_admin') {
+        navigate(superAdminSecretPath)
+      } else if (role === 'admin') {
         navigate('/admin/dashboard')
       } else if (role === 'delivery') {
         navigate('/delivery')
@@ -351,8 +462,8 @@ export default function Navbar() {
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
           <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
-            <img className="brand-logo" src="/movicloud%20logo.png" alt="Movi Fashion logo" />
-            <span>Movi Fashion</span>
+            <img className="brand-logo" src={branding.logo_url} alt={`${branding.platform_name} logo`} />
+            <span>{branding.platform_name}</span>
           </NavLink>
 
           {isAuthPage ? null : isAdmin ? (
@@ -387,6 +498,18 @@ export default function Navbar() {
                   </option>
                 ))}
               </select>
+            </div>
+          ) : isSuperAdmin ? (
+            <div className="nav-links nav-links-retail nav-links-admin">
+              <div className="nav-links nav-links-retail nav-links-admin-desktop">
+                <button
+                  type="button"
+                  className={`nav-link nav-link-retail nav-link-button ${location.pathname === superAdminSecretPath ? 'active-link' : ''}`}
+                  onClick={() => navigate(superAdminSecretPath)}
+                >
+                  PLATFORM CONTROL
+                </button>
+              </div>
             </div>
           ) : isDelivery ? (
             <div className="nav-links nav-links-retail">
@@ -516,36 +639,7 @@ export default function Navbar() {
           <div className="nav-actions">
             {currentUser && isOperations ? (
               <div className="nav-staff-actions">
-                <div className="staff-notification-wrap" ref={notificationsMenuRef}>
-                  <button
-                    type="button"
-                    className="nav-action staff-icon-button"
-                    onClick={() => {
-                      setNotificationsOpen((current) => !current)
-                      setProfileMenuOpen(false)
-                      void markNotificationsRead()
-                    }}
-                    aria-label="View notifications"
-                    aria-expanded={notificationsOpen}
-                  >
-                    <span>🔔</span>
-                    <small>Notifications</small>
-                    {unreadNotifications > 0 ? <span className="nav-badge">{unreadNotifications}</span> : null}
-                  </button>
-
-                  <div className={`dropdown-menu staff-dropdown ${notificationsOpen ? 'staff-dropdown-open' : ''}`} role="menu" aria-label="Notifications">
-                    {notifications.length > 0 ? (
-                      notifications.slice(0, 5).map((note) => (
-                        <div key={note.id} className={`staff-notification-item ${note.is_read ? 'staff-notification-read' : 'staff-notification-unread'}`}>
-                          <p>{note.message}</p>
-                          <small>{note.created_at ? new Date(note.created_at).toLocaleString() : 'Just now'}</small>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="staff-dropdown-empty">No notifications</p>
-                    )}
-                  </div>
-                </div>
+                {renderNotificationsMenu()}
 
                 <div className="profile-menu" ref={profileMenuRef}>
                   <button
@@ -559,19 +653,12 @@ export default function Navbar() {
                     }}
                   >
                     <span className="profile-name">👤 {displayName}</span>
-                    <span className="profile-status">{staffStatusLabel}</span>
                     <span className="dropdown-icon" aria-hidden="true">▼</span>
                   </button>
 
                   <div className={`dropdown-menu ${profileMenuOpen ? 'staff-dropdown-open' : ''}`} role="menu" aria-label="Operations profile menu">
                     <button type="button" role="menuitem" onClick={() => navigate('/operations/dashboard')}>
                       Profile
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => handleStaffStatusChange('ONLINE')}>
-                      Set status: Online
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => handleStaffStatusChange('OFFLINE')}>
-                      Set status: Offline
                     </button>
                     <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
                       Logout
@@ -580,29 +667,42 @@ export default function Navbar() {
                 </div>
               </div>
             ) : currentUser && isCustomer ? (
-              <div className="profile-menu">
-                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open profile menu">
-                  <span className="profile-name">👤 {displayName}</span>
-                  <span className="dropdown-icon" aria-hidden="true">▼</span>
-                </button>
+              <>
+                {renderNotificationsMenu({
+                  maxItems: 8,
+                  onSelect: (note) => {
+                    if (note.order_id) {
+                      navigate('/orders/tracking')
+                    }
+                  },
+                })}
 
-                <div className="dropdown-menu" role="menu" aria-label="Profile menu">
-                  <NavLink to="/profile" role="menuitem">
-                    My Profile
-                  </NavLink>
-                  <NavLink to="/orders" role="menuitem">
-                    My Orders
-                  </NavLink>
-                  <NavLink to="/wishlist" role="menuitem">
-                    Wishlist
-                  </NavLink>
-                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
-                    Logout
+                <div className="profile-menu">
+                  <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open profile menu">
+                    <span className="profile-name">👤 {displayName}</span>
+                    <span className="dropdown-icon" aria-hidden="true">▼</span>
                   </button>
+
+                  <div className="dropdown-menu" role="menu" aria-label="Profile menu">
+                    <NavLink to="/profile" role="menuitem">
+                      My Profile
+                    </NavLink>
+                    <NavLink to="/orders" role="menuitem">
+                      My Orders
+                    </NavLink>
+                    <NavLink to="/wishlist" role="menuitem">
+                      Wishlist
+                    </NavLink>
+                    <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                      Logout
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </>
             ) : currentUser && isAdmin ? (
-              <div className="profile-menu">
+              <div className="nav-staff-actions">
+                {renderNotificationsMenu()}
+                <div className="profile-menu">
                 <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open admin profile menu">
                   <span className="profile-name">👤 {displayName}</span>
                   <span className="dropdown-icon" aria-hidden="true">▼</span>
@@ -619,21 +719,53 @@ export default function Navbar() {
                     Logout
                   </button>
                 </div>
+                </div>
+              </div>
+            ) : currentUser && isSuperAdmin ? (
+              <div className="nav-staff-actions">
+                {renderNotificationsMenu()}
+                <div className="profile-menu">
+                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open super admin profile menu">
+                  <span className="profile-name">👤 {displayName}</span>
+                  <span className="dropdown-icon" aria-hidden="true">▼</span>
+                </button>
+
+                <div className="dropdown-menu" role="menu" aria-label="Super admin profile menu">
+                  <button type="button" role="menuitem" onClick={() => navigate(superAdminSecretPath)}>
+                    Dashboard
+                  </button>
+                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
+                    Logout
+                  </button>
+                </div>
+                </div>
               </div>
             ) : currentUser && isDelivery ? (
-              <div className="profile-menu">
+              <div className="nav-staff-actions">
+                {renderNotificationsMenu({
+                  onSelect: (note) => {
+                    if (note.order_id) {
+                      navigate('/delivery/dashboard')
+                    }
+                  },
+                })}
+                <div className="profile-menu">
                 <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open delivery profile menu">
                   <span className="profile-name">👤 {displayName}</span>
                   <span className="dropdown-icon" aria-hidden="true">▼</span>
                 </button>
 
                 <div className="dropdown-menu" role="menu" aria-label="Delivery profile menu">
+                  <button type="button" role="menuitem" onClick={() => navigate('/delivery/profile')}>
+                    Profile
+                  </button>
                   <button type="button" role="menuitem" onClick={() => navigate('/delivery/dashboard')}>
                     Dashboard
                   </button>
                   <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
                     Logout
                   </button>
+                </div>
                 </div>
               </div>
             ) : currentUser ? (
@@ -655,7 +787,7 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <>
                 <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>

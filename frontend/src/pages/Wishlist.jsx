@@ -3,7 +3,6 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import PageWrapper from '../components/PageWrapper'
-import { products as seedProducts } from '../data/products'
 import { getStoredUser } from '../utils/auth'
 import {
   clearWishlist,
@@ -16,8 +15,7 @@ import {
   setActiveWishlist,
   syncGuestWishlistToUser,
 } from '../utils/wishlist'
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+import { fetchCatalogProducts } from '../utils/catalog'
 
 function normalizeRole(role) {
   const next = String(role || '').trim().toLowerCase()
@@ -66,12 +64,7 @@ export default function Wishlist() {
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [newListName, setNewListName] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
-  const [catalogById, setCatalogById] = useState(() => {
-    return seedProducts.reduce((accumulator, item) => {
-      accumulator[Number(item.id)] = item
-      return accumulator
-    }, {})
-  })
+  const [catalogById, setCatalogById] = useState({})
 
   const sharePayload = useMemo(() => decodeSharePayload(searchParams.get('share')), [searchParams])
 
@@ -164,23 +157,25 @@ export default function Wishlist() {
   }, [])
 
   useEffect(() => {
-    fetch(`${API_BASE}/products`)
-      .then((response) => (response.ok ? response.json() : Promise.reject()))
-      .then((data) => {
-        const source = Array.isArray(data) && data.length > 0 ? data : seedProducts
-        const mapped = source.reduce((accumulator, item) => {
-          accumulator[Number(item.id)] = item
-          return accumulator
-        }, {})
-        setCatalogById(mapped)
-      })
-      .catch(() => {
-        const mapped = seedProducts.reduce((accumulator, item) => {
-          accumulator[Number(item.id)] = item
-          return accumulator
-        }, {})
-        setCatalogById(mapped)
-      })
+    let mounted = true
+
+    const loadCatalog = async () => {
+      const source = await fetchCatalogProducts()
+      if (!mounted) {
+        return
+      }
+      const mapped = source.reduce((accumulator, item) => {
+        accumulator[Number(item.id)] = item
+        return accumulator
+      }, {})
+      setCatalogById(mapped)
+    }
+
+    loadCatalog()
+
+    return () => {
+      mounted = false
+    }
   }, [])
 
   const createList = () => {

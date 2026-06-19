@@ -29,8 +29,10 @@ export default function Cart() {
   }, [])
 
   const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
-  const tax = subtotal * 0.08
-  const total = subtotal + tax
+  const discount = subtotal > 500 ? 45 : 0
+  const total = Math.max(0, subtotal - discount)
+  const shippingCharge = total >= 500 ? 0 : 49
+  const finalTotal = total + shippingCharge
 
   const totalItems = useMemo(
     () => cartItems.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0),
@@ -115,8 +117,9 @@ export default function Cart() {
           <h2>Order summary</h2>
           <div className="summary-row">
             <p>Subtotal: Rs. {subtotal.toFixed(2)}</p>
-            <p>Tax: Rs. {tax.toFixed(2)}</p>
-            <p>Total: Rs. {total.toFixed(2)}</p>
+            {discount > 0 ? <p>Discount: -Rs. {discount.toFixed(2)}</p> : null}
+            <p>Shipping: {shippingCharge === 0 ? 'Free' : `Rs. ${shippingCharge}`}</p>
+            <p>Total: Rs. {finalTotal.toFixed(2)}</p>
           </div>
           <Button to="/checkout" variant="primary" className="btn-wide">
             Proceed to Checkout

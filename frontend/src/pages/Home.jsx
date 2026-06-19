@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { products } from '../data/products'
 import ProductCard from '../components/ProductCard'
 import AnimatedSection from '../components/AnimatedSection'
 import PageWrapper from '../components/PageWrapper'
+import { fetchCatalogProducts } from '../utils/catalog'
+import { fetchPublicBanners, fetchPublicGlobalOffer } from '../utils/platform'
+import { addToWishlist, getWishlistItems } from '../utils/wishlist'
+import { getStoredUser } from '../utils/auth'
 
 const SALE_SLIDE_INTERVAL = 5000
 
-const saleSlides = [
+const defaultSaleSlides = [
   {
     id: 'summer-festival',
     offerText: 'Flat Rs. 300 OFF on your 1st purchase via app',
@@ -74,36 +77,56 @@ const categoryCards = [
   {
     title: 'Women',
     subtitle: 'Trending fits',
+    section: 'women',
     image:
       'https://images.unsplash.com/photo-1483985988355-763728e1935b?auto=format&fit=crop&w=900&q=80',
   },
   {
     title: 'Men',
     subtitle: 'Everyday staples',
+    section: 'men',
     image:
       'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=900&q=80',
   },
   {
     title: 'Kids',
     subtitle: 'Playful comfort',
+    section: 'kids',
     image:
       'https://images.unsplash.com/photo-1519457431-44ccd64a579b?auto=format&fit=crop&w=900&q=80',
   },
 ]
 
-const budgetPicks = [...products]
-  .sort((a, b) => a.price - b.price)
-  .slice(0, 4)
-
 export default function Home() {
   const [activeSaleSlide, setActiveSaleSlide] = useState(0)
+  const [catalogProducts, setCatalogProducts] = useState([])
+  const [saleSlides, setSaleSlides] = useState(defaultSaleSlides)
+  const [globalOffer, setGlobalOffer] = useState(null)
+  const [currentUser, setCurrentUser] = useState(getStoredUser())
+  const [wishlistedIds, setWishlistedIds] = useState(() => {
+    const ids = getWishlistItems({ user: getStoredUser() }).map((item) => Number(item.id))
+    return new Set(ids)
+  })
+  const [wishlistMessage, setWishlistMessage] = useState('')
   const touchStartX = useRef(0)
 
+  const budgetPicks = [...catalogProducts]
+    .sort((a, b) => Number(a.price || 0) - Number(b.price || 0))
+    .slice(0, 4)
+
+  const featuredProducts = catalogProducts.slice(0, 4)
+
   const goToNextSlide = () => {
+    if (!saleSlides.length) {
+      return
+    }
     setActiveSaleSlide((current) => (current + 1) % saleSlides.length)
   }
 
   const goToPrevSlide = () => {
+    if (!saleSlides.length) {
+      return
+    }
     setActiveSaleSlide((current) => (current - 1 + saleSlides.length) % saleSlides.length)
   }
 
@@ -112,12 +135,102 @@ export default function Home() {
   }
 
   useEffect(() => {
+    if (!saleSlides.length) {
+      return undefined
+    }
+
     const timer = setInterval(() => {
       setActiveSaleSlide((current) => (current + 1) % saleSlides.length)
     }, SALE_SLIDE_INTERVAL)
 
     return () => {
       clearInterval(timer)
+    }
+  }, [saleSlides.length])
+
+  useEffect(() => {
+    let mounted = true
+
+    const loadCatalog = async () => {
+      const data = await fetchCatalogProducts()
+      if (!mounted) {
+        return
+      }
+      setCatalogProducts(data)
+    }
+
+    loadCatalog()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const syncWishlist = () => {
+      const user = getStoredUser()
+      setCurrentUser(user)
+      const ids = getWishlistItems({ user }).map((item) => Number(item.id))
+      setWishlistedIds(new Set(ids))
+    }
+
+    window.addEventListener('wishlist-changed', syncWishlist)
+    window.addEventListener('auth-changed', syncWishlist)
+    window.addEventListener('storage', syncWishlist)
+
+    return () => {
+      window.removeEventListener('wishlist-changed', syncWishlist)
+      window.removeEventListener('auth-changed', syncWishlist)
+      window.removeEventListener('storage', syncWishlist)
+    }
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+
+    const loadHomepageCampaigns = async () => {
+      try {
+        const [approvedBanners, offer] = await Promise.all([fetchPublicBanners(), fetchPublicGlobalOffer()])
+        if (!mounted) {
+          return
+        }
+
+        if (Array.isArray(approvedBanners) && approvedBanners.length > 0) {
+          const normalizedBanners = approvedBanners.map((banner, index) => ({
+            id: banner.id || `banner-${index + 1}`,
+            offerText: banner.offer_text || offer?.title || 'Platform approved campaign',
+            offerCode: offer?.code ? `Use code: ${offer.code}` : 'Limited period offer',
+            seasonLeft: 'Platform Banner',
+            seasonTitle: banner.title || 'Approved Campaign',
+            seasonRight: 'Live Now',
+            kicker: 'Verified Banner',
+            title: banner.title || 'Campaign',
+            description: banner.subtitle || offer?.description || 'Approved promotion now visible on homepage.',
+            ctaPrimaryLabel: 'Shop Now',
+            ctaPrimaryTo: banner.target_path || '/products',
+            ctaSecondaryLabel: 'Explore Products',
+            ctaSecondaryTo: '/products',
+            discount: offer?.discount_percent ? `${offer.discount_percent}%` : 'Offer',
+            image: banner.image_url,
+            imageAlt: banner.title || 'Approved banner',
+          }))
+          setSaleSlides(normalizedBanners)
+        }
+
+        setGlobalOffer(offer)
+      } catch {
+        if (!mounted) {
+          return
+        }
+        setSaleSlides(defaultSaleSlides)
+        setGlobalOffer(null)
+      }
+    }
+
+    loadHomepageCampaigns()
+
+    return () => {
+      mounted = false
     }
   }, [])
 
@@ -139,6 +252,24 @@ export default function Home() {
     }
 
     goToPrevSlide()
+  }
+
+  const handleAddToWishlist = (product) => {
+    const role = String(currentUser?.role || '').trim().toLowerCase()
+
+    if (!currentUser || role !== 'user') {
+      setWishlistMessage('Please login to add products to wishlist.')
+      return
+    }
+
+    const result = addToWishlist(product, { user: currentUser })
+
+    if (result.added) {
+      setWishlistMessage(`${product.name} added to wishlist.`)
+      return
+    }
+
+    setWishlistMessage(`${product.name} is already in wishlist.`)
   }
 
   return (
@@ -225,11 +356,21 @@ export default function Home() {
             See all deals
           </Link>
         </div>
-        <div className="product-grid">
-          {budgetPicks.map((product, index) => (
-            <ProductCard key={product.id} product={product} index={index} />
-          ))}
-        </div>
+        {budgetPicks.length > 0 ? (
+          <div className="product-grid">
+            {budgetPicks.map((product, index) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                index={index}
+                onAddToWishlist={handleAddToWishlist}
+                isWishlisted={wishlistedIds.has(Number(product.id))}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">No products are currently available from the merchant catalog.</p>
+        )}
       </AnimatedSection>
 
       <AnimatedSection as="section" className="section-card category-grid" delay={0.06}>
@@ -245,13 +386,18 @@ export default function Home() {
 
         <div className="category-cards">
           {categoryCards.map((category) => (
-            <article key={category.title} className="category-card">
+            <Link
+              key={category.title}
+              to={`/products?section=${encodeURIComponent(category.section)}`}
+              className="category-card category-card-link"
+              aria-label={`Browse ${category.title} section`}
+            >
               <img src={category.image} alt={category.title} />
               <div>
                 <p className="product-category">{category.subtitle}</p>
                 <h3>{category.title}</h3>
               </div>
-            </article>
+            </Link>
           ))}
         </div>
       </AnimatedSection>
@@ -260,9 +406,9 @@ export default function Home() {
         <div className="section-head">
           <div>
             <p className="eyebrow">Instant savings</p>
-            <h2>10% instant discount with select cards</h2>
+            <h2>{globalOffer?.title || '10% instant discount with select cards'}</h2>
           </div>
-          <p>Clean, premium, and built for conversion.</p>
+          <p>{globalOffer?.description || 'Clean, premium, and built for conversion.'}</p>
         </div>
       </AnimatedSection>
 
@@ -276,12 +422,24 @@ export default function Home() {
             View all
           </Link>
         </div>
-        <div className="product-grid">
-          {products.slice(0, 4).map((product, index) => (
-            <ProductCard key={product.id} product={product} index={index} />
-          ))}
-        </div>
+        {featuredProducts.length > 0 ? (
+          <div className="product-grid">
+            {featuredProducts.map((product, index) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                index={index}
+                onAddToWishlist={handleAddToWishlist}
+                isWishlisted={wishlistedIds.has(Number(product.id))}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">No featured products yet. Add products from the admin merchant panel.</p>
+        )}
       </AnimatedSection>
+
+      {wishlistMessage ? <p className="wishlist-message">{wishlistMessage}</p> : null}
     </PageWrapper>
   )
 }

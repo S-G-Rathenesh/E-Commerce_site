@@ -129,7 +129,9 @@ export default function DeliveryEstimate({ productId, currentUser, orderTotal = 
             setDeliveryResult(null)
             setRequestError({
               requestKey,
-              message: error.message || 'Unable to estimate delivery right now.',
+              message: error.message === 'Failed to fetch' 
+                ? 'Unable to connect to server. Please ensure backend is running.'
+                : (error.message || 'Unable to estimate delivery right now.'),
             })
           }
         })
@@ -145,7 +147,7 @@ export default function DeliveryEstimate({ productId, currentUser, orderTotal = 
   }, [cacheMap, isValidPincode, pincodeInput, productId])
 
   return (
-    <section className="detail-delivery-block" aria-label="Delivery estimate">
+    <section className="detail-delivery-block delivery-estimate-card" aria-label="Delivery estimate">
       <div className="detail-pincode-row">
         <input
           className="input detail-pincode-input"
