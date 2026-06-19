@@ -3,7 +3,6 @@ import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders } from '../utils/auth'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
 import DeliveryRating from '../components/DeliveryRating'
-import ProductReview from '../components/ProductReview'
 import { fetchCatalogProducts, fetchRecommendationsForCustomer } from '../utils/catalog'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
