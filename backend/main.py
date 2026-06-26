@@ -3859,9 +3859,21 @@ def create_product_review(
     # Check if order contains this product
     product_in_order = False
     for item in order.get('items', []):
-        if int(item.get('product_id', 0)) == int(product_id):
-            product_in_order = True
-            break
+        item_product_id = (
+            item.get('product_id') or 
+            item.get('id') or 
+            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('id') or 
+            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('product_id')
+        )
+        if item_product_id is not None:
+            try:
+                if int(item_product_id) == int(product_id):
+                    product_in_order = True
+                    break
+            except (ValueError, TypeError):
+                if str(item_product_id).strip() == str(product_id).strip():
+                    product_in_order = True
+                    break
     
     if not product_in_order:
         raise HTTPException(status_code=400, detail='You can only review products you have purchased')
