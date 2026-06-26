@@ -528,6 +528,11 @@ class ProductReviewRequest(BaseModel):
     order_id: str
 
 
+class DeliveryRatingRequest(BaseModel):
+    rating: int  # 1-5 stars
+    feedback: str | None = None
+
+
 
 SEED_PRODUCTS = [
     {
@@ -1036,6 +1041,7 @@ payments_collection = database['payments']
 returns_collection = database['returns']
 notifications_collection = database['notifications']
 product_reviews_collection = database['product_reviews']
+delivery_ratings_collection = database['delivery_ratings']
 wishlists_collection = database['wishlists']
 # NEW: Shipping system collections
 merchant_shipping_settings_collection = database['merchant_shipping_settings']
@@ -3853,9 +3859,21 @@ def create_product_review(
     # Check if order contains this product
     product_in_order = False
     for item in order.get('items', []):
-        if int(item.get('product_id', 0)) == int(product_id):
-            product_in_order = True
-            break
+        item_product_id = (
+            item.get('product_id') or 
+            item.get('id') or 
+            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('id') or 
+            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('product_id')
+        )
+        if item_product_id is not None:
+            try:
+                if int(item_product_id) == int(product_id):
+                    product_in_order = True
+                    break
+            except (ValueError, TypeError):
+                if str(item_product_id).strip() == str(product_id).strip():
+                    product_in_order = True
+                    break
     
     if not product_in_order:
         raise HTTPException(status_code=400, detail='You can only review products you have purchased')
@@ -3946,6 +3964,91 @@ def get_product_reviews(product_id: int, limit: int = 20, offset: int = 0):
         'average_rating': round(average_rating, 1),
         'rating_distribution': rating_counts,
     }
+
+
+# ============================================================================
+# DELIVERY RATING ENDPOINTS
+# ============================================================================
+
+@app.post('/orders/{order_id}/delivery-rating')
+def create_delivery_rating(
+    order_id: str,
+    payload: DeliveryRatingRequest,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Submit a rating for how the delivery itself went, for a delivered order."""
+    if not (1 <= payload.rating <= 5):
+        raise HTTPException(status_code=400, detail='Rating must be between 1 and 5 stars')
+
+    order = orders_collection.find_one({
+        'order_id': order_id,
+        '$or': [
+            {'customer_email': current_user['email']},
+            {'user_id': current_user.get('id')},
+            {'user_id': current_user['email']}
+        ]
+    })
+
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found or does not belong to you')
+
+    if normalize_order_status(order.get('status', '')) != 'DELIVERED':
+        raise HTTPException(status_code=400, detail='You can only rate delivery for delivered orders')
+
+    existing_rating = delivery_ratings_collection.find_one({
+        'order_id': order_id,
+        'customer_email': current_user['email'],
+    })
+
+    feedback_text = (payload.feedback or '').strip()
+
+    if existing_rating:
+        delivery_ratings_collection.update_one(
+            {'_id': existing_rating['_id']},
+            {
+                '$set': {
+                    'rating': payload.rating,
+                    'feedback': feedback_text,
+                    'updated_at': now_utc().isoformat(),
+                }
+            }
+        )
+        return {'message': 'Delivery rating updated successfully', 'rating': payload.rating, 'feedback': feedback_text}
+
+    rating_document = {
+        'rating_id': str(uuid4()),
+        'order_id': order_id,
+        'customer_email': current_user['email'],
+        'customer_id': current_user.get('id'),
+        'delivery_partner_email': order.get('assigned_delivery_partner'),
+        'rating': payload.rating,
+        'feedback': feedback_text,
+        'created_at': now_utc().isoformat(),
+        'updated_at': now_utc().isoformat(),
+    }
+
+    delivery_ratings_collection.insert_one(rating_document)
+
+    return {
+        'message': 'Delivery rating submitted successfully',
+        'rating': payload.rating,
+        'feedback': feedback_text,
+    }
+
+
+@app.get('/orders/{order_id}/delivery-rating')
+def get_delivery_rating(
+    order_id: str,
+    current_user: dict = Depends(require_roles('CUSTOMER'))
+):
+    """Get the current user's delivery rating for an order, if one exists."""
+    rating = delivery_ratings_collection.find_one(
+        {'order_id': order_id, 'customer_email': current_user['email']},
+        {'_id': 0},
+    )
+    if not rating:
+        return {'rating': None, 'feedback': None}
+    return {'rating': rating.get('rating'), 'feedback': rating.get('feedback') or ''}
 
 
 def update_product_rating(product_id: int):
@@ -7874,4 +7977,3 @@ def update_super_admin_global_offer(
 
     offer = global_offers_collection.find_one({'key': 'global'}, {'_id': 0})
     return {'message': 'Global offer updated successfully.', 'offer': offer}
-

@@ -1,142 +1,177 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { buildAuthHeaders } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+const MAX_FEEDBACK_LENGTH = 300
 
-const LABELS = ['Terrible', 'Poor', 'Okay', 'Good', 'Excellent!']
-const EMOJIS = ['😞', '😕', '😐', '😊', '🤩']
-
-const STORAGE_KEY = (orderId) => `delivery_rating_${orderId}`
-
-function loadSaved(orderId) {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY(orderId))
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
-function savePersist(orderId, data) {
-  try {
-    localStorage.setItem(STORAGE_KEY(orderId), JSON.stringify(data))
-  } catch {}
+const DONE_COPY = {
+  1: { emoji: '😞', title: 'Sorry to hear that' },
+  2: { emoji: '😕', title: 'Thanks for letting us know' },
+  3: { emoji: '🙂', title: 'Thanks for the feedback' },
+  4: { emoji: '😊', title: 'Glad it went well!' },
+  5: { emoji: '🤩', title: 'Awesome, thank you!' },
 }
 
 export default function DeliveryRating({ orderId }) {
-  const saved = loadSaved(orderId)
-  const [hover, setHover] = useState(0)
-  const [selected, setSelected] = useState(saved?.rating || 0)
-  const [feedback, setFeedback] = useState(saved?.feedback || '')
-  const [submitted, setSubmitted] = useState(Boolean(saved?.submitted))
-  const [animating, setAnimating] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [message, setMessage] = useState('')
-  const textareaRef = useRef(null)
+  const [rating, setRating] = useState(0)
+  const [hoverRating, setHoverRating] = useState(0)
+  const [feedback, setFeedback] = useState('')
+  const [bounceStar, setBounceStar] = useState(0)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [submittedRating, setSubmittedRating] = useState(null)
+  const [submittedFeedback, setSubmittedFeedback] = useState('')
+  const [error, setError] = useState('')
 
-  // Focus textarea when a star is picked
   useEffect(() => {
-    if (selected > 0 && !submitted) {
-      setTimeout(() => textareaRef.current?.focus(), 50)
+    let isMounted = true
+
+    async function loadExistingRating() {
+      if (!orderId) {
+        setIsLoading(false)
+        return
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/orders/${orderId}/delivery-rating`, {
+          headers: buildAuthHeaders(),
+        })
+
+        if (!response.ok) {
+          return
+        }
+
+        const data = await response.json()
+        if (isMounted && data?.rating) {
+          setSubmittedRating(data.rating)
+          setSubmittedFeedback(data.feedback || '')
+        }
+      } catch {
+        // Silently ignore — the widget just falls back to the rating form.
+      } finally {
+        if (isMounted) {
+          setIsLoading(false)
+        }
+      }
     }
-  }, [selected, submitted])
 
-  const activeRating = hover || selected
+    loadExistingRating()
 
-  const handleStar = (val) => {
-    if (submitted) return
-    setSelected(val)
-    setAnimating(true)
-    setTimeout(() => setAnimating(false), 600)
+    return () => {
+      isMounted = false
+    }
+  }, [orderId])
+
+  function handleStarClick(value) {
+    setRating(value)
+    setBounceStar(value)
+    setTimeout(() => setBounceStar(0), 550)
   }
 
-  const handleSubmit = async () => {
-    if (!selected || submitting) return
-    setSubmitting(true)
+  async function handleSubmit() {
+    if (!rating || isSubmitting) {
+      return
+    }
+
+    setIsSubmitting(true)
+    setError('')
+
     try {
-      // Best-effort POST — endpoint may not exist yet, we swallow errors gracefully
-      await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/rate`, {
+      const response = await fetch(`${API_BASE}/orders/${orderId}/delivery-rating`, {
         method: 'POST',
-        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ rating: selected, feedback: feedback.trim() }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAuthHeaders(),
+        },
+        body: JSON.stringify({ rating, feedback: feedback.trim() }),
       })
-    } catch {}
-    savePersist(orderId, { rating: selected, feedback, submitted: true })
-    setSubmitted(true)
-    setSubmitting(false)
-    setMessage('')
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        setError(data?.detail || 'Unable to submit your delivery rating.')
+        return
+      }
+
+      setSubmittedRating(rating)
+      setSubmittedFeedback(feedback.trim())
+    } catch {
+      setError('Unable to reach the server. Please try again.')
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
-  if (submitted) {
+  if (isLoading) {
+    return null
+  }
+
+  if (submittedRating) {
+    const copy = DONE_COPY[submittedRating] || DONE_COPY[5]
     return (
-      <div className="dr-wrap dr-done" aria-label="Rating submitted">
-        <span className="dr-done-emoji" style={{ animationName: 'dr-bounce' }}>{EMOJIS[selected - 1]}</span>
+      <div className="dr-wrap dr-done">
+        <span className="dr-done-emoji" aria-hidden="true">{copy.emoji}</span>
         <div>
-          <p className="dr-done-title">Thanks for your feedback!</p>
-          <p className="dr-done-sub">You rated this delivery <strong>{selected} / 5</strong> — {LABELS[selected - 1]}</p>
-          {feedback.trim() ? <p className="dr-done-quote">"{feedback.trim()}"</p> : null}
+          <p className="dr-done-title">{copy.title}</p>
+          <p className="dr-done-sub">You rated this delivery {submittedRating} / 5.</p>
+          {submittedFeedback ? <p className="dr-done-quote">"{submittedFeedback}"</p> : null}
         </div>
       </div>
     )
   }
 
+  const activeRating = hoverRating || rating
+
   return (
-    <div className="dr-wrap" aria-label="Rate your delivery experience">
+    <div className="dr-wrap">
       <div className="dr-header">
         <span className="dr-title">How was your delivery?</span>
-        {activeRating > 0 ? (
-          <span className={`dr-label ${animating ? 'dr-label-pop' : ''}`}>
-            {EMOJIS[activeRating - 1]}&nbsp;{LABELS[activeRating - 1]}
-          </span>
-        ) : (
-          <span className="dr-hint">Tap a star to rate</span>
-        )}
+        <span className="dr-hint">Tap a star to rate</span>
       </div>
 
-      <div className="dr-stars" role="radiogroup" aria-label="Star rating">
-        {[1, 2, 3, 4, 5].map((val) => (
+      <div className="dr-stars" role="radiogroup" aria-label="Rate your delivery experience">
+        {[1, 2, 3, 4, 5].map((value) => (
           <button
-            key={val}
+            key={value}
             type="button"
             role="radio"
-            aria-checked={selected === val}
-            aria-label={`${val} star${val > 1 ? 's' : ''} — ${LABELS[val - 1]}`}
-            className={`dr-star ${val <= activeRating ? 'dr-star-on' : ''} ${animating && val <= selected ? 'dr-star-bounce' : ''}`}
-            onClick={() => handleStar(val)}
-            onMouseEnter={() => setHover(val)}
-            onMouseLeave={() => setHover(0)}
+            aria-checked={rating === value}
+            aria-label={`${value} star${value > 1 ? 's' : ''}`}
+            className={`dr-star ${activeRating >= value ? 'dr-star-on' : ''} ${bounceStar === value ? 'dr-star-bounce' : ''}`.trim()}
+            onClick={() => handleStarClick(value)}
+            onMouseEnter={() => setHoverRating(value)}
+            onMouseLeave={() => setHoverRating(0)}
           >
-            ★
+            {activeRating >= value ? '★' : '☆'}
           </button>
         ))}
+        {rating ? <span className={`dr-label ${bounceStar ? 'dr-label-pop' : ''}`.trim()}>{rating} / 5</span> : null}
       </div>
 
-      {selected > 0 ? (
+      {rating ? (
         <div className="dr-feedback-wrap">
           <textarea
-            ref={textareaRef}
-            className="dr-textarea field"
-            placeholder="Tell us more (optional) — what went well or what could improve?"
+            className="dr-textarea"
+            placeholder="Anything about the delivery you'd like to share? (optional)"
             value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            rows={2}
-            maxLength={300}
+            maxLength={MAX_FEEDBACK_LENGTH}
+            onChange={(event) => setFeedback(event.target.value)}
           />
           <div className="dr-actions">
-            <span className="dr-char-count">{feedback.length}/300</span>
+            <span className="dr-char-count">{feedback.length}/{MAX_FEEDBACK_LENGTH}</span>
             <button
               type="button"
               className="btn btn-primary dr-submit"
               onClick={handleSubmit}
-              disabled={submitting}
+              disabled={isSubmitting}
             >
-              {submitting ? 'Submitting...' : 'Submit Rating'}
+              {isSubmitting ? 'Submitting...' : 'Submit rating'}
             </button>
           </div>
         </div>
       ) : null}
 
-      {message ? <p className="wishlist-message">{message}</p> : null}
+      {error ? <p className="login-message">{error}</p> : null}
     </div>
   )
 }
