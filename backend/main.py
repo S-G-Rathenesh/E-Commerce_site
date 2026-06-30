@@ -3879,7 +3879,7 @@ def create_product_review(
         raise HTTPException(status_code=400, detail='You can only review products you have purchased')
     
     # Check if order is delivered
-    if normalize_order_status(order.get('status', '')) != 'DELIVERED':
+    if normalize_order_status(order.get('status', '')) != 'DELIVERED' and normalize_order_status((order.get('shipment') or {}).get('status', '')) != 'DELIVERED':
         raise HTTPException(status_code=400, detail='You can only review products from delivered orders')
     
     # Check if user already reviewed this product from this order
@@ -3992,7 +3992,7 @@ def create_delivery_rating(
     if not order:
         raise HTTPException(status_code=404, detail='Order not found or does not belong to you')
 
-    if normalize_order_status(order.get('status', '')) != 'DELIVERED':
+    if normalize_order_status(order.get('status', '')) != 'DELIVERED' and normalize_order_status((order.get('shipment') or {}).get('status', '')) != 'DELIVERED':
         raise HTTPException(status_code=400, detail='You can only rate delivery for delivered orders')
 
     existing_rating = delivery_ratings_collection.find_one({

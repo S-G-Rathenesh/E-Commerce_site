@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import PageWrapper from '../components/PageWrapper'
-import { buildAuthHeaders } from '../utils/auth'
+import { buildAuthHeaders, refreshAuthToken } from '../utils/auth'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
 import DeliveryRating from '../components/DeliveryRating'
 import ProductReview from '../components/ProductReview'
@@ -307,7 +307,16 @@ export default function OrdersTracking() {
   const loadOrders = async () => {
     setLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/orders/my`, { headers: buildAuthHeaders(), cache: 'no-store' })
+      let response = await fetch(`${API_BASE}/orders/my`, { headers: buildAuthHeaders(), cache: 'no-store' })
+
+      // If token expired, try to refresh and retry once
+      if (response.status === 401) {
+        const refreshed = await refreshAuthToken(API_BASE)
+        if (refreshed) {
+          response = await fetch(`${API_BASE}/orders/my`, { headers: buildAuthHeaders(), cache: 'no-store' })
+        }
+      }
+
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to load orders.')

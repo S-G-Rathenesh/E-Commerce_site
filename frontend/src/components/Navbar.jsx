@@ -51,6 +51,7 @@ export default function Navbar() {
   const [notifications, setNotifications] = useState([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
   const superAdminSecretPath = getSuperAdminSecretPath()
@@ -300,6 +301,7 @@ export default function Navbar() {
 
   useEffect(() => {
     closeMegaMenu()
+    setMobileMenuOpen(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.search])
 
@@ -461,11 +463,70 @@ export default function Navbar() {
     <header className={`navbar-wrap ${activeMegaMenu ? 'navbar-wrap-open' : ''}`}>
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
-          <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
-            <img className="brand-logo" src={branding.logo_url} alt={`${branding.platform_name} logo`} />
-            <span>{branding.platform_name}</span>
-          </NavLink>
+          <div className="navbar-header">
+            <button
+              type="button"
+              className="mobile-menu-toggle"
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              aria-label="Toggle navigation menu"
+            >
+              {mobileMenuOpen ? '✕' : '☰'}
+            </button>
+            <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
+              <img className="brand-logo" src={branding.logo_url} alt={`${branding.platform_name} logo`} />
+              <span>{branding.platform_name}</span>
+            </NavLink>
+            {/* Mobile-only top-right icons */}
+            {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+              <div className="mobile-header-icons">
+                {currentUser && isCustomer ? (
+                  <button
+                    type="button"
+                    className="mobile-header-icon"
+                    onClick={() => {
+                      setNotificationsOpen((c) => !c)
+                      setProfileMenuOpen(false)
+                    }}
+                    aria-label="Notifications"
+                  >
+                    🔔
+                    {unreadNotifications > 0 ? <span className="nav-badge">{unreadNotifications}</span> : null}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={`mobile-header-icon ${isCartPulse ? 'nav-action-pulse' : ''}`}
+                  onClick={() => handleProtectedNav('/cart')}
+                  aria-label="Cart"
+                >
+                  🛍
+                </button>
+              </div>
+            )}
+          </div>
 
+          {/* Mobile search bar */}
+          {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            <div className="mobile-search-bar">
+              <span className="mobile-search-icon" aria-hidden="true">🔍</span>
+              <input
+                type="text"
+                className="mobile-search-input"
+                placeholder="Search for products, brands..."
+                onFocus={() => navigate('/products')}
+                readOnly
+              />
+            </div>
+          )}
+
+          {/* Side drawer overlay */}
+          <div
+            className={`mobile-drawer-overlay ${mobileMenuOpen ? 'mobile-drawer-overlay-open' : ''}`}
+            onClick={() => setMobileMenuOpen(false)}
+            aria-hidden="true"
+          />
+
+          <div className={`navbar-content ${mobileMenuOpen ? 'mobile-open' : ''}`}>
           {isAuthPage ? null : isAdmin ? (
             <div className="nav-links nav-links-retail nav-links-admin">
               <div className="nav-links nav-links-retail nav-links-admin-desktop">
@@ -526,35 +587,37 @@ export default function Navbar() {
               <div className="nav-staff-title">OPERATIONS DASHBOARD</div>
             </div>
           ) : (
-            <div
-              className="nav-menu-region"
-              onMouseEnter={clearCloseTimer}
-              onMouseLeave={scheduleMegaMenuClose}
-            >
-              <div className="nav-links nav-links-retail">
-                <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
-                  HOME
-                </NavLink>
+            <>
+              <div
+                className="nav-menu-region"
+                onMouseEnter={clearCloseTimer}
+                onMouseLeave={scheduleMegaMenuClose}
+              >
+                <div className="nav-links nav-links-retail">
+                  <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
+                    HOME
+                  </NavLink>
 
-                <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
-                  ALL
-                </NavLink>
+                  <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
+                    ALL
+                  </NavLink>
 
-                {navItems.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={`nav-link nav-link-retail nav-link-button ${
-                      location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
-                    }`}
-                    onMouseEnter={() => openMegaMenu(item)}
-                    onFocus={() => openMegaMenu(item)}
-                    onClick={() => goToProducts(item)}
-                    aria-expanded={activeMegaMenu === item}
-                  >
-                    {item.toUpperCase()}
-                  </button>
-                ))}
+                  {navItems.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      className={`nav-link nav-link-retail nav-link-button ${
+                        location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
+                      }`}
+                      onMouseEnter={() => openMegaMenu(item)}
+                      onFocus={() => openMegaMenu(item)}
+                      onClick={() => goToProducts(item)}
+                      aria-expanded={activeMegaMenu === item}
+                    >
+                      {item.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div
@@ -633,7 +696,7 @@ export default function Navbar() {
                   </div>
                 ) : null}
               </div>
-            </div>
+            </>
           )}
 
           <div className="nav-actions">
@@ -789,13 +852,13 @@ export default function Navbar() {
             )}
             {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <>
-                <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
+                <button type="button" className="nav-action desktop-only-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>
                   <small>Wishlist</small>
                 </button>
                 <button
                   type="button"
-                  className={`nav-action ${isCartPulse ? 'nav-action-pulse' : ''}`}
+                  className={`nav-action desktop-only-action ${isCartPulse ? 'nav-action-pulse' : ''}`}
                   aria-label="Open cart"
                   onClick={() => handleProtectedNav('/cart')}
                 >
@@ -805,8 +868,10 @@ export default function Navbar() {
               </>
             )}
           </div>
+          </div>
         </nav>
       </div>
     </header>
   )
 }
+

@@ -1,5 +1,6 @@
 import Navbar from './Navbar'
 import Footer from './Footer'
+import BottomNav from './BottomNav'
 
 export default function PageLayout({ children }) {
   return (
@@ -7,6 +8,7 @@ export default function PageLayout({ children }) {
       <Navbar />
       <main className="main-shell shell">{children}</main>
       <Footer />
+      <BottomNav />
     </>
   )
 }
