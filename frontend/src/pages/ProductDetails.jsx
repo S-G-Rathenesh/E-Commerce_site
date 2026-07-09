@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { buildAuthHeaders } from '../utils/auth'
+import { imgFallback } from '../utils/imgFallback'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 import Button from '../components/Button'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
@@ -24,51 +25,10 @@ const sizeOptions = ['S', 'M', 'L', 'XL']
 
 const normalizeRole = (role) => {
   const next = String(role || '').trim().toLowerCase()
-  if (next === 'merchant') {
-    return 'admin'
-  }
+  if (next === 'merchant') return 'admin'
   return next
 }
 
-const galleryById = {
-  1: [
-    'https://images.unsplash.com/photo-1591047139829-d91aecb6caea?auto=format&fit=crop&w=1200&q=80',
-    'https://images.unsplash.com/photo-1592878904946-b3cd3b7d20fd?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1617137968427-85924c800a22?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1527719327859-c6ce80353573?auto=format&fit=crop&w=900&q=80',
-  ],
-  2: [
-    'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=1200&q=80',
-    'https://images.unsplash.com/photo-1434389677669-e08b4cac3105?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1503342217505-b0a15ec3261c?auto=format&fit=crop&w=900&q=80',
-  ],
-  3: [
-    'https://images.unsplash.com/photo-1542272604-787c3835535d?auto=format&fit=crop&w=1200&q=80',
-    'https://images.unsplash.com/photo-1473966968600-fa801b869a1a?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1604176354204-9268737828e4?auto=format&fit=crop&w=900&q=80',
-    'https://images.unsplash.com/photo-1541099649105-f69ad21f3246?auto=format&fit=crop&w=900&q=80',
-  ],
-}
-
-const reviews = [
-  {
-    id: 'review-1',
-    name: 'Julian S.',
-    tag: 'Verified Buyer',
-    age: '2 days ago',
-    rating: 5,
-    text: 'The texture is even better in person. It has a substantial weight to it that makes it feel much more expensive than it is. Perfect for transitional weather.',
-  },
-  {
-    id: 'review-2',
-    name: 'Amara M.',
-    tag: 'Verified Buyer',
-    age: '1 week ago',
-    rating: 5,
-    text: 'Fit is slightly oversized as described. The medium sits right for a modern look. I can style it with denim or tailored pants and it works every time.',
-  },
-]
 
 const RECENTLY_VIEWED_KEY = 'veloura_recently_viewed_products_v1'
 
@@ -383,15 +343,22 @@ export default function ProductDetails() {
   const compareProducts = useMemo(() => [product, ...relatedProducts.slice(0, 2)].filter(Boolean), [product, relatedProducts])
 
   const imageSet = useMemo(() => {
-    if (!product) {
-      return []
-    }
+    if (!product) return []
 
-    const curatedSet = galleryById[product.id]
-    if (Array.isArray(curatedSet) && curatedSet.length > 0) {
-      return curatedSet
-    }
-    return [product.image, product.image, product.image]
+    // Build gallery from the product's own image data — never use a hardcoded map
+    // that could mismatch products when IDs change or new products are added.
+    const primary = String(product.image || '').trim()
+
+    // Support additional_images array if the product has one (backend may provide it)
+    const extras = Array.isArray(product.additional_images)
+      ? product.additional_images.map((u) => String(u || '').trim()).filter(Boolean)
+      : []
+
+    // Deduplicate: primary first, then extras without repeating primary
+    const all = [primary, ...extras.filter((u) => u !== primary)].filter(Boolean)
+
+    // Always show at least one image
+    return all.length > 0 ? all : [primary].filter(Boolean)
   }, [product])
 
   if (loading) {

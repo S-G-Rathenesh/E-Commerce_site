@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import Button from './Button'
+import { imgFallback } from '../utils/imgFallback'
 
 export default function ProductCard({ product, onAddToWishlist, isWishlisted = false, index = 0 }) {
   const MotionArticle = motion.article
@@ -27,7 +28,7 @@ export default function ProductCard({ product, onAddToWishlist, isWishlisted = f
           onClick={openProduct}
           aria-label={`View details for ${product.name}`}
         >
-          <img src={product.image} alt={product.name} className="product-image" />
+          <img src={product.image} alt={product.name} className="product-image" onError={imgFallback} />
         </button>
         {product?.stock_status === 'Out of Stock' ? (
           <span className="product-badge badge-out">Out of Stock</span>

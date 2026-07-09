@@ -96,6 +96,8 @@ export default function DeliveryDashboard() {
   const [isOnline, setIsOnline] = useState(true)
   const [loading, setLoading] = useState(true)
   const [actionLoadingByOrder, setActionLoadingByOrder] = useState({})
+  const [deliveryRatings, setDeliveryRatings] = useState([])
+  const [deliveryRatingsLoading, setDeliveryRatingsLoading] = useState(true)
 
   // Merge assigned + pincode orders, dedup by order_id, assigned takes precedence
   const orders = useMemo(() => {
@@ -158,6 +160,23 @@ export default function DeliveryDashboard() {
         weekly_earnings: Number(data?.weekly_earnings || 0),
       })
     } catch { /* keep */ }
+  }
+
+  const loadDeliveryRatings = async () => {
+    setDeliveryRatingsLoading(true)
+    try {
+      const res = await requestWithAuth(`${API_BASE}/delivery/ratings?limit=12`, { method: 'GET' })
+      const data = await res.json()
+      if (!res.ok) {
+        setDeliveryRatings([])
+        return
+      }
+      setDeliveryRatings(Array.isArray(data?.ratings) ? data.ratings : [])
+    } catch {
+      setDeliveryRatings([])
+    } finally {
+      setDeliveryRatingsLoading(false)
+    }
   }
 
   const loadDeliveryProfile = async () => {
@@ -230,6 +249,7 @@ export default function DeliveryDashboard() {
       const valid = await validateTokenOnLoad()
       if (!valid) { clearStoredUser(); navigate('/login', { replace: true }); return }
       await loadDeliveryProfile()
+      await loadDeliveryRatings()
       loadOrders()
     }
     initialize()
@@ -243,9 +263,23 @@ export default function DeliveryDashboard() {
   }, [isOnline])
 
   useEffect(() => {
+    if (isOnline) {
+      loadDeliveryRatings()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline])
+
+  useEffect(() => {
     if (!isOnline) return undefined
+    const handleNotificationChange = () => {
+      loadOrders()
+    }
+    window.addEventListener('notifications-changed', handleNotificationChange)
     const id = setInterval(loadOrders, 15000)
-    return () => clearInterval(id)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('notifications-changed', handleNotificationChange)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline])
 
@@ -398,6 +432,46 @@ export default function DeliveryDashboard() {
             <span>Current week</span>
           </article>
         </div>
+
+        <section className="section-card panel-stack" style={{ marginTop: '16px' }}>
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Customer feedback</p>
+              <h2>Delivery ratings received</h2>
+              <p>Only ratings linked to your delivery account are shown here.</p>
+            </div>
+          </div>
+
+          {deliveryRatingsLoading ? <p>Loading delivery ratings...</p> : null}
+          {!deliveryRatingsLoading && deliveryRatings.length === 0 ? <p>No delivery ratings yet.</p> : null}
+
+          {!deliveryRatingsLoading && deliveryRatings.length > 0 ? (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Order</th>
+                    <th>Customer</th>
+                    <th>Rating</th>
+                    <th>Feedback</th>
+                    <th>Submitted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deliveryRatings.map((rating) => (
+                    <tr key={rating.rating_id || `${rating.order_id}-${rating.customer_email}`}>
+                      <td>{rating.order_id}</td>
+                      <td>{rating.customer_email || 'Customer'}</td>
+                      <td><strong>{rating.rating} / 5</strong></td>
+                      <td style={{ maxWidth: '320px' }}>{rating.feedback || 'No written feedback'}</td>
+                      <td>{formatDateTime(rating.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </section>
 
         <div className="tab-strip" style={{ marginTop: '16px' }}>
           {DELIVERY_TABS.map((tab) => {

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import Button from '../components/Button'
-import ImageUploadField from '../components/ImageUploadField'
 import Input from '../components/Input'
 import RevenueChart from '../components/RevenueChart'
 import OrdersBarChart from '../components/OrdersBarChart'
@@ -16,23 +15,7 @@ import { fetchCatalogProducts } from '../utils/catalog'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const TRACKING_STEPS = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
-const statsByRange = {
-  TODAY: [
-    { label: 'Total Sales', value: 'Rs. 84,000', trend: '+4.2%', sparkline: [42, 48, 44, 50, 53, 57, 60] },
-    { label: 'Orders', value: '214', trend: '+3.1%', sparkline: [22, 28, 26, 31, 33, 30, 34] },
-    { label: 'New Customers', value: '38', trend: '+1.5%', sparkline: [4, 6, 5, 7, 6, 8, 9] },
-  ],
-  WEEK: [
-    { label: 'Total Sales', value: 'Rs. 4,62,000', trend: '+9.5%', sparkline: [260, 280, 276, 292, 315, 328, 344] },
-    { label: 'Orders', value: '1,284', trend: '+8.2%', sparkline: [92, 108, 99, 116, 121, 127, 138] },
-    { label: 'New Customers', value: '206', trend: '+2.4%', sparkline: [21, 26, 24, 28, 30, 36, 41] },
-  ],
-  MONTH: [
-    { label: 'Total Sales', value: 'Rs. 18,40,000', trend: '+12.5%', sparkline: [880, 930, 910, 980, 1050, 1130, 1210] },
-    { label: 'Orders', value: '5,320', trend: '+10.8%', sparkline: [280, 300, 325, 341, 366, 390, 418] },
-    { label: 'New Customers', value: '804', trend: '+4.7%', sparkline: [40, 43, 51, 56, 60, 63, 68] },
-  ],
-}
+
 
 const dashboardSummary = {
   dashboard: {
@@ -79,15 +62,16 @@ export default function AdminDashboard() {
   const [recentOrders, setRecentOrders] = useState([])
   const [ordersLoading, setOrdersLoading] = useState(true)
   const [range, setRange] = useState('WEEK')
-  const [bannerTitle, setBannerTitle] = useState('')
-  const [bannerSubtitle, setBannerSubtitle] = useState('')
-  const [bannerImageUrl, setBannerImageUrl] = useState('')
-  const [bannerImageUploading, setBannerImageUploading] = useState(false)
-  const [merchantBanners, setMerchantBanners] = useState([])
-  const [bannerMessage, setBannerMessage] = useState('')
+  const [dashboardStats, setDashboardStats] = useState(null)
+  const [chartData, setChartData] = useState({ revenue: [], orders: [] })
+  const [statsLoading, setStatsLoading] = useState(true)
   const [trackingModalOrderId, setTrackingModalOrderId] = useState('')
   const [trackingModalData, setTrackingModalData] = useState(null)
   const [trackingModalLogs, setTrackingModalLogs] = useState([])
+  const [productFeedback, setProductFeedback] = useState([])
+  const [productFeedbackLoading, setProductFeedbackLoading] = useState(true)
+  const [deliveryRatings, setDeliveryRatings] = useState([])
+  const [deliveryRatingsLoading, setDeliveryRatingsLoading] = useState(true)
 
   const lowStockItems = catalogProducts
     .map((product) => ({ ...product, stock: Number(product.stock || 0) }))
@@ -96,8 +80,9 @@ export default function AdminDashboard() {
   const delayedOrders = recentOrders.filter((order) => getSlaState(order).label === 'Delayed')
 
   const renderSparkline = (values) => {
-    const max = Math.max(...values)
-    const min = Math.min(...values)
+    if (!values || values.length === 0) return null
+    const max = Math.max(...values, 1) // Ensure max > min if all zero
+    const min = Math.min(...values, 0)
     const points = values
       .map((value, index) => {
         const x = (index / (values.length - 1)) * 100
@@ -176,58 +161,51 @@ export default function AdminDashboard() {
     }
   }
 
-  const loadMerchantBannerRequests = async () => {
+  const loadFeedbackPanels = async () => {
+    setProductFeedbackLoading(true)
+    setDeliveryRatingsLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/merchant/banner-requests`, {
-        headers: buildAuthHeaders(),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        setMerchantBanners([])
-        return
-      }
-      setMerchantBanners(Array.isArray(data?.banners) ? data.banners : [])
+      const [productResponse, deliveryResponse] = await Promise.all([
+        fetch(`${API_BASE}/admin/product-feedback?limit=12`, {
+          headers: buildAuthHeaders(),
+          cache: 'no-store',
+        }),
+        fetch(`${API_BASE}/admin/delivery-ratings?limit=12`, {
+          headers: buildAuthHeaders(),
+          cache: 'no-store',
+        }),
+      ])
+
+      const productData = await productResponse.json().catch(() => ({}))
+      const deliveryData = await deliveryResponse.json().catch(() => ({}))
+
+      setProductFeedback(Array.isArray(productData?.reviews) ? productData.reviews : [])
+      setDeliveryRatings(Array.isArray(deliveryData?.ratings) ? deliveryData.ratings : [])
     } catch {
-      setMerchantBanners([])
+      setProductFeedback([])
+      setDeliveryRatings([])
+    } finally {
+      setProductFeedbackLoading(false)
+      setDeliveryRatingsLoading(false)
     }
   }
 
-  const submitBannerRequest = async (event) => {
-    event.preventDefault()
-    setBannerMessage('')
-    if (bannerImageUploading) {
-      setBannerMessage('Please wait for the banner image upload to finish before submitting.')
-      return
-    }
-
+  const loadDashboardStats = async () => {
+    setStatsLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/merchant/banner-requests`, {
-        method: 'POST',
-        headers: {
-          ...buildAuthHeaders(),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          title: bannerTitle,
-          subtitle: bannerSubtitle,
-          image_url: bannerImageUrl,
-          target_path: '/products',
-          offer_text: bannerSubtitle,
-        }),
+      const response = await fetch(`${API_BASE}/admin/dashboard-stats`, {
+        headers: buildAuthHeaders(),
+        cache: 'no-store',
       })
       const data = await response.json()
-      if (!response.ok) {
-        setBannerMessage(data?.detail || 'Unable to submit banner request.')
-        return
+      if (response.ok) {
+        setDashboardStats(data.statsByRange)
+        setChartData(data.chartData)
       }
-
-      setBannerMessage(data?.message || 'Banner submitted for approval.')
-      setBannerTitle('')
-      setBannerSubtitle('')
-      setBannerImageUrl('')
-      await loadMerchantBannerRequests()
     } catch {
-      setBannerMessage('Unable to submit banner request right now.')
+      // Keep previous data on error
+    } finally {
+      setStatsLoading(false)
     }
   }
 
@@ -243,7 +221,8 @@ export default function AdminDashboard() {
 
     loadCatalogProducts()
     loadRecentOrders()
-    loadMerchantBannerRequests()
+    loadFeedbackPanels()
+    loadDashboardStats()
 
     return () => {
       mounted = false
@@ -257,15 +236,18 @@ export default function AdminDashboard() {
 
     const syncRecentOrders = () => {
       loadRecentOrders()
+      loadDashboardStats()
     }
 
     window.addEventListener('focus', syncRecentOrders)
     document.addEventListener('visibilitychange', syncRecentOrders)
+    window.addEventListener('notifications-changed', syncRecentOrders)
 
     return () => {
       clearInterval(intervalId)
       window.removeEventListener('focus', syncRecentOrders)
       document.removeEventListener('visibilitychange', syncRecentOrders)
+      window.removeEventListener('notifications-changed', syncRecentOrders)
     }
   }, [])
 
@@ -308,29 +290,33 @@ export default function AdminDashboard() {
           </div>
 
           <div className="dashboard-grid">
-            {statsByRange[range].map((stat, index) => (
-              <MotionArticle
-                key={stat.label}
-                className={`panel stat-card card stat-card-${['blue', 'green', 'orange'][index] || 'blue'}`}
-                whileHover={{
-                  y: -4,
-                  scale: 1.03,
-                  boxShadow: '0 12px 24px rgba(15, 23, 42, 0.16)',
-                }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                initial={{ opacity: 0, y: 8 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, amount: 0.3 }}
-                style={{ willChange: 'transform, opacity' }}
-              >
-                <p>{stat.label}</p>
-                <h3 className="stat-value">
-                  <AnimatedCounter value={stat.value} duration={420 + index * 40} />
-                </h3>
-                <span>{stat.trend}</span>
-                {renderSparkline(stat.sparkline)}
-              </MotionArticle>
-            ))}
+            {statsLoading && !dashboardStats ? (
+              <p>Loading stats...</p>
+            ) : (
+              (dashboardStats?.[range] || []).map((stat, index) => (
+                <MotionArticle
+                  key={stat.label}
+                  className={`panel stat-card card stat-card-${['blue', 'green', 'orange'][index] || 'blue'}`}
+                  whileHover={{
+                    y: -4,
+                    scale: 1.03,
+                    boxShadow: '0 12px 24px rgba(15, 23, 42, 0.16)',
+                  }}
+                  transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                  initial={{ opacity: 0, y: 8 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.3 }}
+                  style={{ willChange: 'transform, opacity' }}
+                >
+                  <p>{stat.label}</p>
+                  <h3 className="stat-value">
+                    <AnimatedCounter value={stat.value} duration={420 + index * 40} />
+                  </h3>
+                  <span>{stat.trend}</span>
+                  {renderSparkline(stat.sparkline)}
+                </MotionArticle>
+              ))
+            )}
           </div>
         </section>
 
@@ -360,7 +346,7 @@ export default function AdminDashboard() {
               </div>
               <p>Last 30 days</p>
             </div>
-            <RevenueChart />
+            <RevenueChart data={chartData?.revenue || []} />
             <div className="section-head" style={{ marginTop: 8 }}>
               <div>
                 <h2>Orders overview</h2>
@@ -368,7 +354,7 @@ export default function AdminDashboard() {
               </div>
               <p>Last 7 days</p>
             </div>
-            <OrdersBarChart />
+            <OrdersBarChart data={chartData?.orders || []} />
         </AnimatedSection>
 
         <AnimatedSection as="section" delay={0.04} className="panel panel-stack section card dashboard-table-card">
@@ -422,6 +408,98 @@ export default function AdminDashboard() {
                     </tr>
                     )
                   })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </AnimatedSection>
+
+        <AnimatedSection as="section" delay={0.06} className="panel panel-stack section card dashboard-table-card">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Feedback</p>
+              <h2>Customer product reviews</h2>
+              <p>Latest approved reviews with the live product rating beside each item.</p>
+            </div>
+          </div>
+
+          {productFeedbackLoading ? <p>Loading customer feedback...</p> : null}
+          {!productFeedbackLoading && productFeedback.length === 0 ? <p>No customer reviews available yet.</p> : null}
+
+          {!productFeedbackLoading && productFeedback.length > 0 ? (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Customer</th>
+                    <th>Rating</th>
+                    <th>Review</th>
+                    <th>Submitted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productFeedback.map((review) => (
+                    <tr key={review.review_id}>
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <strong>{review.product_name || `Product #${review.product_id}`}</strong>
+                          <span style={{ fontSize: '12px', color: 'var(--ink-soft)' }}>
+                            {review.product_section || ''}{review.product_category ? ` • ${review.product_category}` : ''}
+                          </span>
+                        </div>
+                      </td>
+                      <td>{review.customer_name || review.customer_email || 'Customer'}</td>
+                      <td>
+                        <strong>{review.rating} / 5</strong>
+                        {review.product_rating ? <div style={{ fontSize: '12px', color: 'var(--ink-soft)' }}>Live: {review.product_rating.toFixed(1)}</div> : null}
+                      </td>
+                      <td style={{ maxWidth: '320px' }}>{review.review_text || 'No written review'}</td>
+                      <td>{formatDateTime(review.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </AnimatedSection>
+
+        <AnimatedSection as="section" delay={0.08} className="panel panel-stack section card dashboard-table-card">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Delivery</p>
+              <h2>Customer delivery ratings</h2>
+              <p>Track how delivery associates are being rated by customers.</p>
+            </div>
+          </div>
+
+          {deliveryRatingsLoading ? <p>Loading delivery ratings...</p> : null}
+          {!deliveryRatingsLoading && deliveryRatings.length === 0 ? <p>No delivery ratings available yet.</p> : null}
+
+          {!deliveryRatingsLoading && deliveryRatings.length > 0 ? (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Order</th>
+                    <th>Customer</th>
+                    <th>Partner</th>
+                    <th>Rating</th>
+                    <th>Feedback</th>
+                    <th>Submitted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deliveryRatings.map((rating) => (
+                    <tr key={rating.rating_id || `${rating.order_id}-${rating.customer_email}`}>
+                      <td>{rating.order_id}</td>
+                      <td>{rating.customer_email || 'Customer'}</td>
+                      <td>{rating.delivery_partner_email || 'Unassigned'}</td>
+                      <td><strong>{rating.rating} / 5</strong></td>
+                      <td style={{ maxWidth: '320px' }}>{rating.feedback || 'No written feedback'}</td>
+                      <td>{formatDateTime(rating.created_at)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -542,71 +620,6 @@ export default function AdminDashboard() {
             </div>
           )
         })() : null}
-
-        <AnimatedSection as="section" delay={0.06} className="panel panel-stack section card dashboard-table-card">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">Campaigns</p>
-              <h2>Banner request workflow</h2>
-              <p>Submit homepage banner requests for super admin approval.</p>
-            </div>
-          </div>
-
-          <form className="form-grid" onSubmit={submitBannerRequest}>
-            <Input
-              label="Banner Title"
-              value={bannerTitle}
-              onChange={(event) => setBannerTitle(event.target.value)}
-              required
-            />
-            <Input
-              label="Banner Subtitle"
-              value={bannerSubtitle}
-              onChange={(event) => setBannerSubtitle(event.target.value)}
-            />
-            <ImageUploadField
-              label="Banner image"
-              value={bannerImageUrl}
-              onChange={setBannerImageUrl}
-              onUploadingChange={setBannerImageUploading}
-              description="Upload the homepage banner artwork or paste a hosted image URL."
-              required
-            />
-            <Button type="submit" disabled={bannerImageUploading}>
-              {bannerImageUploading ? 'Upload in progress...' : 'Submit Banner Request'}
-            </Button>
-          </form>
-
-          {bannerMessage ? <p>{bannerMessage}</p> : null}
-
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {merchantBanners.length === 0 ? (
-                  <tr>
-                    <td colSpan={3}>No banner requests yet.</td>
-                  </tr>
-                ) : (
-                  merchantBanners.map((banner) => (
-                    <tr key={banner.id}>
-                      <td>{banner.title}</td>
-                      <td>{banner.status}</td>
-                      <td>{banner.updated_at ? new Date(banner.updated_at).toLocaleString() : 'N/A'}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </AnimatedSection>
-
       </div>
     </PageWrapper>
   )

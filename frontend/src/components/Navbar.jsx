@@ -3,7 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
 import { fetchCatalogProducts } from '../utils/catalog'
-import { fetchPublicPlatformSettings, getCachedBranding, getSuperAdminSecretPath, onBrandingUpdated } from '../utils/platform'
+import { fetchPublicPlatformSettings, getCachedBranding, onBrandingUpdated } from '../utils/platform'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -22,9 +22,6 @@ const uniqueValues = (values) => [...new Set(values.filter(Boolean))]
 
 const normalizeRole = (role) => {
   const next = String(role || '').trim().toLowerCase()
-  if (next === 'super_admin' || next === 'superadmin') {
-    return 'super_admin'
-  }
   if (next === 'merchant' || next === 'admin') {
     return 'admin'
   }
@@ -51,9 +48,9 @@ export default function Navbar() {
   const [notifications, setNotifications] = useState([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
-  const superAdminSecretPath = getSuperAdminSecretPath()
   const closeMenuTimerRef = useRef(null)
   const cartPulseTimerRef = useRef(null)
   const notificationsMenuRef = useRef(null)
@@ -248,6 +245,54 @@ export default function Navbar() {
   }, [currentUser])
 
   useEffect(() => {
+    if (!currentUser?.id) {
+      return
+    }
+
+    const wsBase = API_BASE.replace(/^http/, 'ws')
+    let ws = null
+    let reconnectTimeout = null
+    let isDisposed = false
+
+    const connectWs = () => {
+      if (isDisposed) return
+      
+      ws = new WebSocket(`${wsBase}/ws/orders/${encodeURIComponent(currentUser.id)}`)
+      
+      ws.onmessage = (event) => {
+        try {
+          loadNotifications()
+          window.dispatchEvent(new Event('notifications-changed'))
+        } catch (e) {
+          // ignore parsing error
+        }
+      }
+      
+      ws.onclose = () => {
+        if (!isDisposed) {
+          reconnectTimeout = setTimeout(connectWs, 5000)
+        }
+      }
+      
+      ws.onerror = () => {
+        ws.close()
+      }
+    }
+
+    connectWs()
+
+    return () => {
+      isDisposed = true
+      if (ws) {
+        ws.close()
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+      }
+    }
+  }, [currentUser])
+
+  useEffect(() => {
     let mounted = true
 
     const loadCatalog = async () => {
@@ -300,6 +345,7 @@ export default function Navbar() {
 
   useEffect(() => {
     closeMegaMenu()
+    setMobileMenuOpen(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.search])
 
@@ -329,7 +375,6 @@ export default function Navbar() {
   const displayName = (currentUser?.full_name || '').trim() || 'Guest'
   const role = normalizeRole(currentUser?.role)
   const isAdmin = role === 'admin'
-  const isSuperAdmin = role === 'super_admin'
   const isDelivery = role === 'delivery'
   const isOperations = role === 'operations'
   const isCustomer = role === 'user'
@@ -430,9 +475,7 @@ export default function Navbar() {
     }
 
     if ((role === 'admin' || role === 'delivery' || role === 'operations') && (path === '/wishlist' || path === '/cart')) {
-      if (role === 'super_admin') {
-        navigate(superAdminSecretPath)
-      } else if (role === 'admin') {
+      if (role === 'admin') {
         navigate('/admin/dashboard')
       } else if (role === 'delivery') {
         navigate('/delivery')
@@ -461,11 +504,70 @@ export default function Navbar() {
     <header className={`navbar-wrap ${activeMegaMenu ? 'navbar-wrap-open' : ''}`}>
       <div className="navbar-shell">
         <nav className="navbar shell navbar-retail">
-          <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
-            <img className="brand-logo" src={branding.logo_url} alt={`${branding.platform_name} logo`} />
-            <span>{branding.platform_name}</span>
-          </NavLink>
+          <div className="navbar-header">
+            <button
+              type="button"
+              className="mobile-menu-toggle"
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              aria-label="Toggle navigation menu"
+            >
+              {mobileMenuOpen ? '✕' : '☰'}
+            </button>
+            <NavLink to="/" className="brand brand-retail" aria-label="Movi Fashion E-Commerce Platform home">
+              <img className="brand-logo" src={branding.logo_url} alt={`${branding.platform_name} logo`} />
+              <span>{branding.platform_name}</span>
+            </NavLink>
+            {/* Mobile-only top-right icons */}
+            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
+              <div className="mobile-header-icons">
+                {currentUser && isCustomer ? (
+                  <button
+                    type="button"
+                    className="mobile-header-icon"
+                    onClick={() => {
+                      setNotificationsOpen((c) => !c)
+                      setProfileMenuOpen(false)
+                    }}
+                    aria-label="Notifications"
+                  >
+                    🔔
+                    {unreadNotifications > 0 ? <span className="nav-badge">{unreadNotifications}</span> : null}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={`mobile-header-icon ${isCartPulse ? 'nav-action-pulse' : ''}`}
+                  onClick={() => handleProtectedNav('/cart')}
+                  aria-label="Cart"
+                >
+                  🛍
+                </button>
+              </div>
+            )}
+          </div>
 
+          {/* Mobile search bar */}
+          {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            <div className="mobile-search-bar">
+              <span className="mobile-search-icon" aria-hidden="true">🔍</span>
+              <input
+                type="text"
+                className="mobile-search-input"
+                placeholder="Search for products, brands..."
+                onFocus={() => navigate('/products')}
+                readOnly
+              />
+            </div>
+          )}
+
+          {/* Side drawer overlay */}
+          <div
+            className={`mobile-drawer-overlay ${mobileMenuOpen ? 'mobile-drawer-overlay-open' : ''}`}
+            onClick={() => setMobileMenuOpen(false)}
+            aria-hidden="true"
+          />
+
+          <div className={`navbar-content ${mobileMenuOpen ? 'mobile-open' : ''}`}>
           {isAuthPage ? null : isAdmin ? (
             <div className="nav-links nav-links-retail nav-links-admin">
               <div className="nav-links nav-links-retail nav-links-admin-desktop">
@@ -499,18 +601,6 @@ export default function Navbar() {
                 ))}
               </select>
             </div>
-          ) : isSuperAdmin ? (
-            <div className="nav-links nav-links-retail nav-links-admin">
-              <div className="nav-links nav-links-retail nav-links-admin-desktop">
-                <button
-                  type="button"
-                  className={`nav-link nav-link-retail nav-link-button ${location.pathname === superAdminSecretPath ? 'active-link' : ''}`}
-                  onClick={() => navigate(superAdminSecretPath)}
-                >
-                  PLATFORM CONTROL
-                </button>
-              </div>
-            </div>
           ) : isDelivery ? (
             <div className="nav-links nav-links-retail">
               <button
@@ -526,35 +616,37 @@ export default function Navbar() {
               <div className="nav-staff-title">OPERATIONS DASHBOARD</div>
             </div>
           ) : (
-            <div
-              className="nav-menu-region"
-              onMouseEnter={clearCloseTimer}
-              onMouseLeave={scheduleMegaMenuClose}
-            >
-              <div className="nav-links nav-links-retail">
-                <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
-                  HOME
-                </NavLink>
+            <>
+              <div
+                className="nav-menu-region"
+                onMouseEnter={clearCloseTimer}
+                onMouseLeave={scheduleMegaMenuClose}
+              >
+                <div className="nav-links nav-links-retail">
+                  <NavLink to="/" end className={`nav-link nav-link-retail ${isHomeActive ? 'active-link' : ''}`}>
+                    HOME
+                  </NavLink>
 
-                <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
-                  ALL
-                </NavLink>
+                  <NavLink to="/products" end className={`nav-link nav-link-retail ${isAllActive ? 'active-link' : ''}`}>
+                    ALL
+                  </NavLink>
 
-                {navItems.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={`nav-link nav-link-retail nav-link-button ${
-                      location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
-                    }`}
-                    onMouseEnter={() => openMegaMenu(item)}
-                    onFocus={() => openMegaMenu(item)}
-                    onClick={() => goToProducts(item)}
-                    aria-expanded={activeMegaMenu === item}
-                  >
-                    {item.toUpperCase()}
-                  </button>
-                ))}
+                  {navItems.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      className={`nav-link nav-link-retail nav-link-button ${
+                        location.pathname === '/products' && sectionParam === item.toLowerCase() ? 'active-link' : ''
+                      }`}
+                      onMouseEnter={() => openMegaMenu(item)}
+                      onFocus={() => openMegaMenu(item)}
+                      onClick={() => goToProducts(item)}
+                      aria-expanded={activeMegaMenu === item}
+                    >
+                      {item.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div
@@ -633,7 +725,7 @@ export default function Navbar() {
                   </div>
                 ) : null}
               </div>
-            </div>
+            </>
           )}
 
           <div className="nav-actions">
@@ -721,25 +813,6 @@ export default function Navbar() {
                 </div>
                 </div>
               </div>
-            ) : currentUser && isSuperAdmin ? (
-              <div className="nav-staff-actions">
-                {renderNotificationsMenu()}
-                <div className="profile-menu">
-                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open super admin profile menu">
-                  <span className="profile-name">👤 {displayName}</span>
-                  <span className="dropdown-icon" aria-hidden="true">▼</span>
-                </button>
-
-                <div className="dropdown-menu" role="menu" aria-label="Super admin profile menu">
-                  <button type="button" role="menuitem" onClick={() => navigate(superAdminSecretPath)}>
-                    Dashboard
-                  </button>
-                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
-                    Logout
-                  </button>
-                </div>
-                </div>
-              </div>
             ) : currentUser && isDelivery ? (
               <div className="nav-staff-actions">
                 {renderNotificationsMenu({
@@ -787,15 +860,15 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <>
-                <button type="button" className="nav-action" onClick={() => handleProtectedNav('/wishlist')}>
+                <button type="button" className="nav-action desktop-only-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>
                   <small>Wishlist</small>
                 </button>
                 <button
                   type="button"
-                  className={`nav-action ${isCartPulse ? 'nav-action-pulse' : ''}`}
+                  className={`nav-action desktop-only-action ${isCartPulse ? 'nav-action-pulse' : ''}`}
                   aria-label="Open cart"
                   onClick={() => handleProtectedNav('/cart')}
                 >
@@ -805,8 +878,10 @@ export default function Navbar() {
               </>
             )}
           </div>
+          </div>
         </nav>
       </div>
     </header>
   )
 }
+

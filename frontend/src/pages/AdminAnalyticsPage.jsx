@@ -13,10 +13,10 @@ import { fetchCatalogProducts } from '../utils/catalog'
 
 const palette = ['#0f62fe', '#3a80ff', '#69a1ff', '#9ec0ff', '#d0e2ff']
 
-const metricsByRange = {
-  WEEKLY: { visitors: 18000, orders: 1260, revenue: 358000 },
-  MONTHLY: { visitors: 76000, orders: 5120, revenue: 1420000 },
-  YEARLY: { visitors: 912000, orders: 64400, revenue: 17850000 },
+const defaultMetrics = {
+  WEEKLY: { visitors: 0, orders: 0, revenue: 0 },
+  MONTHLY: { visitors: 0, orders: 0, revenue: 0 },
+  YEARLY: { visitors: 0, orders: 0, revenue: 0 },
 }
 
 function toCsv(rows) {
@@ -32,6 +32,9 @@ function toCsv(rows) {
 export default function AdminAnalyticsPage() {
   const [range, setRange] = useState('MONTHLY')
   const [catalogProducts, setCatalogProducts] = useState([])
+  const [metricsByRange, setMetricsByRange] = useState(defaultMetrics)
+  const [chartData, setChartData] = useState({ revenue: [] })
+  const [analyticsLoading, setAnalyticsLoading] = useState(true)
 
   useEffect(() => {
     let mounted = true
@@ -44,7 +47,29 @@ export default function AdminAnalyticsPage() {
       setCatalogProducts(Array.isArray(data) ? data : [])
     }
 
+    const loadAnalyticsStats = async () => {
+      setAnalyticsLoading(true)
+      try {
+        const { buildAuthHeaders } = await import('../utils/auth')
+        const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+        const response = await fetch(`${API_BASE}/admin/analytics-stats`, {
+          headers: buildAuthHeaders(),
+          cache: 'no-store',
+        })
+        const data = await response.json()
+        if (response.ok && mounted) {
+          setMetricsByRange(data.metricsByRange || defaultMetrics)
+          setChartData(data.chartData || { revenue: [] })
+        }
+      } catch {
+        // keep defaults
+      } finally {
+        if (mounted) setAnalyticsLoading(false)
+      }
+    }
+
     loadCatalog()
+    loadAnalyticsStats()
 
     return () => {
       mounted = false
@@ -78,8 +103,8 @@ export default function AdminAnalyticsPage() {
     [catalogProducts],
   )
 
-  const metrics = metricsByRange[range]
-  const conversionRate = ((metrics.orders / metrics.visitors) * 100).toFixed(2)
+  const metrics = metricsByRange[range] || defaultMetrics[range]
+  const conversionRate = metrics.visitors > 0 ? ((metrics.orders / metrics.visitors) * 100).toFixed(2) : '0.00'
 
   const exportCsv = () => {
     const rows = topProducts.map((product) => ({
@@ -132,12 +157,12 @@ export default function AdminAnalyticsPage() {
           <div className="dashboard-grid">
             <article className="panel stat-card card">
               <p>Revenue</p>
-              <h3 className="stat-value">Rs. {metrics.revenue.toLocaleString('en-IN')}</h3>
+              <h3 className="stat-value">Rs. {Number(metrics.revenue || 0).toLocaleString('en-IN')}</h3>
               <span>{range.toLowerCase()} period</span>
             </article>
             <article className="panel stat-card card">
               <p>Visitors</p>
-              <h3 className="stat-value">{metrics.visitors.toLocaleString('en-IN')}</h3>
+              <h3 className="stat-value">{Number(metrics.visitors || 0).toLocaleString('en-IN')}</h3>
               <span>Traffic volume</span>
             </article>
             <article className="panel stat-card card">
@@ -155,7 +180,7 @@ export default function AdminAnalyticsPage() {
               <h2>Revenue trend</h2>
             </div>
           </div>
-          <RevenueChart />
+          <RevenueChart data={chartData?.revenue || []} />
         </section>
 
         <section className="section analytics-grid">

@@ -258,7 +258,7 @@ export default function MerchantRegister() {
         return
       }
 
-      setMessage(data.message || `Merchant registration submitted for ${form.storeName}.`)
+      setMessage(data.message || `Merchant account created for ${form.storeName}.`)
       navigate('/login')
     } catch {
       const existing = findLocalAccountByEmail(form.email)
@@ -273,10 +273,11 @@ export default function MerchantRegister() {
         password: form.password,
         provider: 'email',
         role: 'admin',
-        status: 'PENDING',
+        status: 'ACTIVE',
+        merchant_status: 'APPROVED',
       })
 
-      setMessage(`Merchant registration submitted for ${form.storeName}.`)
+      setMessage(`Merchant account created for ${form.storeName}.`)
       navigate('/login')
     }
   }

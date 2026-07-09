@@ -37,6 +37,7 @@ export default function Products() {
     return new Set(ids)
   })
   const [wishlistMessage, setWishlistMessage] = useState('')
+  const [showFiltersMobile, setShowFiltersMobile] = useState(false)
 
   const section = searchParams.get('section') || ''
   const sectionLabel = section ? section.charAt(0).toUpperCase() + section.slice(1) : 'Collection'
@@ -268,8 +269,28 @@ export default function Products() {
       )}
 
       <AnimatedSection as="section" className="catalog-layout">
-        <aside className="catalog-sidebar section-card panel-stack">
-          <div>
+        <div
+          className={`mobile-filter-overlay ${showFiltersMobile ? 'mobile-filter-overlay-open' : ''}`}
+          onClick={() => setShowFiltersMobile(false)}
+        />
+
+        <aside className={`catalog-sidebar section-card panel-stack ${showFiltersMobile ? 'mobile-open' : ''}`}>
+          <div className="sidebar-header-mobile">
+            <div>
+              <p className="eyebrow">Filters</p>
+              <h2>Refine your search</h2>
+            </div>
+            <button
+              type="button"
+              className="close-filters-btn"
+              onClick={() => setShowFiltersMobile(false)}
+              aria-label="Close filters"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="sidebar-header-desktop">
             <p className="eyebrow">Filters</p>
             <h2>Refine your search</h2>
           </div>
@@ -344,6 +365,12 @@ export default function Products() {
               Clear all filters
             </button>
           </div>
+
+          <div className="filter-block mobile-only-filter-block">
+            <button type="button" className="btn btn-primary" style={{ width: '100%' }} onClick={() => setShowFiltersMobile(false)}>
+              Show {filtered.length} Results
+            </button>
+          </div>
         </aside>
 
         <main className="catalog-main panel-stack">
@@ -356,6 +383,13 @@ export default function Products() {
             />
 
             <div className="toolbar-meta">
+              <button
+                type="button"
+                className="mobile-filter-trigger"
+                onClick={() => setShowFiltersMobile(true)}
+              >
+                ⚙️ Filters
+              </button>
               <p>{filtered.length} items</p>
               <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
                 <option value="featured">Featured</option>
