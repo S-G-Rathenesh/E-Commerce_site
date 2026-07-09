@@ -7,10 +7,11 @@
  *   <img src={url} alt="..." onError={imgFallback} />
  */
 export function imgFallback(event) {
-  const img = event.currentTarget
+  const img = event.currentTarget;
+
   // Avoid infinite loop if the fallback src itself fails
-  img.onerror = null
-  img.style.opacity = '0'
+  img.onerror = null;
+  img.style.opacity = "0";
 }
 
 /**
@@ -18,10 +19,13 @@ export function imgFallback(event) {
  * Useful inside flex/grid layouts where the image slot must maintain its size.
  */
 export function imgFallbackReplace(event) {
-  const img = event.currentTarget
-  img.onerror = null
-  const placeholder = document.createElement('div')
-  placeholder.className = img.className + ' img-placeholder'
-  placeholder.setAttribute('aria-hidden', 'true')
-  img.parentNode?.replaceChild(placeholder, img)
+  const img = event.currentTarget;
+
+  img.onerror = null;
+
+  const placeholder = document.createElement("div");
+  placeholder.className = img.className + " img-placeholder";
+  placeholder.setAttribute("aria-hidden", "true");
+
+  img.parentNode?.replaceChild(placeholder, img);
 }
