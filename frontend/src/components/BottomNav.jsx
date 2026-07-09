@@ -3,7 +3,6 @@ import { getStoredUser } from '../utils/auth'
 
 const normalizeRole = (role) => {
   const next = String(role || '').trim().toLowerCase()
-  if (next === 'super_admin' || next === 'superadmin') return 'super_admin'
   if (next === 'merchant' || next === 'admin') return 'admin'
   if (next === 'customer' || next === 'user') return 'user'
   if (next === 'delivery' || next === 'delivery_associate') return 'delivery'
@@ -17,7 +16,7 @@ export default function BottomNav() {
   const role = normalizeRole(user?.role)
 
   // Only show for customers / guests on mobile
-  if (role === 'admin' || role === 'super_admin' || role === 'delivery' || role === 'operations') {
+  if (role === 'admin' || role === 'delivery' || role === 'operations') {
     return null
   }
 

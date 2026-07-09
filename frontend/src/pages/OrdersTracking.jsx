@@ -11,6 +11,23 @@ import { addToWishlist } from '../utils/wishlist'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const EMPTY_FILTER = '__ALL__'
 
+/* ── ETA cache: order_id → { eta_text, arrived_early, status_message, eta_date } ── */
+const etaCache = {}
+
+async function fetchOrderEta(orderId) {
+  try {
+    const { buildAuthHeaders } = await import('../utils/auth')
+    const res = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/eta`, {
+      headers: buildAuthHeaders(),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
 const STATUS_LABELS = {
   PLACED: 'Order Placed',
   CONFIRMED: 'Confirmed',
@@ -44,6 +61,14 @@ function formatDateShort(value) {
   const date = new Date(value || '')
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleString('en-IN', { day: '2-digit', month: 'short' })
+}
+
+function formatStepDateTime(value) {
+  const date = new Date(value || '')
+  if (Number.isNaN(date.getTime())) return ''
+  const shortDate = date.toLocaleString('en-IN', { day: '2-digit', month: 'short' })
+  const timeStr = date.toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+  return `${shortDate} • ${timeStr}`
 }
 
 function getPrimaryItem(order) {
@@ -105,11 +130,11 @@ function getStepDate(order, stepKey) {
     DELIVERED: ts.DELIVERED || order?.updated_at || '',
   }
   const raw = mapping[stepKey] || ''
-  return raw ? formatDateShort(raw) : ''
+  return raw ? formatStepDateTime(raw) : ''
 }
 
 /* ——— Order Card ——— */
-function OrderCard({ order, onOpenDetails, onOpenReview, onCancel, reviewProductId, reviewOrderId, onCloseReview, onToast, onViewInvoice, onBuyAgain }) {
+function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewProductId, reviewOrderId, onCloseReview, onToast, onViewInvoice, onBuyAgain }) {
   const [specsOpen, setSpecsOpen] = useState(false)
   const [deliveryRatingOpen, setDeliveryRatingOpen] = useState(false)
   const primary = getPrimaryItem(order) || {}
@@ -162,7 +187,28 @@ function OrderCard({ order, onOpenDetails, onOpenReview, onCancel, reviewProduct
         {/* Info column */}
         <div className="ot-info">
           <h4 className="ot-info__name">{primary.name || 'Product'}</h4>
-          <p className="ot-info__delivery-msg">{formatTrackerMessage(order)}</p>
+          <p className="ot-info__delivery-msg">
+            {eta?.status_message || formatTrackerMessage(order)}
+          </p>
+
+          {/* Early arrival banner */}
+          {eta?.arrived_early && !isDelivered && (
+            <div className="ot-early-banner" role="status" aria-live="polite">
+              <span className="ot-early-banner__icon">🚀</span>
+              <div>
+                <strong>Arriving earlier than expected!</strong>
+                <span>{eta.eta_text}</span>
+                {eta.original_delivery_text && (
+                  <span className="ot-early-banner__original">{eta.original_delivery_text}</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Dynamic ETA line for active orders */}
+          {!isDelivered && !isCancelled && eta?.eta_text && !eta.arrived_early && (
+            <p className="ot-info__eta">📅 {eta.eta_text}</p>
+          )}
 
           {/* Status badge */}
           <span className={statusBadgeClass}>{STATUS_LABELS[status] || status.replaceAll('_', ' ')}</span>
@@ -290,6 +336,7 @@ function OrderCard({ order, onOpenDetails, onOpenReview, onCancel, reviewProduct
 /* ——— Main Page ——— */
 export default function OrdersTracking() {
   const [orders, setOrders] = useState([])
+  const [etaMap, setEtaMap] = useState({}) // order_id → eta data
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -325,6 +372,27 @@ export default function OrdersTracking() {
       }
       setOrders(Array.isArray(data?.orders) ? data.orders : [])
       setMessage('')
+
+      // Fetch ETA for every non-delivered, non-cancelled order in the background
+      const freshOrders = Array.isArray(data?.orders) ? data.orders : []
+      const activeOrders = freshOrders.filter(o => {
+        const s = normalizeStatus(o?.status)
+        return !['DELIVERED', 'CANCELLED', 'REJECTED'].includes(s)
+      })
+      // Also refresh delivered orders that haven't been cached yet
+      const uncachedDelivered = freshOrders.filter(o =>
+        normalizeStatus(o?.status) === 'DELIVERED' && !etaCache[o.order_id]
+      )
+      const toFetch = [...activeOrders, ...uncachedDelivered]
+      if (toFetch.length > 0) {
+        Promise.allSettled(
+          toFetch.map(o => fetchOrderEta(o.order_id).then(eta => ({ id: o.order_id, eta })))
+        ).then(results => {
+          const updates = {}
+          results.forEach(r => { if (r.status === 'fulfilled' && r.value?.eta) { updates[r.value.id] = r.value.eta; etaCache[r.value.id] = r.value.eta } })
+          if (Object.keys(updates).length > 0) setEtaMap(prev => ({ ...prev, ...updates }))
+        })
+      }
     } catch {
       setMessage('Unable to load orders right now.')
       setOrders([])
@@ -335,8 +403,15 @@ export default function OrdersTracking() {
 
   useEffect(() => {
     loadOrders()
+    const handleNotificationChange = () => {
+      loadOrders()
+    }
+    window.addEventListener('notifications-changed', handleNotificationChange)
     const id = setInterval(loadOrders, 15000)
-    return () => clearInterval(id)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('notifications-changed', handleNotificationChange)
+    }
   }, [])
 
   useEffect(() => {
@@ -642,6 +717,8 @@ export default function OrdersTracking() {
               <OrderCard
                 key={order.order_id}
                 order={order}
+                eta={etaMap[order.order_id] || null}
+                order={order}
                 onOpenDetails={o => setModalOrder(o)}
                 onOpenReview={(pid, oid) => {
                   if (reviewProductId === pid && reviewOrderId === oid) {
@@ -709,50 +786,94 @@ export default function OrdersTracking() {
         </section>
 
         {/* ── Order detail modal ── */}
-        {modalOrder && (
-          <div className="ot-modal-overlay" role="dialog" aria-modal="true">
-            <div className="ot-modal">
-              <header className="ot-modal__header">
-                <h3>Order {modalOrder.order_id} — Tracking</h3>
-                <button className="ot-link-btn" onClick={() => setModalOrder(null)}>✕ Close</button>
-              </header>
-              <div className="ot-modal__body">
-                <p><strong>Tracking ID:</strong> {modalOrder.shipment?.tracking_id || 'Pending'}</p>
-                <p><strong>ETA:</strong> {modalOrder.shipment?.eta || '—'}</p>
-                <p><strong>Current location:</strong> {modalOrder.shipment?.current_location || (modalOrder.shipment_events?.length ? modalOrder.shipment_events[modalOrder.shipment_events.length - 1].location : 'Pending')}</p>
-
-                {/* Tracker inside modal */}
-                <div className="ot-tracker ot-tracker--modal">
-                  {TRACKER_STEPS.map((step, index) => {
-                    const activeIndex = getTrackerActiveIndex(modalOrder)
-                    const isCompleted = activeIndex >= 0 && index < activeIndex
-                    const isCurrent = activeIndex === index
-                    const isPending = activeIndex < 0 || index > activeIndex
-                    return (
-                      <span key={step.key} className="ot-tracker__segment">
-                        <span className="ot-tracker__node-wrap">
-                          <span
-                            className={['ot-tracker__node', isCompleted ? 'is-completed' : '', isCurrent ? 'is-current' : '', isPending ? 'is-pending' : ''].join(' ').trim()}
-                            aria-current={isCurrent ? 'step' : undefined}
-                          >
-                            <span className="ot-tracker__icon" aria-hidden="true">{step.icon}</span>
-                          </span>
-                          <span className="ot-tracker__label">
-                            {step.label.split('\n').map((line, i) => <span key={i}>{line}</span>)}
-                          </span>
-                        </span>
-                        {index < TRACKER_STEPS.length - 1 && (
-                          <span className={`ot-tracker__connector ${activeIndex > index ? 'is-filled' : 'is-pending'}`} aria-hidden="true" />
-                        )}
+        {modalOrder && (() => {
+          const modalEta = etaMap[modalOrder.order_id] || null;
+          const isModalDelivered = normalizeStatus(modalOrder.status) === 'DELIVERED' || normalizeStatus(modalOrder.shipment?.status) === 'DELIVERED';
+          const friendlyLocation = isModalDelivered ? 'Delivered' : (modalOrder.shipment?.current_location || (modalOrder.shipment_events?.length ? modalOrder.shipment_events[modalOrder.shipment_events.length - 1].location : 'Pending'));
+          return (
+            <div className="ot-modal-overlay" role="dialog" aria-modal="true">
+              <div className="ot-modal">
+                <header className="ot-modal__header">
+                  <h3>Order {modalOrder.order_id} — Tracking</h3>
+                  <button className="ot-link-btn" onClick={() => setModalOrder(null)}>✕ Close</button>
+                </header>
+                <div className="ot-modal__body">
+                  <p><strong>Tracking ID:</strong> {modalOrder.shipment?.tracking_id || 'Pending'}</p>
+                  <p>
+                    <strong>Status:</strong>{' '}
+                    <span className={[
+                      'ot-badge',
+                      modalEta?.arrival_status === 'Delivered' ? 'ot-badge--delivered' :
+                      modalEta?.arrival_status === 'Cancelled' ? 'ot-badge--cancelled' :
+                      modalEta?.arrival_status === 'Arriving Today' ? 'ot-badge--out' :
+                      modalEta?.arrival_status === 'Arriving Tomorrow' ? 'ot-badge--packed' :
+                      modalEta?.arrival_status === 'Delayed' ? 'ot-badge--cancelled' :
+                      'ot-badge--shipped'
+                    ].join(' ')} style={{ display: 'inline-block' }}>
+                      {modalEta?.arrival_status || STATUS_LABELS[normalizeStatus(modalOrder.status)] || modalOrder.status}
+                    </span>
+                  </p>
+                  <p>
+                    <strong>ETA:</strong> {modalEta?.eta_text || modalOrder.shipment?.eta || '—'}
+                    {modalEta?.arrived_early && (
+                      <span className="ot-badge ot-badge--delivered" style={{ marginLeft: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        🚀 Arriving Early
                       </span>
-                    )
-                  })}
+                    )}
+                  </p>
+                  <p><strong>Current location:</strong> {friendlyLocation}</p>
+                  {modalOrder.shipment?.next_location && (
+                    <p><strong>Next Destination:</strong> {modalOrder.shipment.next_location}</p>
+                  )}
+
+                  {/* Progress Bar */}
+                  {modalEta?.current_progress !== undefined && (
+                    <div style={{ margin: '20px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#64748b', marginBottom: '4px' }}>
+                        <span>Shipment Progress</span>
+                        <strong>{modalEta.current_progress}%</strong>
+                      </div>
+                      <div style={{ background: '#e2e8f0', borderRadius: '9999px', height: '8px', overflow: 'hidden' }}>
+                        <div style={{ width: `${modalEta.current_progress}%`, background: '#2563eb', height: '100%', borderRadius: '9999px', transition: 'width 0.3s ease' }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Tracker inside modal */}
+                  <div className="ot-tracker ot-tracker--modal">
+                    {TRACKER_STEPS.map((step, index) => {
+                      const activeIndex = getTrackerActiveIndex(modalOrder)
+                      const isCompleted = activeIndex >= 0 && index < activeIndex
+                      const isCurrent = activeIndex === index
+                      const isPending = activeIndex < 0 || index > activeIndex
+                      const stepDate = getStepDate(modalOrder, step.key)
+                      return (
+                        <span key={step.key} className="ot-tracker__segment">
+                          <span className="ot-tracker__node-wrap">
+                            <span
+                              className={['ot-tracker__node', isCompleted ? 'is-completed' : '', isCurrent ? 'is-current' : '', isPending ? 'is-pending' : ''].join(' ').trim()}
+                              aria-current={isCurrent ? 'step' : undefined}
+                            >
+                              <span className="ot-tracker__icon" aria-hidden="true">{step.icon}</span>
+                            </span>
+                            <span className="ot-tracker__label">
+                              {step.label.split('\n').map((line, i) => <span key={i}>{line}</span>)}
+                            </span>
+                            {stepDate && <span className="ot-tracker__date">{stepDate}</span>}
+                          </span>
+                          {index < TRACKER_STEPS.length - 1 && (
+                            <span className={`ot-tracker__connector ${activeIndex > index ? 'is-filled' : 'is-pending'}`} aria-hidden="true" />
+                          )}
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <p className="ot-modal__status">{formatTrackerMessage(modalOrder)}</p>
                 </div>
-                <p className="ot-modal__status">{formatTrackerMessage(modalOrder)}</p>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ── Toast ── */}
         {toastMessage && (

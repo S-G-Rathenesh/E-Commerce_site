@@ -9,24 +9,16 @@ import {
   YAxis,
 } from 'recharts'
 
-const ordersData = [
-  { day: 'Mon', orders: 96 },
-  { day: 'Tue', orders: 112 },
-  { day: 'Wed', orders: 104 },
-  { day: 'Thu', orders: 126 },
-  { day: 'Fri', orders: 138 },
-  { day: 'Sat', orders: 132 },
-  { day: 'Sun', orders: 149 },
-]
-
 const barColor = 'rgba(15, 98, 254, 0.82)'
 const barHoverColor = 'rgba(15, 98, 254, 1)'
 
-export default function OrdersBarChart() {
+export default function OrdersBarChart({ data = [] }) {
+  const chartData = data && data.length > 0 ? data : []
+  
   return (
     <div style={{ width: '100%', height: 220 }}>
       <ResponsiveContainer>
-        <BarChart data={ordersData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid stroke="rgba(208, 215, 222, 0.45)" vertical={false} />
           <XAxis dataKey="day" tickLine={false} axisLine={false} />
           <YAxis tickLine={false} axisLine={false} width={44} />
@@ -48,7 +40,7 @@ export default function OrdersBarChart() {
             animationEasing="ease-out"
             activeBar={{ fill: barHoverColor }}
           >
-            {ordersData.map((entry) => (
+            {chartData.map((entry) => (
               <Cell key={`order-cell-${entry.day}`} fill={barColor} />
             ))}
           </Bar>

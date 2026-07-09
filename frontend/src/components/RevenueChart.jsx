@@ -9,25 +9,18 @@ import {
   YAxis,
 } from 'recharts'
 
-const revenueData = [
-  { day: 'Mon', revenue: 24000 },
-  { day: 'Tue', revenue: 26800 },
-  { day: 'Wed', revenue: 25200 },
-  { day: 'Thu', revenue: 29600 },
-  { day: 'Fri', revenue: 33400 },
-  { day: 'Sat', revenue: 31200 },
-  { day: 'Sun', revenue: 35800 },
-]
-
 function formatRevenue(value) {
   return `Rs. ${Number(value || 0).toLocaleString('en-IN')}`
 }
 
-export default function RevenueChart() {
+export default function RevenueChart({ data = [] }) {
+  // Use data prop or fallback to empty array if no data
+  const chartData = data && data.length > 0 ? data : []
+
   return (
     <div style={{ width: '100%', height: 260 }}>
       <ResponsiveContainer>
-        <AreaChart data={revenueData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="revenueFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="rgba(15, 98, 254, 0.38)" />

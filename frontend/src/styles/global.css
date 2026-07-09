@@ -1417,18 +1417,10 @@ textarea {
 .muted { color:var(--ink-soft); }
 
 /* Discovery / carousel helpers (used by DiscoveryProductCard) */
-.discovery-card { width:100%; border-radius:8px; overflow:hidden; background:var(--surface); box-shadow:var(--shadow-sm); display:flex; flex-direction:column; }
-.discovery-card-media { position:relative; height:160px; overflow:hidden; }
-.discovery-card-image { width:100%; height:100%; object-fit:cover; display:block; }
-.discovery-card-badge { position:absolute; left:8px; top:8px; background:var(--brand); color:#fff; padding:4px 8px; border-radius:999px; font-weight:700; font-size:10px; }
-.discovery-card-discount { position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.6); color:#fff; padding:4px 8px; border-radius:6px; font-size:10px; font-weight:800; text-transform:uppercase; }
-.discovery-card-content { padding:10px; display:flex; flex-direction:column; gap:8px; }
-.discovery-card-content h3 { font-size:13px; line-height:1.25; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
-.discovery-card-price-row { display:flex; justify-content:space-between; align-items:center; }
-.discovery-card-price { font-weight:700; color:var(--ink); font-size:14px; }
-.discovery-card-actions { display:flex; flex-direction:column; gap:6px; }
-.discovery-card-actions button { width:100%; padding:6px 0; font-size:12px; border-radius:6px; border:1px solid var(--border-soft); background:transparent; cursor:pointer; }
-.discovery-card-actions button:hover { background:var(--surface-soft); }
+/* NOTE: detailed overrides live in the component section below (~line 3141).
+   Keep only layout-neutral resets here so they don't fight the full styles. */
+.discovery-card { width:100%; }
+.discovery-card-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
 .flex { display:flex; }
 .overflow-x-auto { overflow-x:auto; }
 .gap-4 { gap:1rem; }
@@ -3163,6 +3155,9 @@ textarea {
 
 .discovery-card-image-link {
   display: block;
+  position: relative;
+  z-index: 0;
+  cursor: pointer;
 }
 
 .discovery-card-image {
@@ -3286,7 +3281,7 @@ textarea {
 
 .discovery-card-actions {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   padding-top: 2px;
 }
@@ -5942,35 +5937,15 @@ textarea.field:focus {
 }
 
 .auth-shell-customer .auth-portal-hero,
-.auth-shell-customer .auth-portal-hero-signup {
-  background: linear-gradient(160deg, #0f172a, #1d4ed8 50%, #0ea5e9 100%);
-}
-
+.auth-shell-customer .auth-portal-hero-signup,
 .auth-shell-merchant .auth-portal-hero,
+.auth-shell-merchant .auth-portal-hero-signup,
 .auth-shell-delivery .auth-portal-hero,
-.auth-shell-operations .auth-portal-hero {
-  background: linear-gradient(180deg, #fff, #f8fafc);
-  color: var(--ink);
-}
-
-.auth-shell-merchant .auth-portal-hero h2,
-.auth-shell-delivery .auth-portal-hero h2,
-.auth-shell-operations .auth-portal-hero h2,
-.auth-shell-merchant .auth-portal-hero h3,
-.auth-shell-delivery .auth-portal-hero h3,
-.auth-shell-operations .auth-portal-hero h3,
-.auth-shell-merchant .auth-portal-hero p,
-.auth-shell-delivery .auth-portal-hero p,
-.auth-shell-operations .auth-portal-hero p {
-  color: var(--ink);
-}
-
-.auth-shell-merchant .auth-hero-tags span,
-.auth-shell-delivery .auth-hero-tags span,
-.auth-shell-operations .auth-hero-tags span {
-  color: var(--ink);
-  border-color: var(--border);
-  background: #fff;
+.auth-shell-delivery .auth-portal-hero-signup,
+.auth-shell-operations .auth-portal-hero,
+.auth-shell-operations .auth-portal-hero-signup {
+  background: linear-gradient(160deg, #0f172a, #1d4ed8 50%, #0ea5e9 100%);
+  color: #e8f4ff;
 }
 
 .auth-shell-merchant .auth-portal-form-wrap,

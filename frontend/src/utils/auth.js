@@ -36,9 +36,6 @@ const DEMO_ACCOUNTS = [
 
 function normalizeRole(role) {
   const next = String(role || '').trim().toLowerCase()
-  if (next === 'super_admin' || next === 'superadmin') {
-    return 'super_admin'
-  }
   if (next === 'merchant' || next === 'admin') {
     return 'admin'
   }

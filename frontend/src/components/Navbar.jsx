@@ -3,7 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 import { syncGuestWishlistToUser } from '../utils/wishlist'
 import { fetchCatalogProducts } from '../utils/catalog'
-import { fetchPublicPlatformSettings, getCachedBranding, getSuperAdminSecretPath, onBrandingUpdated } from '../utils/platform'
+import { fetchPublicPlatformSettings, getCachedBranding, onBrandingUpdated } from '../utils/platform'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -22,9 +22,6 @@ const uniqueValues = (values) => [...new Set(values.filter(Boolean))]
 
 const normalizeRole = (role) => {
   const next = String(role || '').trim().toLowerCase()
-  if (next === 'super_admin' || next === 'superadmin') {
-    return 'super_admin'
-  }
   if (next === 'merchant' || next === 'admin') {
     return 'admin'
   }
@@ -54,7 +51,6 @@ export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
-  const superAdminSecretPath = getSuperAdminSecretPath()
   const closeMenuTimerRef = useRef(null)
   const cartPulseTimerRef = useRef(null)
   const notificationsMenuRef = useRef(null)
@@ -249,6 +245,54 @@ export default function Navbar() {
   }, [currentUser])
 
   useEffect(() => {
+    if (!currentUser?.id) {
+      return
+    }
+
+    const wsBase = API_BASE.replace(/^http/, 'ws')
+    let ws = null
+    let reconnectTimeout = null
+    let isDisposed = false
+
+    const connectWs = () => {
+      if (isDisposed) return
+      
+      ws = new WebSocket(`${wsBase}/ws/orders/${encodeURIComponent(currentUser.id)}`)
+      
+      ws.onmessage = (event) => {
+        try {
+          loadNotifications()
+          window.dispatchEvent(new Event('notifications-changed'))
+        } catch (e) {
+          // ignore parsing error
+        }
+      }
+      
+      ws.onclose = () => {
+        if (!isDisposed) {
+          reconnectTimeout = setTimeout(connectWs, 5000)
+        }
+      }
+      
+      ws.onerror = () => {
+        ws.close()
+      }
+    }
+
+    connectWs()
+
+    return () => {
+      isDisposed = true
+      if (ws) {
+        ws.close()
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+      }
+    }
+  }, [currentUser])
+
+  useEffect(() => {
     let mounted = true
 
     const loadCatalog = async () => {
@@ -331,7 +375,6 @@ export default function Navbar() {
   const displayName = (currentUser?.full_name || '').trim() || 'Guest'
   const role = normalizeRole(currentUser?.role)
   const isAdmin = role === 'admin'
-  const isSuperAdmin = role === 'super_admin'
   const isDelivery = role === 'delivery'
   const isOperations = role === 'operations'
   const isCustomer = role === 'user'
@@ -432,9 +475,7 @@ export default function Navbar() {
     }
 
     if ((role === 'admin' || role === 'delivery' || role === 'operations') && (path === '/wishlist' || path === '/cart')) {
-      if (role === 'super_admin') {
-        navigate(superAdminSecretPath)
-      } else if (role === 'admin') {
+      if (role === 'admin') {
         navigate('/admin/dashboard')
       } else if (role === 'delivery') {
         navigate('/delivery')
@@ -477,7 +518,7 @@ export default function Navbar() {
               <span>{branding.platform_name}</span>
             </NavLink>
             {/* Mobile-only top-right icons */}
-            {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <div className="mobile-header-icons">
                 {currentUser && isCustomer ? (
                   <button
@@ -506,7 +547,7 @@ export default function Navbar() {
           </div>
 
           {/* Mobile search bar */}
-          {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+          {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
             <div className="mobile-search-bar">
               <span className="mobile-search-icon" aria-hidden="true">🔍</span>
               <input
@@ -559,18 +600,6 @@ export default function Navbar() {
                   </option>
                 ))}
               </select>
-            </div>
-          ) : isSuperAdmin ? (
-            <div className="nav-links nav-links-retail nav-links-admin">
-              <div className="nav-links nav-links-retail nav-links-admin-desktop">
-                <button
-                  type="button"
-                  className={`nav-link nav-link-retail nav-link-button ${location.pathname === superAdminSecretPath ? 'active-link' : ''}`}
-                  onClick={() => navigate(superAdminSecretPath)}
-                >
-                  PLATFORM CONTROL
-                </button>
-              </div>
             </div>
           ) : isDelivery ? (
             <div className="nav-links nav-links-retail">
@@ -784,25 +813,6 @@ export default function Navbar() {
                 </div>
                 </div>
               </div>
-            ) : currentUser && isSuperAdmin ? (
-              <div className="nav-staff-actions">
-                {renderNotificationsMenu()}
-                <div className="profile-menu">
-                <button type="button" className="nav-action profile-trigger" aria-haspopup="menu" aria-label="Open super admin profile menu">
-                  <span className="profile-name">👤 {displayName}</span>
-                  <span className="dropdown-icon" aria-hidden="true">▼</span>
-                </button>
-
-                <div className="dropdown-menu" role="menu" aria-label="Super admin profile menu">
-                  <button type="button" role="menuitem" onClick={() => navigate(superAdminSecretPath)}>
-                    Dashboard
-                  </button>
-                  <button type="button" className="logout-btn" role="menuitem" onClick={handleLogout}>
-                    Logout
-                  </button>
-                </div>
-                </div>
-              </div>
             ) : currentUser && isDelivery ? (
               <div className="nav-staff-actions">
                 {renderNotificationsMenu({
@@ -850,7 +860,7 @@ export default function Navbar() {
                 </NavLink>
               </>
             )}
-            {isAdmin || isSuperAdmin || isDelivery || isOperations || isAuthPage ? null : (
+            {isAdmin || isDelivery || isOperations || isAuthPage ? null : (
               <>
                 <button type="button" className="nav-action desktop-only-action" onClick={() => handleProtectedNav('/wishlist')}>
                   <span>♡</span>

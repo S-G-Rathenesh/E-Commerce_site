@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import PageWrapper from '../components/PageWrapper'
 import ImageUploadField from '../components/ImageUploadField'
-import { getStoredUser, buildAuthHeaders } from '../utils/auth'
+import { getStoredUser, setStoredUser, buildAuthHeaders } from '../utils/auth'
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const DEMO_MERCHANT_EMAIL = 'admin.demo@veloura.com'
 
 const demoProfileDefaults = {
@@ -18,40 +19,72 @@ const demoProfileDefaults = {
 
 function withDemoDefaults(user, values) {
   const email = String(user?.email || '').trim().toLowerCase()
-  if (email !== DEMO_MERCHANT_EMAIL) {
-    return values
-  }
-
+  if (email !== DEMO_MERCHANT_EMAIL) return values
   const merged = { ...values }
   Object.keys(merged).forEach((key) => {
-    if (!String(merged[key] || '').trim()) {
-      merged[key] = demoProfileDefaults[key]
-    }
+    if (!String(merged[key] || '').trim()) merged[key] = demoProfileDefaults[key]
   })
   return merged
 }
 
-export default function AdminProfilePage() {
-  const user = getStoredUser()
-  const profileDetails = user?.profile_details || {}
+function buildFormFromData(user, profileDetails) {
   const bankDetails = profileDetails?.bank_details || {}
-
-  const [formData, setFormData] = useState(withDemoDefaults(user, {
+  // phone: top-level takes priority, fall back to profile_details.phone_number
+  const phone = String(user?.phone_number || profileDetails?.phone_number || '').trim()
+  return {
     storeName: String(profileDetails?.store_name || '').trim(),
     gstNumber: String(profileDetails?.gst_number || '').trim(),
-    phone: String(user?.phone_number || '').trim(),
+    phone,
     accountHolder: String(bankDetails?.account_holder_name || '').trim(),
     bankName: String(bankDetails?.bank_name || '').trim(),
     accountNumber: String(bankDetails?.account_number || '').trim(),
     ifscCode: String(bankDetails?.ifsc_code || '').trim(),
     logoUrl: String(profileDetails?.logo_url || '').trim(),
-  }))
+  }
+}
 
+export default function AdminProfilePage() {
+  const [user, setUser] = useState(getStoredUser())
+  const [formData, setFormData] = useState(() => {
+    const u = getStoredUser()
+    const pd = u?.profile_details || {}
+    return withDemoDefaults(u, buildFormFromData(u, pd))
+  })
   const [loading, setLoading] = useState(false)
+  const [fetching, setFetching] = useState(true)
   const [logoUploading, setLogoUploading] = useState(false)
   const [message, setMessage] = useState('')
-  const logoPreview = formData.logoUrl || profileDetails?.logo_url || null
 
+  // Load fresh profile data from the server on mount
+  useEffect(() => {
+    let mounted = true
+    const load = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/merchant/profile`, {
+          headers: buildAuthHeaders(),
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        if (!mounted) return
+        const serverUser = data?.user || {}
+        const serverProfile = data?.profile_details || {}
+        // Merge into stored user so token/refresh_token are preserved
+        const stored = getStoredUser() || {}
+        const merged = { ...stored, ...serverUser }
+        setStoredUser(merged)
+        setUser(merged)
+        setFormData(withDemoDefaults(merged, buildFormFromData(merged, serverProfile)))
+      } catch {
+        // keep the localStorage values if server unreachable
+      } finally {
+        if (mounted) setFetching(false)
+      }
+    }
+    load()
+    return () => { mounted = false }
+  }, [])
+
+  const logoPreview = formData.logoUrl || null
   const verificationStatus = String(user?.status || 'PENDING').toUpperCase() === 'ACTIVE' ? 'Verified' : 'Pending'
   const contactEmail = String(user?.email || '').trim() || 'Not provided'
 
@@ -68,12 +101,9 @@ export default function AdminProfilePage() {
     setLoading(true)
     setMessage('')
     try {
-      const response = await fetch('/api/merchant/profile', {
+      const response = await fetch(`${API_BASE}/api/merchant/profile`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...buildAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json', ...buildAuthHeaders() },
         body: JSON.stringify({
           profile_details: {
             store_name: formData.storeName,
@@ -86,18 +116,27 @@ export default function AdminProfilePage() {
             bank_name: formData.bankName,
             account_number: formData.accountNumber,
             ifsc_code: formData.ifscCode,
-          }
-        })
+          },
+        }),
       })
 
+      const data = await response.json().catch(() => ({}))
+
       if (response.ok) {
+        const stored = getStoredUser() || {}
+        const updatedUser = { ...stored, ...data.user }
+        setStoredUser(updatedUser)
+        setUser(updatedUser)
+        // Rebuild form from fresh server data so phone and all fields reflect DB
+        const freshProfile = data?.profile_details || data?.user?.profile_details || {}
+        setFormData(withDemoDefaults(updatedUser, buildFormFromData(updatedUser, freshProfile)))
         setMessage('✓ Store details updated successfully')
         setTimeout(() => setMessage(''), 3000)
       } else {
-        setMessage('Failed to update details')
+        setMessage(data?.detail || 'Failed to update details')
       }
-    } catch (error) {
-      setMessage('Error updating details')
+    } catch {
+      setMessage('Unable to reach server. Check that the backend is running.')
     } finally {
       setLoading(false)
     }
@@ -111,6 +150,7 @@ export default function AdminProfilePage() {
       description="Update your store details. App branding (Movi Fashion logo) and protected business settings are managed by the platform admin."
     >
       <div className="container admin-container">
+        {fetching ? <p style={{ padding: '16px' }}>Loading profile...</p> : null}
         <section className="section card panel panel-stack">
           <div className="section-head">
             <div>
@@ -127,16 +167,6 @@ export default function AdminProfilePage() {
           <section className="card panel panel-stack">
             <p className="eyebrow">Store Info</p>
             <h2>Store details</h2>
-
-            <div className="locked-branding-card">
-              <div className="locked-branding-preview">
-                {logoPreview ? <img src={logoPreview} alt="Shop logo preview" /> : <span>MV</span>}
-                <div>
-                  <p className="field-label">Platform branding</p>
-                  <p>Logo and app name are managed centrally and cannot be changed here.</p>
-                </div>
-              </div>
-            </div>
 
             <ImageUploadField
               label="Store logo"

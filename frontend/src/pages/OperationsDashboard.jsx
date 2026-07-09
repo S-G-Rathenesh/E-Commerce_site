@@ -63,6 +63,13 @@ export default function OperationsDashboard() {
 
   useEffect(() => {
     loadData()
+    const handleNotificationChange = () => {
+      loadData()
+    }
+    window.addEventListener('notifications-changed', handleNotificationChange)
+    return () => {
+      window.removeEventListener('notifications-changed', handleNotificationChange)
+    }
   }, [])
 
   const markPacked = async (orderId) => {

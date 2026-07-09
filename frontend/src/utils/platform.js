@@ -1,15 +1,6 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const BRANDING_CACHE_KEY = 'veloura_platform_branding'
 const BRANDING_EVENT = 'platform-branding-updated'
-const SUPER_ADMIN_FALLBACK_PATH = '/_private/ops/super-admin-portal-x9f4q2'
-
-export function getSuperAdminSecretPath() {
-  const configured = String(import.meta.env.VITE_SUPER_ADMIN_SECRET_PATH || '').trim()
-  if (!configured.startsWith('/')) {
-    return SUPER_ADMIN_FALLBACK_PATH
-  }
-  return configured
-}
 
 export function getDefaultBranding() {
   return {

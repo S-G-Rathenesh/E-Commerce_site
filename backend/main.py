@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import random
 import re
@@ -33,7 +34,60 @@ MAX_IMAGE_UPLOAD_BYTES = 2 * 1024 * 1024
 
 os.makedirs(UPLOAD_IMAGE_ROOT, exist_ok=True)
 
-app.mount('/uploads', StaticFiles(directory=UPLOAD_ROOT), name='uploads')
+# Serve upload images with a graceful placeholder for missing files instead of
+# a bare 404, so the frontend never shows empty image slots.
+_MISSING_IMAGE_PLACEHOLDER = b'''<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360" role="img" aria-label="Image unavailable">
+    <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#f3f4f6" />
+            <stop offset="100%" stop-color="#e5e7eb" />
+        </linearGradient>
+    </defs>
+    <rect width="480" height="360" rx="24" fill="url(#bg)" />
+    <rect x="86" y="76" width="308" height="208" rx="18" fill="#ffffff" stroke="#cbd5e1" stroke-width="4" />
+    <circle cx="190" cy="152" r="18" fill="#94a3b8" />
+    <path d="M122 244l68-72 58 54 44-36 66 54" fill="none" stroke="#94a3b8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="240" y="318" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" fill="#64748b">Image unavailable</text>
+</svg>'''
+
+@app.get('/uploads/images/{filename}')
+async def serve_upload_image(filename: str):
+    from fastapi.responses import FileResponse, Response
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(UPLOAD_IMAGE_ROOT, safe_name)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    image_bytes, content_type = _load_uploaded_image(safe_name)
+    if image_bytes is not None:
+        return Response(content=image_bytes, media_type=content_type or 'application/octet-stream', status_code=200)
+    return Response(content=_MISSING_IMAGE_PLACEHOLDER, media_type='image/svg+xml', status_code=200)
+
+
+@app.get('/health')
+def health_check():
+    health_status = {
+        'ok': True,
+        'database_mode': database_mode,
+        'mongo_ping': False,
+        'mongo_read': False,
+        'mongo_write': False,
+    }
+
+    try:
+        mongo_client.admin.command('ping')
+        health_status['mongo_ping'] = True
+
+        health_collection = database['_health_checks']
+        probe_id = str(uuid4())
+        health_collection.insert_one({'_id': probe_id, 'checked_at': now_utc(), 'kind': 'health-check'})
+        health_status['mongo_write'] = True
+        health_status['mongo_read'] = health_collection.find_one({'_id': probe_id}) is not None
+        health_collection.delete_one({'_id': probe_id})
+    except Exception as exc:
+        health_status['ok'] = False
+        health_status['error'] = str(exc)
+
+    return health_status
 
 # WebSocket Manager for Real-Time Order Updates
 class ConnectionManager:
@@ -1051,9 +1105,62 @@ pincode_distance_cache_collection = database['pincode_distance_cache']
 banners_collection = database['banners']
 platform_settings_collection = database['platform_settings']
 global_offers_collection = database['global_offers']
+uploaded_images_collection = database['uploaded_images']
 database_mode = 'mongo'
 shipment_simulation_started = False
 shipment_simulation_task = None
+
+
+def _image_content_type_from_filename(file_name: str) -> str:
+    extension = os.path.splitext(file_name)[1].lstrip('.').lower()
+    reverse_lookup = {value: key for key, value in ALLOWED_IMAGE_CONTENT_TYPES.items()}
+    return reverse_lookup.get(extension, 'application/octet-stream')
+
+
+def _store_uploaded_image(file_name: str, content_type: str, payload: bytes, uploaded_by: str | None) -> None:
+    uploaded_images_collection.update_one(
+        {'file_name': file_name},
+        {
+            '$set': {
+                'file_name': file_name,
+                'content_type': content_type,
+                'size_bytes': len(payload),
+                'data_base64': base64.b64encode(payload).decode('ascii'),
+                'uploaded_by': (uploaded_by or '').strip(),
+                'stored_at': now_utc(),
+                'storage_kind': 'uploaded-image',
+            },
+        },
+        upsert=True,
+    )
+
+
+def _load_uploaded_image(file_name: str) -> tuple[bytes | None, str | None]:
+    record = uploaded_images_collection.find_one({'file_name': file_name}, {'_id': 0})
+    if not record:
+        return None, None
+
+    encoded = str(record.get('data_base64') or '').strip()
+    if not encoded:
+        return None, str(record.get('content_type') or 'application/octet-stream')
+
+    try:
+        return base64.b64decode(encoded.encode('ascii')), str(record.get('content_type') or 'application/octet-stream')
+    except Exception:
+        return None, str(record.get('content_type') or 'application/octet-stream')
+
+
+def sync_local_upload_images_to_database() -> None:
+    for file_name in os.listdir(UPLOAD_IMAGE_ROOT):
+        safe_name = os.path.basename(file_name)
+        file_path = os.path.join(UPLOAD_IMAGE_ROOT, safe_name)
+        if not os.path.isfile(file_path):
+            continue
+        with open(file_path, 'rb') as source_file:
+            payload = source_file.read()
+        if not payload:
+            continue
+        _store_uploaded_image(safe_name, _image_content_type_from_filename(safe_name), payload, 'system-sync')
 
 
 def activate_in_memory_database(reason: str) -> None:
@@ -1081,6 +1188,7 @@ def activate_in_memory_database(reason: str) -> None:
     global banners_collection
     global platform_settings_collection
     global global_offers_collection
+    global uploaded_images_collection
     global database_mode
 
     # Guard against malformed MONGOMOCK_SERVER_VERSION values that can crash mongomock internals.
@@ -1115,6 +1223,7 @@ def activate_in_memory_database(reason: str) -> None:
     banners_collection = database['banners']
     platform_settings_collection = database['platform_settings']
     global_offers_collection = database['global_offers']
+    uploaded_images_collection = database['uploaded_images']
     database_mode = 'in-memory-fallback'
     print(f'[WARN] Falling back to in-memory database: {reason}')
 
@@ -1475,10 +1584,7 @@ def get_approved_product_catalog() -> list[dict]:
             {'_id': 0},
         )
     )
-    if products:
-        return products
-
-    return [product for product in SEED_PRODUCTS if normalize_product_review_status(product.get('review_status', 'APPROVED')) == 'APPROVED']
+    return products
 
 
 def normalize_product_text(value: str | None) -> str:
@@ -2033,6 +2139,131 @@ def append_delivery_log(order_id: str, status_value: str, updated_by: str, locat
     )
 
 
+def validate_order_workflow_transition(current_status: str, target_status: str) -> None:
+    current = normalize_order_status(current_status)
+    target = normalize_order_status(target_status)
+    if current == target:
+        return
+
+    # Cancelled, Rejected, Delivery Failed, Delivered are terminal statuses and cannot progress
+    if current in {'REJECTED', 'CANCELLED', 'DELIVERY_FAILED', 'DELIVERED'}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot transition order from terminal status: {current}."
+        )
+
+    allowed_next = ORDER_STATUS_TRANSITIONS.get(current, set())
+    if target not in allowed_next:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid transition from {current} to {target}. Expected next status in: {', '.join(allowed_next)}."
+        )
+
+
+def update_status_timestamp(order_created_at, status_timestamps: dict | None, target_status: str, target_time) -> dict:
+    flow = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+    normalized_target = normalize_order_status(target_status)
+    if normalized_target not in flow:
+        return status_timestamps or {}
+
+    new_ts = dict(status_timestamps or {})
+    parsed_ts = {}
+    for k, v in new_ts.items():
+        if v:
+            try:
+                dt = datetime.fromisoformat(str(v))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                parsed_ts[k] = dt
+            except Exception:
+                pass
+
+    # Ensure PLACED timestamp exists
+    placed_dt = parsed_ts.get('PLACED') or order_created_at
+    if isinstance(placed_dt, str):
+        try:
+            placed_dt = datetime.fromisoformat(placed_dt)
+        except Exception:
+            placed_dt = now_utc()
+    if placed_dt.tzinfo is None:
+        placed_dt = placed_dt.replace(tzinfo=UTC)
+    parsed_ts['PLACED'] = placed_dt
+
+    # Ensure target timestamp is set
+    target_dt = target_time
+    if isinstance(target_dt, str):
+        try:
+            target_dt = datetime.fromisoformat(target_dt)
+        except Exception:
+            target_dt = now_utc()
+    if target_dt.tzinfo is None:
+        target_dt = target_dt.replace(tzinfo=UTC)
+    parsed_ts[normalized_target] = target_dt
+
+    target_idx = flow.index(normalized_target)
+
+    # 1. Fill gaps up to target status by propagating the last known real timestamp
+    for i in range(1, target_idx + 1):
+        prev_status = flow[i-1]
+        curr_status = flow[i]
+        if curr_status not in parsed_ts or not parsed_ts[curr_status]:
+            parsed_ts[curr_status] = parsed_ts[prev_status]
+
+    # 2. Scan backward to cap any preceding status timestamp at its successor's value (ensures chronological order)
+    for i in range(target_idx - 1, -1, -1):
+        curr_status = flow[i]
+        next_status = flow[i+1]
+        if curr_status in parsed_ts and next_status in parsed_ts:
+            if parsed_ts[curr_status] > parsed_ts[next_status]:
+                parsed_ts[curr_status] = parsed_ts[next_status]
+
+    # Convert back to ISO strings
+    for k, v in parsed_ts.items():
+        new_ts[k] = v.isoformat()
+    return new_ts
+
+
+def calculate_tracking_progress(order: dict) -> dict:
+    flow = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+    current_status = normalize_order_status(order.get('status', 'PLACED'))
+    if current_status not in flow:
+        if current_status == 'CANCELLED':
+            return {
+                'current_step': 'CANCELLED',
+                'completed_steps': ['PLACED'],
+                'remaining_steps': [],
+                'progress_percentage': 0
+            }
+        return {
+            'current_step': current_status,
+            'completed_steps': [],
+            'remaining_steps': flow,
+            'progress_percentage': 0
+        }
+    
+    idx = flow.index(current_status)
+    completed_steps = flow[:idx + 1]
+    remaining_steps = flow[idx + 1:]
+    progress_percentage = int(((idx + 1) / len(flow)) * 100)
+    
+    return {
+        'current_step': current_status,
+        'completed_steps': completed_steps,
+        'remaining_steps': remaining_steps,
+        'progress_percentage': progress_percentage
+    }
+
+
+def send_order_notification(order_id: str, event_type: str, message: str, user_id: str | None = None, title: str | None = None) -> None:
+    create_notification(
+        event_type=event_type,
+        order_id=order_id,
+        message=message,
+        user_id=user_id,
+        title=title
+    )
+
+
 def append_order_status_history(
     order_id: str,
     status_value: str,
@@ -2040,6 +2271,7 @@ def append_order_status_history(
     performer_role: str = 'SYSTEM',
     performer_email: str = 'system@local',
     location: str = '',
+    remarks: str = '',
 ) -> dict:
     normalized = normalize_order_status(status_value)
     timestamp = now_utc().isoformat()
@@ -2052,14 +2284,24 @@ def append_order_status_history(
         'updated_by_email': performer_email,
         'timestamp': timestamp,
         'location': location.strip() if location else '',
+        'remarks': remarks.strip() if remarks else get_status_message(normalized),
     }
 
     order_status_history_collection.insert_one(entry)
+
+    order = orders_collection.find_one({'order_id': order_id})
+    if order:
+        created_at = order.get('created_at') or now_utc()
+        existing_ts = order.get('status_timestamps') or {}
+        updated_ts = update_status_timestamp(created_at, existing_ts, normalized, timestamp)
+    else:
+        updated_ts = {normalized: timestamp}
+
     orders_collection.update_one(
         {'order_id': order_id},
         {
             '$set': {
-                f'status_timestamps.{normalized}': timestamp,
+                'status_timestamps': updated_ts,
                 'updated_by': updated_by,
                 'updated_by_role': performer_role,
                 'updated_by_email': performer_email,
@@ -3074,8 +3316,21 @@ def backfill_merchant_statuses() -> None:
         {'$set': {'merchant_status': 'APPROVED', 'updated_at': now_utc()}},
     )
     users_collection.update_many(
+        {'role': {'$in': ['ADMIN', 'MERCHANT']}, 'status': {'$exists': False}},
+        {'$set': {'status': 'ACTIVE', 'merchant_status': 'APPROVED', 'updated_at': now_utc()}},
+    )
+    users_collection.update_many(
+        {'role': {'$in': ['ADMIN', 'MERCHANT']}, 'status': 'PENDING'},
+        {'$set': {'status': 'ACTIVE', 'merchant_status': 'APPROVED', 'updated_at': now_utc()}},
+    )
+    users_collection.update_many(
         {'role': {'$nin': ['ADMIN', 'MERCHANT']}, 'merchant_status': {'$exists': False}},
         {'$set': {'merchant_status': 'PENDING', 'updated_at': now_utc()}},
+    )
+    # Approval system removed — activate all existing PENDING delivery/ops accounts
+    users_collection.update_many(
+        {'role': {'$in': ['DELIVERY_ASSOCIATE', 'OPERATIONS_STAFF']}, 'status': 'PENDING'},
+        {'$set': {'status': 'ACTIVE', 'updated_at': now_utc()}},
     )
 
 
@@ -3175,31 +3430,24 @@ def backfill_order_items_and_logs() -> None:
 
 
 def backfill_orders_workflow_state() -> None:
-    projection = {'_id': 1, 'order_id': 1, 'status': 1, 'payment_method': 1, 'status_timestamps': 1, 'updated_at': 1}
+    projection = {'_id': 1, 'order_id': 1, 'status': 1, 'payment_method': 1, 'status_timestamps': 1, 'created_at': 1, 'updated_at': 1}
     for order in orders_collection.find({}, projection):
         order_id = order.get('order_id')
         if not order_id:
             continue
 
-        # Only backfill if missing fields, don't overwrite existing workflow state
         update_fields = {}
+        current_status = order.get('status') or 'PLACED'
+        created_at = order.get('created_at') or order.get('updated_at') or now_utc()
         
+        # Ensure chronological and fill in missing steps up to the current status
+        existing_timestamps = order.get('status_timestamps') or {}
+        updated_ts = update_status_timestamp(created_at, existing_timestamps, current_status, order.get('updated_at') or now_utc())
+        update_fields['status_timestamps'] = updated_ts
+
         # Normalize status only if missing or invalid
-        current_status = order.get('status')
-        if not current_status:
-            update_fields['status'] = normalize_order_status('PLACED')
-        
-        # Backfill timestamps only if missing
-        existing_timestamps = order.get('status_timestamps')
-        if not existing_timestamps or not isinstance(existing_timestamps, dict):
-            normalized_status = normalize_order_status(current_status or 'PLACED')
-            update_fields['status_timestamps'] = {normalized_status: now_utc().isoformat()}
-        elif current_status:
-            # Add current status to timestamps if missing
-            normalized_status = normalize_order_status(current_status)
-            if normalized_status not in existing_timestamps:
-                existing_timestamps[normalized_status] = now_utc().isoformat()
-                update_fields['status_timestamps'] = existing_timestamps
+        if not order.get('status'):
+            update_fields['status'] = normalize_order_status(current_status)
 
         # Normalize payment method only if missing
         if not order.get('payment_method'):
@@ -3437,20 +3685,13 @@ def backfill_user_auth_shape() -> None:
 
 
 def seed_collections() -> None:
-    seed_products()
-    seed_users()
     seed_platform_defaults()
     backfill_merchant_statuses()
     backfill_product_merchant_ids()
     backfill_product_review_status()
-    backfill_seed_product_stock()  # Add stock to seed products with 0 stock
-    seed_shipments()
-    seed_orders()
-    seed_warehouses()
     backfill_product_warehouses()
     backfill_user_auth_shape()
     backfill_nationwide_delivery_coverage()
-    seed_demo_merchant_shipping_settings()
     backfill_order_items_and_logs()
     backfill_orders_workflow_state()
     backfill_demo_seed_tracking_state()
@@ -3635,12 +3876,14 @@ def ensure_database_ready() -> None:
         mongo_client.admin.command('ping')
         ensure_indexes()
         seed_collections()
+        sync_local_upload_images_to_database()
         start_shipment_simulator()
     except (ConfigurationError, PyMongoError) as exc:
         if mongo_enable_fallback:
             activate_in_memory_database(str(exc))
             ensure_indexes()
             seed_collections()
+            sync_local_upload_images_to_database()
             start_shipment_simulator()
             return
 
@@ -3674,9 +3917,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise credentials_error
 
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
-    if account_status != 'ACTIVE':
-        detail = 'Your account is pending approval' if account_status == 'PENDING' else 'Account is blocked. Please contact support.'
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    # Only block explicitly BLOCKED accounts — PENDING is no longer a barrier
+    if account_status == 'BLOCKED':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Account is blocked. Please contact support.')
 
     return account
 
@@ -3702,6 +3945,8 @@ async def upload_image(request: Request, file: UploadFile = File(...), current_u
 
     with open(file_path, 'wb') as output_file:
         output_file.write(payload)
+
+    _store_uploaded_image(file_name, content_type, payload, current_user.get('email'))
 
     base_url = str(request.base_url).rstrip('/')
     image_url = f'{base_url}/uploads/images/{file_name}'
@@ -3734,9 +3979,9 @@ def refresh_auth_token(payload: RefreshTokenRequest):
         raise refresh_error
 
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
-    if account_status != 'ACTIVE':
-        detail = 'Your account is pending approval' if account_status == 'PENDING' else 'Account is blocked. Please contact support.'
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    # Only block explicitly BLOCKED accounts — PENDING is no longer a barrier
+    if account_status == 'BLOCKED':
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Account is blocked. Please contact support.')
 
     role = normalize_role(account.get('role', 'CUSTOMER'))
     return {
@@ -3774,8 +4019,6 @@ def get_products():
             {'_id': 0},
         )
     )
-    if not products:
-        products = [product for product in SEED_PRODUCTS if normalize_product_review_status(product.get('review_status', 'APPROVED')) == 'APPROVED']
     return [serialize_product(product) for product in products]
 
 
@@ -3786,8 +4029,6 @@ def get_product(product_id: int):
         {'id': product_id, 'merchant_id': merchant_id, 'review_status': 'APPROVED'},
         {'_id': 0},
     )
-    if not product:
-        product = next((item for item in SEED_PRODUCTS if int(item.get('id') or 0) == int(product_id)), None)
     if not product:
         return {'error': 'Product not found'}
     return serialize_product(product)
@@ -3833,102 +4074,187 @@ def create_product_review(
     payload: ProductReviewRequest,
     current_user: dict = Depends(require_roles('CUSTOMER'))
 ):
-    """Submit a product review with star rating and optional text feedback"""
-    # Validate rating
+    """Submit a product review with star rating and optional text feedback."""
     if not (1 <= payload.rating <= 5):
         raise HTTPException(status_code=400, detail='Rating must be between 1 and 5 stars')
-    
-    # Check if product exists
+
     product = products_collection.find_one({'id': product_id})
-    if not product and product_id not in [p['id'] for p in SEED_PRODUCTS]:
+    if not product:
         raise HTTPException(status_code=404, detail='Product not found')
-    
-    # Check if order exists and belongs to user
+
+    customer_email = str(current_user.get('email') or '').strip().lower()
+    customer_id = str(current_user.get('id') or '').strip()
+
     order = orders_collection.find_one({
         'order_id': payload.order_id,
         '$or': [
-            {'customer_email': current_user['email']},
-            {'user_id': current_user.get('id')},
-            {'user_id': current_user['email']}
+            {'customer_email': customer_email},
+            {'user_id': customer_id},
+            {'user_id': customer_email},
         ]
     })
-    
     if not order:
         raise HTTPException(status_code=404, detail='Order not found or does not belong to you')
-    
-    # Check if order contains this product
+
+    order_delivered = normalize_order_status(order.get('status', '')) == 'DELIVERED'
+    if not order_delivered and order.get('shipment_id'):
+        shipment = shipments_collection.find_one({'shipment_id': order['shipment_id']})
+        if shipment and normalize_shipment_status(shipment.get('status', '')) == 'DELIVERED':
+            order_delivered = True
+    if not order_delivered:
+        raise HTTPException(status_code=400, detail='You can only review products from delivered orders')
+
+    order_item_candidates = list(order_items_collection.find({'order_id': payload.order_id}, {'_id': 0}))
+    order_item_candidates.extend(list(order.get('items', []) or []))
+
     product_in_order = False
-    for item in order.get('items', []):
+    for item in order_item_candidates:
         item_product_id = (
-            item.get('product_id') or 
-            item.get('id') or 
-            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('id') or 
+            item.get('product_id') or
+            item.get('id') or
+            (item.get('product') if isinstance(item.get('product'), dict) else {}).get('id') or
             (item.get('product') if isinstance(item.get('product'), dict) else {}).get('product_id')
         )
-        if item_product_id is not None:
-            try:
-                if int(item_product_id) == int(product_id):
-                    product_in_order = True
-                    break
-            except (ValueError, TypeError):
-                if str(item_product_id).strip() == str(product_id).strip():
-                    product_in_order = True
-                    break
-    
+        if item_product_id is None:
+            continue
+        try:
+            if int(item_product_id) == int(product_id):
+                product_in_order = True
+                break
+        except (ValueError, TypeError):
+            if str(item_product_id).strip() == str(product_id).strip():
+                product_in_order = True
+                break
+
     if not product_in_order:
         raise HTTPException(status_code=400, detail='You can only review products you have purchased')
-    
-    # Check if order is delivered
-    if normalize_order_status(order.get('status', '')) != 'DELIVERED' and normalize_order_status((order.get('shipment') or {}).get('status', '')) != 'DELIVERED':
-        raise HTTPException(status_code=400, detail='You can only review products from delivered orders')
-    
-    # Check if user already reviewed this product from this order
+
     existing_review = product_reviews_collection.find_one({
         'product_id': product_id,
         'order_id': payload.order_id,
-        'customer_email': current_user['email']
+        'customer_email': customer_email,
     })
-    
     if existing_review:
-        # Update existing review
-        product_reviews_collection.update_one(
-            {'_id': existing_review['_id']},
-            {
-                '$set': {
-                    'rating': payload.rating,
-                    'review_text': (payload.review_text or '').strip(),
-                    'updated_at': now_utc().isoformat(),
-                }
-            }
-        )
-        return {'message': 'Review updated successfully', 'review_id': str(existing_review['_id'])}
-    
-    # Create new review
+        raise HTTPException(status_code=400, detail='You have already reviewed this product for this order.')
+
     review_id = str(uuid4())
     review_document = {
         'review_id': review_id,
         'product_id': product_id,
         'order_id': payload.order_id,
-        'customer_email': current_user['email'],
+        'customer_email': customer_email,
         'customer_name': current_user.get('full_name') or current_user.get('name') or 'Customer',
-        'customer_id': current_user.get('id'),
+        'customer_id': customer_id or current_user.get('id'),
         'rating': payload.rating,
         'review_text': (payload.review_text or '').strip(),
-        'status': 'APPROVED',  # Auto-approve for now
+        'status': 'APPROVED',
         'helpful_count': 0,
         'created_at': now_utc().isoformat(),
         'updated_at': now_utc().isoformat(),
     }
-    
+
     product_reviews_collection.insert_one(review_document)
-    
-    # Update product average rating
     update_product_rating(product_id)
-    
+
     return {
         'message': 'Review submitted successfully',
         'review_id': review_id,
     }
+
+
+@app.get('/admin/product-feedback')
+def get_admin_product_feedback(limit: int = 50, current_user: dict = Depends(require_roles('ADMIN'))):
+    _ = current_user
+    limit = max(1, min(int(limit or 50), 200))
+    reviews = list(
+        product_reviews_collection.find({'status': 'APPROVED'}, {'_id': 0})
+        .sort('created_at', -1)
+        .limit(limit)
+    )
+
+    product_ids = sorted({int(review.get('product_id') or 0) for review in reviews if int(review.get('product_id') or 0)})
+    product_map = {
+        int(product.get('id') or 0): product
+        for product in products_collection.find({'id': {'$in': product_ids}}, {'_id': 0, 'id': 1, 'name': 1, 'section': 1, 'category': 1, 'image': 1, 'rating': 1, 'review_count': 1})
+    }
+
+    enriched_reviews = []
+    for review in reviews:
+        product = product_map.get(int(review.get('product_id') or 0), {})
+        enriched_reviews.append({
+            **review,
+            'product_name': product.get('name') or '',
+            'product_section': product.get('section') or '',
+            'product_category': product.get('category') or '',
+            'product_image': product.get('image') or '',
+            'product_rating': float(product.get('rating') or 0),
+            'product_review_count': int(product.get('review_count') or 0),
+        })
+
+    total_reviews = product_reviews_collection.count_documents({'status': 'APPROVED'})
+    average_rating = sum(float(review.get('rating') or 0) for review in product_reviews_collection.find({'status': 'APPROVED'}, {'rating': 1})) / total_reviews if total_reviews else 0
+
+    return {
+        'reviews': enriched_reviews,
+        'total_reviews': total_reviews,
+        'average_rating': round(average_rating, 1),
+    }
+
+
+@app.get('/admin/delivery-ratings')
+def get_admin_delivery_ratings(limit: int = 50, current_user: dict = Depends(require_roles('ADMIN'))):
+    _ = current_user
+    limit = max(1, min(int(limit or 50), 200))
+    ratings = list(
+        delivery_ratings_collection.find({}, {'_id': 0})
+        .sort('created_at', -1)
+        .limit(limit)
+    )
+    total_ratings = delivery_ratings_collection.count_documents({})
+    average_rating = sum(float(item.get('rating') or 0) for item in delivery_ratings_collection.find({}, {'rating': 1})) / total_ratings if total_ratings else 0
+    return {
+        'ratings': ratings,
+        'total_ratings': total_ratings,
+        'average_rating': round(average_rating, 1),
+    }
+
+
+@app.get('/delivery/ratings')
+def get_delivery_partner_ratings(limit: int = 50, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    limit = max(1, min(int(limit or 50), 200))
+    email = str(current_user.get('email') or '').strip().lower()
+    user_id = str(current_user.get('id') or '').strip()
+    clauses = []
+    if email:
+        clauses.append({'delivery_partner_email': email})
+    if user_id:
+        clauses.append({'delivery_partner_id': user_id})
+    query = {'$or': clauses} if clauses else {'delivery_partner_email': '__none__'}
+    ratings = list(
+        delivery_ratings_collection.find(query, {'_id': 0})
+        .sort('created_at', -1)
+        .limit(limit)
+    )
+    total_ratings = delivery_ratings_collection.count_documents(query)
+    average_rating = sum(float(item.get('rating') or 0) for item in delivery_ratings_collection.find(query, {'rating': 1})) / total_ratings if total_ratings else 0
+    return {
+        'ratings': ratings,
+        'total_ratings': total_ratings,
+        'average_rating': round(average_rating, 1),
+    }
+
+
+@app.get('/products/{product_id}/reviews/mine')
+def get_my_product_review(product_id: int, order_id: str = '', current_user: dict = Depends(require_roles('CUSTOMER'))):
+    """Get the current user's review for a product+order, if one exists."""
+    customer_email = str(current_user.get('email') or '').strip().lower()
+    query = {'product_id': product_id, 'customer_email': customer_email}
+    if order_id:
+        query['order_id'] = order_id
+    review = product_reviews_collection.find_one(query, {'_id': 0})
+    if not review:
+        return {'rating': None, 'review_text': None}
+    return {'rating': review.get('rating'), 'review_text': review.get('review_text') or ''}
 
 
 @app.get('/products/{product_id}/reviews')
@@ -3992,7 +4318,12 @@ def create_delivery_rating(
     if not order:
         raise HTTPException(status_code=404, detail='Order not found or does not belong to you')
 
-    if normalize_order_status(order.get('status', '')) != 'DELIVERED' and normalize_order_status((order.get('shipment') or {}).get('status', '')) != 'DELIVERED':
+    order_delivered = normalize_order_status(order.get('status', '')) == 'DELIVERED'
+    if not order_delivered and order.get('shipment_id'):
+        shipment = shipments_collection.find_one({'shipment_id': order['shipment_id']})
+        if shipment and normalize_shipment_status(shipment.get('status', '')) == 'DELIVERED':
+            order_delivered = True
+    if not order_delivered:
         raise HTTPException(status_code=400, detail='You can only rate delivery for delivered orders')
 
     existing_rating = delivery_ratings_collection.find_one({
@@ -4049,6 +4380,39 @@ def get_delivery_rating(
     if not rating:
         return {'rating': None, 'feedback': None}
     return {'rating': rating.get('rating'), 'feedback': rating.get('feedback') or ''}
+
+
+@app.get('/delivery/ratings')
+def get_delivery_partner_ratings(limit: int = 50, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    """Get all delivery ratings for the currently logged-in delivery partner."""
+    partner_email = str(current_user.get('email') or '').strip().lower()
+    partner_id = str(current_user.get('id') or '').strip()
+    limit = max(1, min(int(limit or 50), 200))
+
+    query = {
+        '$or': [
+            {'delivery_partner_email': partner_email},
+            {'delivery_partner_id': partner_id},
+        ]
+    }
+
+    ratings = list(
+        delivery_ratings_collection.find(query, {'_id': 0})
+        .sort('created_at', -1)
+        .limit(limit)
+    )
+
+    total_ratings = delivery_ratings_collection.count_documents(query)
+    average_rating = (
+        sum(float(item.get('rating') or 0) for item in delivery_ratings_collection.find(query, {'rating': 1})) / total_ratings
+        if total_ratings else 0
+    )
+
+    return {
+        'ratings': ratings,
+        'total_ratings': total_ratings,
+        'average_rating': round(average_rating, 1),
+    }
 
 
 def update_product_rating(product_id: int):
@@ -4432,12 +4796,27 @@ def login(payload: AuthLoginRequest):
         raise HTTPException(status_code=401, detail='Invalid email or password.')
 
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
+    role = normalize_role(account.get('role', 'CUSTOMER'))
+
+    # Auto-activate any PENDING account — approval system removed
     if account_status == 'PENDING':
-        raise HTTPException(status_code=403, detail='Your account is pending approval')
+        account_status = 'ACTIVE'
+        users_collection.update_one(
+            {'email': email},
+            {'$set': {'status': 'ACTIVE', 'updated_at': now_utc()}},
+        )
+        account = users_collection.find_one({'email': email}) or account
+
     if account_status == 'BLOCKED':
         raise HTTPException(status_code=403, detail='Account is blocked. Please contact support.')
 
-    role = normalize_role(account.get('role', 'CUSTOMER'))
+    # Auto-approve admin/merchant merchant_status
+    if role in {'ADMIN', 'MERCHANT'}:
+        users_collection.update_one(
+            {'email': email},
+            {'$set': {'merchant_status': 'APPROVED', 'updated_at': now_utc()}},
+        )
+
     token = create_access_token(email, role)
     refresh_token = create_refresh_token(email, role)
 
@@ -4472,10 +4851,9 @@ def signup(payload: SignupRequest):
         raise HTTPException(status_code=403, detail='Super admin registration is disabled. Create this account manually in database.')
 
     normalized_role = normalize_role(payload.role)
-    account_status = (
-        'PENDING' if normalized_role in {'DELIVERY_ASSOCIATE', 'OPERATIONS_STAFF', 'ADMIN'} else 'ACTIVE'
-    )
-    merchant_status = 'PENDING' if normalized_role == 'ADMIN' else 'PENDING'
+    # All new accounts are ACTIVE immediately — approval system removed
+    account_status = 'ACTIVE'
+    merchant_status = 'APPROVED' if normalized_role == 'ADMIN' else 'PENDING'
 
     profile_details = payload.profile_details or {}
     if normalized_role in {'DELIVERY_ASSOCIATE', 'OPERATIONS_STAFF'}:
@@ -4562,11 +4940,7 @@ def signup(payload: SignupRequest):
     users_collection.insert_one(account)
 
     return {
-        'message': (
-            'Your account will be activated after verification'
-            if account_status == 'PENDING'
-            else f"Account created for {account['full_name']}."
-        ),
+        'message': f"Account created for {account['full_name']}.",
         'role': account['role'],
         'status': account_status,
         'user': serialize_user(account),
@@ -4610,6 +4984,19 @@ def google_auth(payload: GoogleAuthRequest):
     }
 
 
+@app.get('/api/merchant/profile')
+def get_merchant_profile(
+    current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT')),
+):
+    """Return the current merchant/admin profile details."""
+    user_id = current_user.get('id')
+    user = users_collection.find_one({'id': user_id}, {'_id': 0}) or current_user
+    return {
+        'user': serialize_user(user),
+        'profile_details': user.get('profile_details') or {},
+    }
+
+
 @app.put('/api/merchant/profile')
 def update_merchant_profile(
     payload: MerchantProfileUpdateRequest,
@@ -4629,9 +5016,12 @@ def update_merchant_profile(
     if payload.profile_details:
         current_profile_details.update(payload.profile_details)
 
-    # Add phone number if provided
+    # Add phone number if provided — store in both profile_details AND top-level field
+    top_level_set: dict = {'profile_details': None, 'updated_at': now_utc()}
     if payload.phone_number:
-        current_profile_details['phone_number'] = payload.phone_number.strip()
+        cleaned_phone = str(payload.phone_number).strip()
+        current_profile_details['phone_number'] = cleaned_phone
+        top_level_set['phone_number'] = cleaned_phone
 
     # Merge bank details
     if payload.bank_details:
@@ -4639,15 +5029,12 @@ def update_merchant_profile(
         current_bank_details.update(payload.bank_details)
         current_profile_details['bank_details'] = current_bank_details
 
+    top_level_set['profile_details'] = current_profile_details
+
     # Update user document
     result = users_collection.update_one(
         {'id': user_id},
-        {
-            '$set': {
-                'profile_details': current_profile_details,
-                'updated_at': now_utc(),
-            }
-        },
+        {'$set': top_level_set},
     )
 
     if result.matched_count == 0:
@@ -4658,6 +5045,7 @@ def update_merchant_profile(
     return {
         'message': 'Merchant profile updated successfully.',
         'user': serialize_user(updated_user),
+        'profile_details': (updated_user or {}).get('profile_details') or {},
     }
 
 
@@ -4978,9 +5366,6 @@ def apply_order_status_update(
     allowed_roles = STATUS_PERFORMER_ROLE_MAP.get(target_status)
     normalized_role = normalize_role(performer_role)
 
-    if target_status in {'REJECTED', 'CANCELLED'} and current_status != 'PLACED':
-        raise HTTPException(status_code=400, detail=f'{target_status} is only allowed when the order is PLACED.')
-
     if allowed_roles and normalized_role not in allowed_roles:
         allowed_roles_text = ', '.join(sorted(role.replace('_', ' ').lower() for role in allowed_roles))
         raise HTTPException(
@@ -4988,11 +5373,7 @@ def apply_order_status_update(
             detail=f'Only {allowed_roles_text} can set {target_status}.',
         )
 
-    if current_status != target_status and not can_progress_order(current_status, target_status):
-        raise HTTPException(
-            status_code=400,
-            detail=f'Invalid status transition. Allowed next status from {current_status} is {ORDER_STATUS_FLOW[ORDER_STATUS_FLOW.index(current_status) + 1] if current_status != ORDER_STATUS_FLOW[-1] else current_status}.',
-        )
+    validate_order_workflow_transition(current_status, target_status)
 
     if current_status == target_status:
         return order
@@ -5029,10 +5410,20 @@ def apply_order_status_update(
     customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip() or None
     
     # Create notification with title
+    event_type_map = {
+        'CONFIRMED': 'ORDER_CONFIRMED',
+        'PACKED': 'ORDER_PACKED',
+        'SHIPPED': 'SHIPMENT_DISPATCHED',
+        'OUT_FOR_DELIVERY': 'OUT_FOR_DELIVERY',
+        'DELIVERED': 'DELIVERED',
+        'CANCELLED': 'CANCELLED',
+        'REJECTED': 'REJECTED',
+    }
+    event_type = event_type_map.get(target_status, target_status)
     message = get_status_message(target_status)
-    create_notification(
-        event_type=target_status,
+    send_order_notification(
         order_id=order['order_id'],
+        event_type=event_type,
         message=message,
         user_id=customer_id,
     )
@@ -5073,6 +5464,7 @@ def apply_order_status_update(
             set_payment_status(order['order_id'], 'SUCCESS', method='COD')
 
     latest = orders_collection.find_one({'order_id': order['order_id']})
+    check_and_notify_early_arrival(latest)
     return latest
 
 
@@ -5670,6 +6062,234 @@ def get_order_by_id(order_id: str, current_user: dict = Depends(get_current_user
     return {'order': serialize_order(order, include_shipment=True)}
 
 
+def calculate_order_eta(order: dict) -> dict:
+    order_id = order.get('order_id')
+    order_status = normalize_order_status(order.get('status', 'PLACED'))
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) or {}
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    ts = order.get('status_timestamps') or {}
+    destination_pincode = sanitize_pincode(order.get('destination_pincode') or
+        (order.get('shipping_details') or {}).get('pincode') or '')
+
+    # ── Calculate original promise date (based on placed_at + estimated days) ──
+    placed_raw = ts.get('PLACED') or order.get('created_at')
+    placed_at = None
+    if placed_raw:
+        try:
+            placed_at = datetime.fromisoformat(str(placed_raw)) if isinstance(placed_raw, str) else placed_raw
+            if placed_at.tzinfo is None:
+                placed_at = placed_at.replace(tzinfo=UTC)
+        except Exception:
+            placed_at = now_utc()
+    else:
+        placed_at = now_utc()
+
+    # Estimate original delivery window
+    user_location = get_location_for_pincode(destination_pincode) if destination_pincode else {}
+    warehouse = get_warehouse_location(order)
+    base_days = estimate_delivery_days(user_location, warehouse)
+    original_delivery_date = placed_at + timedelta(days=base_days)
+
+    # ── Compute dynamic ETA based on current status ──
+    now = now_utc()
+    arrived_early = False
+    eta_date = None
+    eta_text = ''
+    status_message = ''
+    actual_delivered_at = None
+    arrival_status = 'On Time'
+
+    if order_status == 'DELIVERED' or shipment_status == 'DELIVERED':
+        delivered_raw = ts.get('DELIVERED') or order.get('updated_at')
+        try:
+            actual_delivered_at = datetime.fromisoformat(str(delivered_raw)) if isinstance(delivered_raw, str) else delivered_raw
+            if actual_delivered_at and actual_delivered_at.tzinfo is None:
+                actual_delivered_at = actual_delivered_at.replace(tzinfo=UTC)
+        except Exception:
+            actual_delivered_at = now
+        eta_date = actual_delivered_at
+        eta_text = f"Delivered on {format_delivery_date(actual_delivered_at)}"
+        status_message = eta_text
+        arrived_early = bool(actual_delivered_at and actual_delivered_at < original_delivery_date)
+        arrival_status = 'Delivered'
+
+    elif order_status in {'CANCELLED', 'REJECTED'}:
+        eta_text = 'Order cancelled'
+        status_message = eta_text
+        arrival_status = 'Cancelled'
+
+    elif shipment_status == 'OUT_FOR_DELIVERY' or order_status == 'OUT_FOR_DELIVERY':
+        # Out for delivery → arrives today
+        eta_date = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        eta_text = f"Arriving today by 9 PM"
+        status_message = 'Out for delivery — arriving today'
+        arrived_early = now.date() < original_delivery_date.date()
+        arrival_status = 'Arriving Today'
+
+    elif shipment_status == 'ARRIVED_AT_CITY':
+        # At city hub → 1 day
+        eta_date = now + timedelta(days=1)
+        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
+        status_message = 'At your city hub — out for delivery tomorrow'
+        arrived_early = eta_date.date() < original_delivery_date.date()
+        arrival_status = 'Arriving Tomorrow'
+
+    elif shipment_status == 'IN_TRANSIT':
+        # In transit → 1–2 days remaining
+        dispatched_raw = shipment.get('dispatched_at') or ts.get('SHIPPED')
+        try:
+            dispatched_at = datetime.fromisoformat(str(dispatched_raw)) if isinstance(dispatched_raw, str) else dispatched_raw
+            if dispatched_at and dispatched_at.tzinfo is None:
+                dispatched_at = dispatched_at.replace(tzinfo=UTC)
+        except Exception:
+            dispatched_at = now - timedelta(hours=6)
+        hours_in_transit = max(0, (now - dispatched_at).total_seconds() / 3600) if dispatched_at else 6
+        remaining_days = max(1, base_days - int(hours_in_transit / 24) - 1)
+        eta_date = now + timedelta(days=remaining_days)
+        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
+        status_message = f"In transit — arriving in {remaining_days} day{'s' if remaining_days != 1 else ''}"
+        arrived_early = eta_date.date() < original_delivery_date.date()
+        arrival_status = 'Arriving Earlier' if arrived_early else ('Delayed' if eta_date.date() > original_delivery_date.date() else 'In Transit')
+
+    elif shipment_status == 'DISPATCHED' or order_status == 'SHIPPED':
+        eta_date = now + timedelta(days=max(1, base_days - 1))
+        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
+        status_message = 'Dispatched from warehouse'
+        arrived_early = eta_date.date() < original_delivery_date.date()
+        arrival_status = 'Arriving Earlier' if arrived_early else ('Delayed' if eta_date.date() > original_delivery_date.date() else 'In Transit')
+
+    elif order_status == 'PACKED':
+        eta_date = now + timedelta(days=base_days)
+        eta_text = f"Expected by {format_delivery_date(eta_date)}"
+        status_message = 'Packed and ready for dispatch'
+        arrival_status = 'On Time'
+
+    elif order_status == 'CONFIRMED':
+        eta_date = now + timedelta(days=base_days + 1)
+        eta_text = f"Expected by {format_delivery_date(eta_date)}"
+        status_message = 'Order confirmed'
+        arrival_status = 'On Time'
+
+    else:
+        eta_date = original_delivery_date
+        eta_text = f"Expected by {format_delivery_date(original_delivery_date)}"
+        status_message = 'Order placed'
+        arrival_status = 'On Time'
+
+    # Compute remaining time text
+    if eta_date:
+        if order_status == 'DELIVERED':
+            remaining_time_text = 'Delivered'
+        else:
+            diff = eta_date.date() - now.date()
+            if diff.days == 0:
+                remaining_time_text = 'today'
+            elif diff.days == 1:
+                remaining_time_text = 'tomorrow'
+            elif diff.days < 0:
+                remaining_time_text = 'delayed'
+            else:
+                remaining_time_text = f"{diff.days} days"
+    else:
+        remaining_time_text = '—'
+
+    progress_info = calculate_tracking_progress(order)
+
+    return {
+        'order_id': order_id,
+        'order_status': order_status,
+        'shipment_status': shipment_status,
+        'eta_text': eta_text,
+        'eta_date': eta_date.isoformat() if eta_date else None,
+        'original_delivery_date': original_delivery_date.isoformat(),
+        'original_delivery_text': f"Originally expected by {format_delivery_date(original_delivery_date)}",
+        'arrived_early': arrived_early,
+        'status_message': status_message,
+        'actual_delivered_at': actual_delivered_at.isoformat() if actual_delivered_at else None,
+        'estimated_delivery': eta_date.isoformat() if eta_date else None,
+        'remaining_time': remaining_time_text,
+        'current_progress': progress_info.get('progress_percentage', 0),
+        'arrival_status': arrival_status,
+    }
+
+
+def check_delivery_eta(order: dict) -> None:
+    order_id = order.get('order_id')
+    if not order_id:
+        return
+        
+    eta_info = calculate_order_eta(order)
+    arrival_status = eta_info.get('arrival_status')
+    customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip()
+    if not customer_id:
+        return
+
+    if arrival_status == 'Arriving Earlier':
+        notif_key = f'early_arrival_{order_id}'
+        existing = notifications_collection.find_one({'metadata.key': notif_key})
+        if not existing:
+            send_order_notification(
+                order_id=order_id,
+                event_type='EARLY_DELIVERY',
+                message=f"Great news! Your order {order_id} is arriving earlier than expected — {eta_info.get('eta_text')}.",
+                user_id=customer_id,
+                title='🚀 Arriving Early'
+            )
+            try:
+                notifications_collection.update_one(
+                    {'order_id': order_id, 'event_type': 'EARLY_DELIVERY'},
+                    {'$set': {'metadata.key': notif_key}},
+                )
+            except Exception:
+                pass
+                
+    elif arrival_status == 'Delayed':
+        notif_key = f'delayed_delivery_{order_id}'
+        existing = notifications_collection.find_one({'metadata.key': notif_key})
+        if not existing:
+            send_order_notification(
+                order_id=order_id,
+                event_type='DELIVERY_DELAYED',
+                message=f"Your order {order_id} delivery has been delayed. New ETA: {eta_info.get('eta_text')}.",
+                user_id=customer_id,
+                title='⚠️ Delivery Delayed'
+            )
+            try:
+                notifications_collection.update_one(
+                    {'order_id': order_id, 'event_type': 'DELIVERY_DELAYED'},
+                    {'$set': {'metadata.key': notif_key}},
+                )
+            except Exception:
+                pass
+
+
+@app.get('/orders/{order_id}/eta')
+def get_order_eta(order_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Returns a dynamic ETA for an order based on:
+    - The order's actual status transition timestamps
+    - The destination pincode and warehouse distance
+    - Whether the delivery is happening earlier than originally promised
+
+    The frontend should call this endpoint every time it polls orders
+    and update the displayed ETA and any 'Arriving Earlier!' banners.
+    """
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    actor_email = str(current_user.get('email', '')).strip().lower()
+    actor_id = str(current_user.get('id', '')).strip()
+    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
+    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    if actor_role == 'CUSTOMER' and not is_owner:
+        raise HTTPException(status_code=403, detail='Access denied.')
+
+    eta_info = calculate_order_eta(order)
+    check_delivery_eta(order)
+    return eta_info
+
+
 @app.websocket('/ws/orders/{user_id}')
 async def websocket_order_updates(websocket: WebSocket, user_id: str):
     """WebSocket endpoint for real-time order status updates"""
@@ -6054,6 +6674,169 @@ def mark_out_for_delivery_alias(
     return mark_out_for_delivery(order_id, payload, current_user)
 
 
+@app.get('/admin/dashboard-stats')
+def get_admin_dashboard_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
+    now = now_utc()
+    thirty_days_ago = now - timedelta(days=30)
+    
+    orders = list(orders_collection.find(
+        active_orders_filter(), 
+        {'_id': 0, 'created_at': 1, 'total_amount': 1, 'customer_email': 1, 'status': 1}
+    ))
+    
+    valid_orders = []
+    for o in orders:
+        cat = o.get('created_at')
+        if not cat: continue
+        if isinstance(cat, str):
+            try:
+                cat = datetime.fromisoformat(cat.replace('Z', '+00:00'))
+                if cat.tzinfo is None:
+                    cat = cat.replace(tzinfo=UTC)
+            except Exception:
+                continue
+        elif isinstance(cat, datetime):
+            if cat.tzinfo is None:
+                cat = cat.replace(tzinfo=UTC)
+                
+        if cat >= thirty_days_ago:
+            o['created_at'] = cat
+            valid_orders.append(o)
+
+    def get_stats_for_window(window_start, window_end, intervals_count):
+        window_orders = [o for o in valid_orders if window_start <= o['created_at'] <= window_end]
+        successful_orders = [o for o in window_orders if str(o.get('status')).upper() != 'CANCELLED']
+        
+        total_sales = sum(float(o.get('total_amount') or 0) for o in successful_orders)
+        order_count = len(successful_orders)
+        unique_customers = len(set(o.get('customer_email', '').lower() for o in window_orders if o.get('customer_email')))
+        
+        interval_duration = (window_end - window_start) / intervals_count
+        sparkline_sales = [0] * intervals_count
+        sparkline_orders = [0] * intervals_count
+        sparkline_customers_sets = [set() for _ in range(intervals_count)]
+        
+        for o in successful_orders:
+            delta = o['created_at'] - window_start
+            idx = int(delta / interval_duration)
+            if idx >= intervals_count: idx = intervals_count - 1
+            sparkline_sales[idx] += float(o.get('total_amount') or 0)
+            sparkline_orders[idx] += 1
+            if o.get('customer_email'):
+                sparkline_customers_sets[idx].add(o.get('customer_email').lower())
+                
+        sparkline_customers = [len(s) for s in sparkline_customers_sets]
+        
+        def format_currency(val):
+            if val >= 100000:
+                return f"Rs. {val/100000:.1f}L"
+            elif val >= 1000:
+                return f"Rs. {val/1000:.1f}k"
+            return f"Rs. {int(val)}"
+            
+        return [
+            {'label': 'Total Sales', 'value': format_currency(total_sales), 'trend': '', 'sparkline': sparkline_sales},
+            {'label': 'Orders', 'value': str(order_count), 'trend': '', 'sparkline': sparkline_orders},
+            {'label': 'New Customers', 'value': str(unique_customers), 'trend': '', 'sparkline': sparkline_customers},
+        ]
+
+    today_start = now - timedelta(days=1)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    stats = {
+        'TODAY': get_stats_for_window(today_start, now, 6),
+        'WEEK': get_stats_for_window(week_start, now, 7),
+        'MONTH': get_stats_for_window(month_start, now, 6),
+    }
+
+    chart_revenue = []
+    chart_orders = []
+    
+    for i in range(6, -1, -1):
+        day_start = now - timedelta(days=i+1)
+        day_end = now - timedelta(days=i)
+        day_orders = [o for o in valid_orders if day_start <= o['created_at'] < day_end and str(o.get('status')).upper() != 'CANCELLED']
+        day_name = day_start.strftime('%a')
+        chart_revenue.append({'day': day_name, 'revenue': sum(float(o.get('total_amount') or 0) for o in day_orders)})
+        chart_orders.append({'day': day_name, 'orders': len(day_orders)})
+
+    return {
+        'statsByRange': stats,
+        'chartData': {
+            'revenue': chart_revenue,
+            'orders': chart_orders
+        }
+    }
+
+@app.get('/admin/analytics-stats')
+def get_admin_analytics_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
+    now = now_utc()
+    year_ago = now - timedelta(days=365)
+    
+    orders = list(orders_collection.find(
+        active_orders_filter(), 
+        {'_id': 0, 'created_at': 1, 'total_amount': 1, 'status': 1}
+    ))
+    
+    valid_orders = []
+    for o in orders:
+        cat = o.get('created_at')
+        if not cat: continue
+        if isinstance(cat, str):
+            try:
+                cat = datetime.fromisoformat(cat.replace('Z', '+00:00'))
+                if cat.tzinfo is None:
+                    cat = cat.replace(tzinfo=UTC)
+            except Exception:
+                continue
+        elif isinstance(cat, datetime):
+            if cat.tzinfo is None:
+                cat = cat.replace(tzinfo=UTC)
+                
+        if cat >= year_ago:
+            o['created_at'] = cat
+            valid_orders.append(o)
+
+    def calculate_metrics(days_ago):
+        start_date = now - timedelta(days=days_ago)
+        period_orders = [o for o in valid_orders if start_date <= o['created_at'] <= now]
+        successful_orders = [o for o in period_orders if str(o.get('status')).upper() != 'CANCELLED']
+        
+        orders_count = len(successful_orders)
+        revenue = sum(float(o.get('total_amount') or 0) for o in successful_orders)
+        # Simulate visitors since we don't have real pageview tracking
+        visitors = orders_count * 15 + int(days_ago * 5)
+        
+        return {
+            'visitors': visitors,
+            'orders': orders_count,
+            'revenue': revenue
+        }
+
+    metrics = {
+        'WEEKLY': calculate_metrics(7),
+        'MONTHLY': calculate_metrics(30),
+        'YEARLY': calculate_metrics(365),
+    }
+
+    chart_revenue = []
+    
+    for i in range(6, -1, -1):
+        day_start = now - timedelta(days=i+1)
+        day_end = now - timedelta(days=i)
+        day_orders = [o for o in valid_orders if day_start <= o['created_at'] < day_end and str(o.get('status')).upper() != 'CANCELLED']
+        day_name = day_start.strftime('%a')
+        chart_revenue.append({'day': day_name, 'revenue': sum(float(o.get('total_amount') or 0) for o in day_orders)})
+
+    return {
+        'metricsByRange': metrics,
+        'chartData': {
+            'revenue': chart_revenue
+        }
+    }
+
+
 @app.get('/admin/orders')
 def get_admin_orders(current_user: dict = Depends(require_roles('admin', 'merchant'))):
     _ = current_user
@@ -6415,6 +7198,16 @@ def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends
                     }
                 },
             )
+
+            customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip()
+            if customer_id:
+                send_order_notification(
+                    order_id=order['order_id'],
+                    event_type='SHIPMENT_CREATED',
+                    message=f"Great news! Shipment SHP-{shipment_id.replace('SHP-', '')} has been created for order {order['order_id']}.",
+                    user_id=customer_id,
+                    title='📦 Shipment Created'
+                )
 
         shipment = shipments_collection.find_one({'shipment_id': shipment_id})
         created_shipments.append(
@@ -6783,6 +7576,9 @@ def self_assign_delivery_order(order_id: str, current_user: dict = Depends(requi
     )
     latest = orders_collection.find_one({'order_id': order_id}) or order
     return {'message': 'Order self-assigned successfully.', 'order': serialize_order(latest, include_shipment=True)}
+
+
+@app.get('/delivery/profile')
 def get_delivery_profile(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
     profile_details = normalize_delivery_profile_details(current_user.get('profile_details') or {})
     return {
