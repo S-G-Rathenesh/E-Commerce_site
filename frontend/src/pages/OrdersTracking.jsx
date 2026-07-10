@@ -7,6 +7,7 @@ import ProductReview from '../components/ProductReview'
 import { fetchCatalogProducts } from '../utils/catalog'
 import { addToCart } from '../utils/cart'
 import { addToWishlist } from '../utils/wishlist'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const EMPTY_FILTER = '__ALL__'
@@ -180,7 +181,7 @@ function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewPr
         {/* Thumbnail */}
         <div className="ot-thumb">
           {primary.image
-            ? <img src={primary.image} alt={primary.name} />
+            ? <img src={resolveImageUrl(primary.image)} alt={primary.name} />
             : <div className="ot-thumb__placeholder" />}
         </div>
 

@@ -4,7 +4,7 @@ import Button from '../components/Button'
 import PageWrapper from '../components/PageWrapper'
 import { clearCart, getCartItems, removeFromCart, updateCartQuantity } from '../utils/cart'
 import { getStoredUser } from '../utils/auth'
-
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 export default function Cart() {
   const [currentUser, setCurrentUser] = useState(getStoredUser())
   const [cartItems, setCartItems] = useState(() => getCartItems(getStoredUser()))
@@ -74,7 +74,7 @@ export default function Cart() {
           {cartItems.length > 0 ? (
             cartItems.map((item) => (
               <div key={`${item.id}-${item.size}`} className="cart-row">
-                <img src={item.image} alt={item.name} />
+                <img src={resolveImageUrl(item.image)} alt={item.name} />
                 <div>
                   <h3>{item.name}</h3>
                   <p>

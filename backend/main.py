@@ -1305,9 +1305,28 @@ def create_refresh_token(subject_email: str, role: str) -> str:
     return create_auth_token(subject_email, role, token_type='refresh', expires_hours=REFRESH_TOKEN_EXPIRE_HOURS)
 
 
+_LOCALHOST_IMAGE_RE = re.compile(r'^https?://(?:127\.0\.0\.1|localhost)(?::\d+)?(/uploads/images/.+)$', re.IGNORECASE)
+
+
+def _normalize_image_url(raw: str | None) -> str:
+    """Convert absolute localhost image URLs to relative paths so they work in any deployment."""
+    url = str(raw or '').strip()
+    if not url:
+        return url
+    match = _LOCALHOST_IMAGE_RE.match(url)
+    if match:
+        return match.group(1)
+    return url
+
+
 def serialize_product(document: dict) -> dict:
     payload = enrich_product_specifications(document)
     payload.pop('_id', None)
+    # Normalize image URLs so localhost paths from dev are rewritten to relative paths
+    if 'image' in payload:
+        payload['image'] = _normalize_image_url(payload.get('image'))
+    if 'additional_images' in payload and isinstance(payload['additional_images'], list):
+        payload['additional_images'] = [_normalize_image_url(u) for u in payload['additional_images']]
     return payload
 
 
@@ -3948,8 +3967,8 @@ async def upload_image(request: Request, file: UploadFile = File(...), current_u
 
     _store_uploaded_image(file_name, content_type, payload, current_user.get('email'))
 
-    base_url = str(request.base_url).rstrip('/')
-    image_url = f'{base_url}/uploads/images/{file_name}'
+    # Return a relative path so it works regardless of the deployment host.
+    image_url = f'/uploads/images/{file_name}'
     return {
         'message': 'Image uploaded successfully.',
         'image_url': image_url,
