@@ -222,7 +222,7 @@ export default function ImageUploadField({
 
       <input
         className="field"
-        type="url"
+        type="text"
         value={value}
         onChange={(event) => commitValue(event.target.value)}
         placeholder={placeholder}

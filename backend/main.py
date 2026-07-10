@@ -270,6 +270,14 @@ class AuthLoginRequest(BaseModel):
     password: str
 
 
+class UserAddressUpdateRequest(BaseModel):
+    fullName: str
+    phone: str
+    city: str
+    postalCode: str
+    addressLine: str
+
+
 class SignupRequest(BaseModel):
     full_name: str
     email: str
@@ -2045,6 +2053,8 @@ def serialize_user(document: dict) -> dict:
     payload['role'] = normalize_role(payload.get('role', 'CUSTOMER'))
     payload['status'] = normalize_account_status(payload.get('status', 'ACTIVE'))
     payload['merchant_status'] = normalize_merchant_status(payload.get('merchant_status', 'PENDING'))
+    if 'address' in document:
+        payload['address'] = document['address']
     return payload
 
 
@@ -5000,6 +5010,39 @@ def google_auth(payload: GoogleAuthRequest):
         'token': token,
         'refresh_token': refresh_token,
         'user': serialize_user(account),
+    }
+
+
+@app.put('/api/user/profile')
+def update_user_profile(
+    payload: UserAddressUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update user profile and shipping address."""
+    user_id = current_user.get('id')
+    email = current_user.get('email', '').strip().lower()
+
+    user = users_collection.find_one({'$or': [{'id': user_id}, {'email': email}]})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+
+    # Using payload.model_dump() instead of payload.dict() if Pydantic v2, but stick to dict() for broad compatibility
+    address_data = payload.dict()
+
+    users_collection.update_one(
+        {'_id': user['_id']},
+        {
+            '$set': {
+                'address': address_data,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+
+    updated_user = users_collection.find_one({'_id': user['_id']})
+    return {
+        'message': 'Profile address updated successfully.',
+        'user': serialize_user(updated_user),
     }
 
 
