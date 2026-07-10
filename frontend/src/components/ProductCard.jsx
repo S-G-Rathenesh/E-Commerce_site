@@ -46,7 +46,6 @@ export default function ProductCard({ product, onAddToWishlist, isWishlisted = f
           {(product.productType || product.category) +
             (product.subType ? ` • ${product.subType}` : '')}
         </p>
-        <p>{product.description}</p>
         <p className="product-price">Rs. {product.price.toFixed(2)}</p>
         <div className="product-card-actions">
           <Button
