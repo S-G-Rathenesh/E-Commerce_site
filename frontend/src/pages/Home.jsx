@@ -7,6 +7,7 @@ import { fetchCatalogProducts } from '../utils/catalog'
 import { fetchPublicBanners, fetchPublicGlobalOffer } from '../utils/platform'
 import { addToWishlist, getWishlistItems } from '../utils/wishlist'
 import { getStoredUser } from '../utils/auth'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 
 const SALE_SLIDE_INTERVAL = 5000
 
@@ -211,7 +212,7 @@ export default function Home() {
             ctaSecondaryLabel: 'Explore Products',
             ctaSecondaryTo: '/products',
             discount: offer?.discount_percent ? `${offer.discount_percent}%` : 'Offer',
-            image: banner.image_url,
+            image: resolveImageUrl(banner.image_url),
             imageAlt: banner.title || 'Approved banner',
           }))
           setSaleSlides(normalizedBanners)
@@ -314,7 +315,7 @@ export default function Home() {
                 </div>
 
                 <div className="home-sale-hero-media">
-                  <img src={slide.image} alt={slide.imageAlt} />
+                  <img src={resolveImageUrl(slide.image)} alt={slide.imageAlt} />
                   <div className="home-sale-hero-badge">
                     <p>{slide.discount}</p>
                     <span>OFF</span>

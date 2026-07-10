@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { buildAuthHeaders } from '../utils/auth'
 import { imgFallback } from '../utils/imgFallback'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 import Button from '../components/Button'
 import DiscoveryProductCard from '../components/DiscoveryProductCard'
@@ -357,8 +358,10 @@ export default function ProductDetails() {
     // Deduplicate: primary first, then extras without repeating primary
     const all = [primary, ...extras.filter((u) => u !== primary)].filter(Boolean)
 
-    // Always show at least one image
-    return all.length > 0 ? all : [primary].filter(Boolean)
+    // Resolve all URLs so localhost paths are rewritten for deployed environments
+    const resolved = (all.length > 0 ? all : [primary].filter(Boolean)).map(resolveImageUrl)
+
+    return resolved
   }, [product])
 
   if (loading) {
@@ -407,7 +410,7 @@ export default function ProductDetails() {
     )
   }
 
-  const activeImage = imageSet[activeImageIndex] || product.image
+  const activeImage = imageSet[activeImageIndex] || resolveImageUrl(product.image)
   const renderedStars = '★★★★★'
 
   const handleAddToCart = () => {

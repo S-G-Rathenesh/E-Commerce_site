@@ -1,4 +1,6 @@
+import { PLACEHOLDER_SVG } from './resolveImageUrl'
+
 export function imgFallback(e) {
   e.target.onerror = null; // Prevent infinite loop if fallback also fails
-  e.target.src = 'https://via.placeholder.com/300?text=Image+Not+Found';
+  e.target.src = PLACEHOLDER_SVG;
 }

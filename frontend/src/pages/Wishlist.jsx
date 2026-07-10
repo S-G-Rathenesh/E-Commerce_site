@@ -16,6 +16,7 @@ import {
   syncGuestWishlistToUser,
 } from '../utils/wishlist'
 import { fetchCatalogProducts } from '../utils/catalog'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 
 function normalizeRole(role) {
   const next = String(role || '').trim().toLowerCase()
@@ -231,7 +232,7 @@ export default function Wishlist() {
           <div className="wishlist-grid">
             {(sharePayload.items || []).map((item) => (
               <article key={`shared-${item.id}`} className="wishlist-card">
-                <img src={item.image} alt={item.name} />
+                <img src={resolveImageUrl(item.image)} alt={item.name} />
                 <div>
                   <p className="product-category">{item.category}</p>
                   <h3>{item.name}</h3>
@@ -332,7 +333,7 @@ export default function Wishlist() {
 
                 return (
                   <article key={`${activeList.id}-${item.id}`} className="wishlist-card">
-                    <img src={item.image} alt={item.name} />
+                    <img src={resolveImageUrl(item.image)} alt={item.name} />
                     <div className="panel-stack">
                       <div>
                         <p className="product-category">{item.category}</p>
