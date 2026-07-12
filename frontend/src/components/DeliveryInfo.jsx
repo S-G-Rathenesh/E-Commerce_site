@@ -11,10 +11,14 @@ export default function DeliveryInfo({ customerPincode, orderTotal = 0, showDeta
   const finalDeliveryCharge = getFinalDeliveryCharge(orderTotal)
 
   useEffect(() => {
-    if (!customerPincode) {
+    if (!customerPincode || String(customerPincode).length !== 6) {
       setLoading(false)
+      setError('')
+      setDelivery(null)
       return
     }
+
+    let ignore = false
 
     const checkDelivery = async () => {
       setLoading(true)
@@ -28,22 +32,32 @@ export default function DeliveryInfo({ customerPincode, orderTotal = 0, showDeta
         )
         const data = await response.json()
 
-        if (!response.ok) {
-          setError(data?.detail || 'Unable to check delivery.')
-          setDelivery(null)
-          return
-        }
+        if (!ignore) {
+          if (!response.ok) {
+            setError(data?.detail || 'Unable to check delivery.')
+            setDelivery(null)
+            return
+          }
 
-        setDelivery(data)
+          setDelivery(data)
+        }
       } catch (err) {
-        setError('Unable to check delivery availability.')
-        setDelivery(null)
+        if (!ignore) {
+          setError('Unable to check delivery availability.')
+          setDelivery(null)
+        }
       } finally {
-        setLoading(false)
+        if (!ignore) {
+          setLoading(false)
+        }
       }
     }
 
     checkDelivery()
+
+    return () => {
+      ignore = true
+    }
   }, [customerPincode, orderTotal])
 
   if (!customerPincode) {
