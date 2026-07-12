@@ -270,6 +270,14 @@ class AuthLoginRequest(BaseModel):
     password: str
 
 
+class UserAddressUpdateRequest(BaseModel):
+    fullName: str
+    phone: str
+    city: str
+    postalCode: str
+    addressLine: str
+
+
 class SignupRequest(BaseModel):
     full_name: str
     email: str
@@ -1305,9 +1313,28 @@ def create_refresh_token(subject_email: str, role: str) -> str:
     return create_auth_token(subject_email, role, token_type='refresh', expires_hours=REFRESH_TOKEN_EXPIRE_HOURS)
 
 
+_LOCALHOST_IMAGE_RE = re.compile(r'^https?://(?:127\.0\.0\.1|localhost)(?::\d+)?(/uploads/images/.+)$', re.IGNORECASE)
+
+
+def _normalize_image_url(raw: str | None) -> str:
+    """Convert absolute localhost image URLs to relative paths so they work in any deployment."""
+    url = str(raw or '').strip()
+    if not url:
+        return url
+    match = _LOCALHOST_IMAGE_RE.match(url)
+    if match:
+        return match.group(1)
+    return url
+
+
 def serialize_product(document: dict) -> dict:
     payload = enrich_product_specifications(document)
     payload.pop('_id', None)
+    # Normalize image URLs so localhost paths from dev are rewritten to relative paths
+    if 'image' in payload:
+        payload['image'] = _normalize_image_url(payload.get('image'))
+    if 'additional_images' in payload and isinstance(payload['additional_images'], list):
+        payload['additional_images'] = [_normalize_image_url(u) for u in payload['additional_images']]
     return payload
 
 
@@ -2026,6 +2053,8 @@ def serialize_user(document: dict) -> dict:
     payload['role'] = normalize_role(payload.get('role', 'CUSTOMER'))
     payload['status'] = normalize_account_status(payload.get('status', 'ACTIVE'))
     payload['merchant_status'] = normalize_merchant_status(payload.get('merchant_status', 'PENDING'))
+    if 'address' in document:
+        payload['address'] = document['address']
     return payload
 
 
@@ -3948,8 +3977,8 @@ async def upload_image(request: Request, file: UploadFile = File(...), current_u
 
     _store_uploaded_image(file_name, content_type, payload, current_user.get('email'))
 
-    base_url = str(request.base_url).rstrip('/')
-    image_url = f'{base_url}/uploads/images/{file_name}'
+    # Return a relative path so it works regardless of the deployment host.
+    image_url = f'/uploads/images/{file_name}'
     return {
         'message': 'Image uploaded successfully.',
         'image_url': image_url,
@@ -4981,6 +5010,39 @@ def google_auth(payload: GoogleAuthRequest):
         'token': token,
         'refresh_token': refresh_token,
         'user': serialize_user(account),
+    }
+
+
+@app.put('/api/user/profile')
+def update_user_profile(
+    payload: UserAddressUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update user profile and shipping address."""
+    user_id = current_user.get('id')
+    email = current_user.get('email', '').strip().lower()
+
+    user = users_collection.find_one({'$or': [{'id': user_id}, {'email': email}]})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
+
+    # Using payload.model_dump() instead of payload.dict() if Pydantic v2, but stick to dict() for broad compatibility
+    address_data = payload.dict()
+
+    users_collection.update_one(
+        {'_id': user['_id']},
+        {
+            '$set': {
+                'address': address_data,
+                'updated_at': now_utc(),
+            }
+        },
+    )
+
+    updated_user = users_collection.find_one({'_id': user['_id']})
+    return {
+        'message': 'Profile address updated successfully.',
+        'user': serialize_user(updated_user),
     }
 
 
@@ -7960,6 +8022,9 @@ def get_delivery_earnings(current_user: dict = Depends(require_roles('DELIVERY_A
             delivered_at = datetime.fromisoformat(delivered_at_iso.replace('Z', '+00:00')) if delivered_at_iso else None
         except ValueError:
             delivered_at = None
+
+        if delivered_at and delivered_at.tzinfo is None:
+            delivered_at = delivered_at.replace(tzinfo=UTC)
 
         if delivered_at and delivered_at >= start_week:
             weekly_earnings += commission

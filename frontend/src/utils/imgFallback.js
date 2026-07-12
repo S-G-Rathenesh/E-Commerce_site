@@ -1,17 +1,15 @@
+import { PLACEHOLDER_SVG } from './resolveImageUrl';
+
 /**
  * onError handler for <img> tags.
- * If an image fails to load (404, network error, etc.) hide it gracefully
- * rather than showing the browser's broken-image icon.
- *
- * Usage:
- *   <img src={url} alt="..." onError={imgFallback} />
+ * Replaces broken images with the default placeholder SVG.
  */
 export function imgFallback(event) {
-  const img = event.currentTarget;
+  const img = event.currentTarget || event.target;
 
-  // Avoid infinite loop if the fallback src itself fails
+  // Prevent infinite loop if placeholder also fails
   img.onerror = null;
-  img.style.opacity = "0";
+  img.src = PLACEHOLDER_SVG;
 }
 
 /**
@@ -24,7 +22,7 @@ export function imgFallbackReplace(event) {
   img.onerror = null;
 
   const placeholder = document.createElement("div");
-  placeholder.className = img.className + " img-placeholder";
+  placeholder.className = `${img.className} img-placeholder`;
   placeholder.setAttribute("aria-hidden", "true");
 
   img.parentNode?.replaceChild(placeholder, img);

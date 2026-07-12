@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import Button from './Button'
 import { imgFallback } from '../utils/imgFallback'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 
 function renderStars(rating) {
   const fullStars = Math.max(1, Math.min(5, Math.round(Number(rating || 0))))
@@ -37,7 +38,7 @@ export default function DiscoveryProductCard({
           {wishlisted ? '♥' : '♡'}
         </button>
         <Link to={`/product/${product?.id}`} className="discovery-card-image-link" aria-label={`View product ${title}`}>
-          <img src={image} alt={title} className="discovery-card-image" loading="lazy" onError={imgFallback} />
+          <img src={resolveImageUrl(image)} alt={title} className="discovery-card-image" loading="lazy" onError={imgFallback} />
         </Link>
       </div>
 

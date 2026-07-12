@@ -111,14 +111,15 @@ export default function Profile() {
     return ''
   }
 
-  function handleSaveDefaultAddress() {
+  async function handleSaveDefaultAddress() {
     const validationError = validateAddressForm()
     if (validationError) {
       setAddressMessage(validationError)
       return
     }
 
-    const saved = saveDefaultAddress(currentUser, addressForm)
+    setAddressMessage('Saving address...')
+    const saved = await saveDefaultAddress(currentUser, addressForm)
     setSavedAddress(saved)
     setAddressForm(saved)
     setEditingAddress(false)

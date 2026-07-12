@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { buildAuthHeaders } from '../utils/auth'
+import { resolveImageUrl } from '../utils/resolveImageUrl'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const API_FALLBACK_BASE = API_BASE.includes('127.0.0.1') ? API_BASE.replace('127.0.0.1', 'localhost') : ''
@@ -19,13 +20,8 @@ function resolvePreviewSource(value) {
   if (!nextValue) {
     return ''
   }
-  if (nextValue.startsWith('http://') || nextValue.startsWith('https://') || nextValue.startsWith('data:') || nextValue.startsWith('blob:')) {
-    return nextValue
-  }
-  if (nextValue.startsWith('/')) {
-    return `${API_BASE}${nextValue}`
-  }
-  return nextValue
+  // Use resolveImageUrl for consistent URL normalization across environments
+  return resolveImageUrl(nextValue)
 }
 
 export default function ImageUploadField({
@@ -226,7 +222,7 @@ export default function ImageUploadField({
 
       <input
         className="field"
-        type="url"
+        type="text"
         value={value}
         onChange={(event) => commitValue(event.target.value)}
         placeholder={placeholder}

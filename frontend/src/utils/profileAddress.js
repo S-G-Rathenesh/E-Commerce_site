@@ -1,3 +1,6 @@
+import { getAuthToken, setStoredUser } from './auth'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const PROFILE_ADDRESS_STORAGE_KEY = 'veloura_saved_profile_addresses'
 
 function normalizeUserKey(user) {
@@ -37,6 +40,13 @@ function normalizeAddressPayload(address) {
 }
 
 export function getSavedDefaultAddress(user) {
+  if (user?.address) {
+    const normalized = normalizeAddressPayload(user.address)
+    if (normalized.fullName || normalized.phone || normalized.city || normalized.postalCode || normalized.addressLine) {
+      return normalized
+    }
+  }
+
   const userKey = normalizeUserKey(user)
   if (!userKey) {
     return null
@@ -56,13 +66,36 @@ export function getSavedDefaultAddress(user) {
   return normalized
 }
 
-export function saveDefaultAddress(user, address) {
+export async function saveDefaultAddress(user, address) {
   const userKey = normalizeUserKey(user)
   if (!userKey) {
     return null
   }
 
   const normalized = normalizeAddressPayload(address)
+
+  try {
+    const token = getAuthToken()
+    if (token) {
+      const response = await fetch(`${API_BASE}/api/user/profile`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(normalized),
+      })
+      if (response.ok) {
+        const data = await response.json()
+        if (data?.user) {
+          setStoredUser(data.user)
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Failed to save profile address to backend:', error)
+  }
+
   const store = readAddressStore()
   store[userKey] = normalized
   writeAddressStore(store)

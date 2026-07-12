@@ -83,6 +83,12 @@ function getReadyForPickupLabel(order) {
   return 'Awaiting Pickup'
 }
 
+function formatDateTime(value) {
+  const date = new Date(value || '')
+  if (Number.isNaN(date.getTime())) return 'Pending'
+  return date.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
 export default function DeliveryDashboard() {
   const navigate = useNavigate()
   // assignedOrders = from /delivery/orders (explicitly assigned to me)
@@ -130,15 +136,23 @@ export default function DeliveryDashboard() {
 
   const requestWithAuth = async (url, options = {}) => {
     const headers = buildAuthHeaders(options.headers || {})
-    let res = await fetch(url, { ...options, headers, cache: 'no-store' })
-    if (res.status !== 401) return res
-    const refreshed = await refreshAccessToken()
-    if (!refreshed) {
-      clearStoredUser()
-      navigate('/login', { replace: true })
-      throw new Error('Auth expired')
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), 10000)
+    try {
+      let res = await fetch(url, { ...options, headers, cache: 'no-store', signal: controller.signal })
+      clearTimeout(id)
+      if (res.status !== 401) return res
+      const refreshed = await refreshAccessToken()
+      if (!refreshed) {
+        clearStoredUser()
+        navigate('/login', { replace: true })
+        throw new Error('Auth expired')
+      }
+      return fetch(url, { ...options, headers: buildAuthHeaders(options.headers || {}), cache: 'no-store' })
+    } catch (err) {
+      clearTimeout(id)
+      throw err
     }
-    return fetch(url, { ...options, headers: buildAuthHeaders(options.headers || {}), cache: 'no-store' })
   }
 
   const validateTokenOnLoad = async () => {
@@ -192,18 +206,21 @@ export default function DeliveryDashboard() {
   }
 
   const loadOrders = async () => {
-    if (!isOnline) { setLoading(false); return }
     setLoading(true)
     try {
-      // Fetch both in parallel
-      const [assignedRes, pincodeRes] = await Promise.all([
-        requestWithAuth(`${API_BASE}/delivery/orders`, { method: 'GET' }),
-        requestWithAuth(`${API_BASE}/delivery/pincode-orders`, { method: 'GET' }),
-      ])
+      const tasks = [
+        requestWithAuth(`${API_BASE}/delivery/orders`, { method: 'GET' })
+      ]
+      if (isOnline) {
+        tasks.push(requestWithAuth(`${API_BASE}/delivery/pincode-orders`, { method: 'GET' }))
+      }
+
+      const results = await Promise.all(tasks)
+      const assignedRes = results[0]
+      const pincodeRes = results.length > 1 ? results[1] : null
 
       const assignedData = await assignedRes.json()
-      const pincodeData = await pincodeRes.json()
-
+      
       if (assignedRes.ok) {
         const next = Array.isArray(assignedData?.orders) ? assignedData.orders : []
         setAssignedOrders(next)
@@ -220,7 +237,8 @@ export default function DeliveryDashboard() {
         setMessage(assignedData?.detail || 'Unable to load assigned orders.')
       }
 
-      if (pincodeRes.ok) {
+      if (pincodeRes && pincodeRes.ok) {
+        const pincodeData = await pincodeRes.json()
         const next = Array.isArray(pincodeData?.orders) ? pincodeData.orders : []
         setPincodeOrders(next)
         setDrafts(prev => {
@@ -232,9 +250,11 @@ export default function DeliveryDashboard() {
           }
           return updated
         })
+      } else if (!isOnline) {
+        setPincodeOrders([])
       }
 
-      if (assignedRes.ok || pincodeRes.ok) setMessage('')
+      if (assignedRes.ok && isOnline) setMessage('')
       await loadEarnings()
     } catch {
       setMessage('Unable to load delivery orders.')
@@ -318,7 +338,16 @@ export default function DeliveryDashboard() {
       const data = await res.json()
       if (!res.ok) { setMessage(data?.detail || 'Failed to assign order.'); return }
       setMessage(`Order ${orderId} assigned to you successfully.`)
-      await loadOrders()
+      
+      if (data?.order) {
+        setAssignedOrders(prev => {
+          const filtered = prev.filter(o => o.order_id !== orderId)
+          return [...filtered, { ...data.order, assigned_to_me: true }]
+        })
+        setPincodeOrders(prev => prev.map(o => o.order_id === orderId ? { ...data.order, assigned_to_me: true } : o))
+      }
+      
+      loadOrders() // fetch in background without awaiting
     } catch {
       setMessage('Failed to assign order.')
     } finally {
@@ -354,7 +383,13 @@ export default function DeliveryDashboard() {
       const data = await res.json()
       if (!res.ok) { setMessage(data?.detail || 'Failed to update delivery task.'); return }
       setMessage(data?.message || 'Delivery task updated.')
-      await loadOrders()
+      
+      if (data?.order) {
+        setAssignedOrders(prev => prev.map(o => o.order_id === orderId ? { ...data.order, assigned_to_me: true } : o))
+        setPincodeOrders(prev => prev.map(o => o.order_id === orderId ? { ...data.order, assigned_to_me: true } : o))
+      }
+      
+      loadOrders() // fetch in background without awaiting
     } catch {
       setMessage('Failed to update delivery task.')
     } finally {
