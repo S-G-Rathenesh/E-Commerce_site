@@ -8023,6 +8023,9 @@ def get_delivery_earnings(current_user: dict = Depends(require_roles('DELIVERY_A
         except ValueError:
             delivered_at = None
 
+        if delivered_at and delivered_at.tzinfo is None:
+            delivered_at = delivered_at.replace(tzinfo=UTC)
+
         if delivered_at and delivered_at >= start_week:
             weekly_earnings += commission
 
