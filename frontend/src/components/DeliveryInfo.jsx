@@ -23,7 +23,7 @@ export default function DeliveryInfo({ customerPincode, orderTotal = 0, showDeta
         const response = await fetch(
           `${API_BASE}/check-delivery?customer_pincode=${customerPincode}&order_total=${Number(orderTotal) || 0}`,
           {
-          headers: buildAuthHeaders(),
+            headers: buildAuthHeaders(),
           },
         )
         const data = await response.json()
@@ -35,7 +35,7 @@ export default function DeliveryInfo({ customerPincode, orderTotal = 0, showDeta
         }
 
         setDelivery(data)
-      } catch (err) {
+      } catch {
         setError('Unable to check delivery availability.')
         setDelivery(null)
       } finally {
@@ -89,9 +89,7 @@ export default function DeliveryInfo({ customerPincode, orderTotal = 0, showDeta
               </p>
               <p>✓ Estimated delivery: {delivery.estimated_days}</p>
               {delivery.cod_available && (
-                <p>
-                  ✓ Cash on Delivery available
-                </p>
+                <p>✓ Cash on Delivery available</p>
               )}
             </>
           )}
