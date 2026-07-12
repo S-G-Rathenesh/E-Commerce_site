@@ -114,7 +114,7 @@ export default function DeliveryRating({ orderId }) {
         <div>
           <p className="dr-done-title">{copy.title}</p>
           <p className="dr-done-sub">You rated this delivery {submittedRating} / 5.</p>
-          {submittedFeedback ? <p className="dr-done-quote">“{submittedFeedback}”</p> : null}
+          {submittedFeedback ? <p className="dr-done-quote">"{submittedFeedback}"</p> : null}
         </div>
       </div>
     )
