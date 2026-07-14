@@ -4041,10 +4041,17 @@ def root():
 
 @app.get('/products')
 def get_products():
-    merchant_id = get_default_merchant_id()
+    active_merchant_ids = get_active_registered_merchant_ids()
+    query = {'review_status': 'APPROVED'}
+    if active_merchant_ids:
+        query['merchant_id'] = {'$in': active_merchant_ids}
+    else:
+        default_id = get_default_merchant_id()
+        if default_id:
+            query['merchant_id'] = default_id
     products = list(
         products_collection.find(
-            {'merchant_id': merchant_id, 'review_status': 'APPROVED'},
+            query,
             {'_id': 0},
         )
     )
@@ -4053,9 +4060,16 @@ def get_products():
 
 @app.get('/product/{product_id}')
 def get_product(product_id: int):
-    merchant_id = get_default_merchant_id()
+    active_merchant_ids = get_active_registered_merchant_ids()
+    query = {'id': product_id, 'review_status': 'APPROVED'}
+    if active_merchant_ids:
+        query['merchant_id'] = {'$in': active_merchant_ids}
+    else:
+        default_id = get_default_merchant_id()
+        if default_id:
+            query['merchant_id'] = default_id
     product = products_collection.find_one(
-        {'id': product_id, 'merchant_id': merchant_id, 'review_status': 'APPROVED'},
+        query,
         {'_id': 0},
     )
     if not product:
@@ -7789,14 +7803,15 @@ def get_delivery_estimate(product_id: int, pincode: str | None = None, user_pinc
     if not is_valid_indian_pincode(cleaned_pincode):
         raise HTTPException(status_code=400, detail='Please enter a valid 6-digit Indian pincode.')
 
-    product = products_collection.find_one({'id': product_id}, {'_id': 0, 'id': 1, 'name': 1})
+    product = products_collection.find_one({'id': product_id}, {'_id': 0, 'id': 1, 'name': 1, 'merchant_id': 1})
     if not product:
         # Frontend can contain additional catalog ids not yet persisted in Mongo.
         # Keep delivery estimate functional by using a synthetic product descriptor.
         product = {'id': product_id, 'name': f'Product {product_id}'}
 
     user_location = get_location_for_pincode(cleaned_pincode)
-    coverage = get_merchant_delivery_coverage()
+    product_merchant_id = product.get('merchant_id') if product else None
+    coverage = get_merchant_delivery_coverage(product_merchant_id)
     delivery_available = is_delivery_allowed_for_location(coverage, user_location)
 
     if not delivery_available:
