@@ -170,18 +170,18 @@ function App() {
           path="/wishlist"
           element={isCustomerUser ? <Wishlist /> : <Navigate to={redirectByRole(currentUser)} replace />}
         />
-        <Route
-          path="/checkout"
-          element={isCustomerUser ? <Checkout /> : <Navigate to={redirectByRole(currentUser)} replace />}
-        />
-        <Route path="/profile" element={<RequireAuth user={currentUser}><Profile /></RequireAuth>} />
+        <Route path="/orders/tracking" element={<RequireRole user={currentUser} allowedRoles={['user']}><OrdersTracking /></RequireRole>} />
+        <Route path="/orders" element={<Navigate to="/orders/tracking" replace />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/merchant-register" element={<MerchantRegister />} />
         <Route path="/delivery-register" element={<DeliveryRegister />} />
         <Route path="/operations-register" element={<OperationsRegister />} />
-        <Route path="/orders" element={<Navigate to="/orders/tracking" replace />} />
-        <Route path="/orders/tracking" element={<RequireRole user={currentUser} allowedRoles={['user']}><OrdersTracking /></RequireRole>} />
+        <Route path="/profile" element={<RequireAuth user={currentUser}><Profile /></RequireAuth>} />
+        <Route
+          path="/checkout"
+          element={isCustomerUser ? <Checkout /> : <Navigate to={redirectByRole(currentUser)} replace />}
+        />
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/delivery" element={<Navigate to="/delivery/dashboard" replace />} />
         <Route path="/operations" element={<Navigate to="/operations/dashboard" replace />} />
