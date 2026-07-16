@@ -1,0 +1,28 @@
+.phone-input-group {
+  width: 100%;
+}
+
+.phone-input-control {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.phone-country-select {
+  width: 110px;
+  flex-shrink: 0;
+  padding-right: 24px;
+}
+
+.phone-number-input {
+  flex-grow: 1;
+}
+
+/* Fix for mobile screens */
+@media (max-width: 480px) {
+  .phone-country-select {
+    width: 90px;
+    padding-right: 16px;
+    font-size: 0.9rem;
+  }
+}
