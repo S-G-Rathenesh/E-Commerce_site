@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
+import PhoneInput from '../components/PhoneInput'
 import { findLocalAccountByEmail, upsertLocalAccount } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -242,7 +243,7 @@ export default function OperationsRegister() {
                   <div className="merchant-section-fields">
                     <Input label="Full name" type="text" value={fullName} onChange={(event) => setFullName(event.target.value)} placeholder="Your full name" required />
                     <Input label="Work email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="ops@company.com" required />
-                    <Input label="Phone number" type="tel" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile number" required />
+                    <PhoneInput label="Phone number" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} required />
                   </div>
                 </div>
               ) : null}
