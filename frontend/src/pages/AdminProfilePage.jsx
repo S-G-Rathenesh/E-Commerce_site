@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import PageWrapper from '../components/PageWrapper'
 import ImageUploadField from '../components/ImageUploadField'
+import PhoneInput from '../components/PhoneInput'
 import { getStoredUser, setStoredUser, buildAuthHeaders } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
@@ -209,16 +210,12 @@ export default function AdminProfilePage() {
               <small style={{ color: '#666', marginTop: '4px' }}>Email is managed by your account login</small>
             </label>
 
-            <label className="field-group">
-              <span className="field-label">Phone</span>
-              <input
-                className="field"
-                name="phone"
-                value={formData.phone}
-                onChange={handleChange}
-                placeholder="Phone number"
-              />
-            </label>
+            <PhoneInput
+              label="Phone"
+              name="phone"
+              value={formData.phone}
+              onChange={handleChange}
+            />
 
             <p className="eyebrow" style={{ marginTop: '16px' }}>Banking</p>
 

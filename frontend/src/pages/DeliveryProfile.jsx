@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import ImageUploadField from '../components/ImageUploadField'
+import Input from '../components/Input'
+import PhoneInput from '../components/PhoneInput'
 import PageWrapper from '../components/PageWrapper'
 import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from '../utils/auth'
 
@@ -372,10 +374,12 @@ export default function DeliveryProfile() {
               <span className="field-label">Full name</span>
               <input className="field" value={form.full_name} onChange={(event) => updateField('full_name', event.target.value)} />
             </label>
-            <label className="field-group">
-              <span className="field-label">Phone number</span>
-              <input className="field" value={form.phone_number} onChange={(event) => updateField('phone_number', event.target.value)} />
-            </label>
+            <PhoneInput
+              label="Phone number"
+              name="phone_number"
+              value={form.phone_number}
+              onChange={(event) => updateField('phone_number', event.target.value)}
+            />
             <label className="field-group">
               <span className="field-label">Vehicle type</span>
               <select className="field" value={form.vehicle_type} onChange={(event) => updateField('vehicle_type', event.target.value)}>

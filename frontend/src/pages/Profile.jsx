@@ -3,6 +3,7 @@ import PageWrapper from '../components/PageWrapper'
 import { getStoredUser } from '../utils/auth'
 import { useEffect, useState } from 'react'
 import Input from '../components/Input'
+import PhoneInput from '../components/PhoneInput'
 import toast from 'react-hot-toast'
 import { clearSavedDefaultAddress, getSavedDefaultAddress, saveDefaultAddress } from '../utils/profileAddress'
 
@@ -348,11 +349,10 @@ export default function Profile() {
               onChange={(event) => updateAddressForm('fullName', event.target.value)}
               placeholder="e.g. Julianne Moore"
             />
-            <Input
+            <PhoneInput
               label="Phone number"
               value={addressForm.phone}
               onChange={(event) => updateAddressForm('phone', event.target.value)}
-              placeholder="+91 98765 43210"
             />
             <Input
               label="City"

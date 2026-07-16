@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
+import PhoneInput from '../components/PhoneInput'
 import PageWrapper from '../components/PageWrapper'
 import DeliveryInfo from '../components/DeliveryInfo'
 import { buildAuthHeaders, getStoredUser, refreshAuthToken } from '../utils/auth'
@@ -411,7 +412,7 @@ export default function Checkout() {
             ) : (
               <>
                 <Input label="Full name" value={fullName} onChange={(event) => setFullName(event.target.value)} placeholder="e.g. Julianne Moore" />
-                <Input label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+1 (555) 000-0000" />
+                <PhoneInput label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)} />
                 <Input label="City" value={city} onChange={(event) => setCity(event.target.value)} placeholder="New York" />
                 <Input label="Postal code" value={postalCode} onChange={(event) => setPostalCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="560001" />
               </>
