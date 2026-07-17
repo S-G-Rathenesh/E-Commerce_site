@@ -3974,6 +3974,27 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     return account
 
 
+def get_current_user_optional(request: Request) -> dict | None:
+    authorization: str = request.headers.get("Authorization")
+    if not authorization:
+        return None
+    try:
+        parts = authorization.split()
+        if len(parts) != 2 or parts[0].lower() != 'bearer':
+            return None
+        token = parts[1]
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        token_type = str(payload.get('token_type') or 'access').strip().lower()
+        if token_type != 'access':
+            return None
+        email = str(payload.get('sub') or '').strip().lower()
+        if email:
+            return users_collection.find_one({'email': email})
+    except Exception:
+        pass
+    return None
+
+
 @app.post('/media/upload-image')
 async def upload_image(request: Request, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     content_type = str(file.content_type or '').strip().lower()
@@ -5374,7 +5395,7 @@ def update_merchant_shipping_config(
 def check_delivery_serviceability(
     customer_pincode: str,
     order_total: float = 0,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict | None = Depends(get_current_user_optional),
 ):
     """
     Check delivery serviceability for a customer pincode.
@@ -5385,8 +5406,8 @@ def check_delivery_serviceability(
     - delivery_charge: float
     - cod_available: bool
     """
-    role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    merchant_id = str(current_user.get('id') or '').strip() if role in {'ADMIN', 'MERCHANT'} else ''
+    role = normalize_role((current_user or {}).get('role', 'CUSTOMER'))
+    merchant_id = str((current_user or {}).get('id') or '').strip() if role in {'ADMIN', 'MERCHANT'} else ''
     if not merchant_id:
         merchant_id = get_default_merchant_id()
     
