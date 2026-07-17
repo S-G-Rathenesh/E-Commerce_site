@@ -88,7 +88,13 @@ export async function saveDefaultAddress(user, address) {
       if (response.ok) {
         const data = await response.json()
         if (data?.user) {
-          setStoredUser(data.user)
+          const stored = getStoredUser() || {}
+          setStoredUser({
+            ...stored,
+            ...data.user,
+            token: stored.token || '',
+            refresh_token: stored.refresh_token || '',
+          })
         }
       }
     }

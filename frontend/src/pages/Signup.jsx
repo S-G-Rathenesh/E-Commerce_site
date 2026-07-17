@@ -109,7 +109,11 @@ export default function Signup() {
       }
 
       if (data?.user) {
-        setStoredUser(data.user)
+        setStoredUser({
+          ...data.user,
+          token: data.token || '',
+          refresh_token: data.refresh_token || '',
+        })
       }
 
       setMessage(data.message || `Account created for ${fullName || 'your profile'}.`)
