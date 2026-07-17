@@ -109,6 +109,9 @@ export default function Profile() {
     if (!addressForm.addressLine.trim()) {
       return 'Please enter street address.'
     }
+    if (!addressForm.addressLine.includes(addressForm.postalCode.trim())) {
+      return 'Address must contain the entered pincode.'
+    }
     return ''
   }
 

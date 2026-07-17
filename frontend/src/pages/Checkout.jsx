@@ -250,6 +250,11 @@ export default function Checkout() {
       return
     }
 
+    if (!address.includes(postalCode.trim())) {
+      setMessage('Address must contain the entered pincode.')
+      return
+    }
+
     if (String(phone || '').replace(/\D/g, '').length < 10) {
       setMessage('Please enter a valid phone number for shipping.')
       return
@@ -421,6 +426,12 @@ export default function Checkout() {
             {postalCode ? (
               <div className="checkout-delivery-availability">
                 <DeliveryInfo customerPincode={postalCode} orderTotal={total} showDetails={true} />
+              </div>
+            ) : null}
+
+            {address && postalCode && !address.includes(postalCode.trim()) ? (
+              <div className="delivery-info delivery-info-error" style={{ marginTop: '12px' }}>
+                ⚠ Address must contain the entered pincode.
               </div>
             ) : null}
 
