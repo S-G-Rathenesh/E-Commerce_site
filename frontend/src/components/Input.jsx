@@ -20,7 +20,7 @@ export default function Input({ label, multiline = false, className = '', showVa
       } else if (props.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inputValue)) {
         valid = false
         error = 'Please enter a valid email address.'
-      } else if (label && /name/i.test(label) && /\d/.test(inputValue)) {
+      } else if (label && /name/i.test(label) && !/username/i.test(label) && /\d/.test(inputValue)) {
         valid = false
         error = 'Name should not contain numbers.'
       } else if (label && /city/i.test(label) && /\d/.test(inputValue)) {

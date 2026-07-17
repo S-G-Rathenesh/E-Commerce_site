@@ -2426,6 +2426,18 @@ def serialize_order(document: dict, include_shipment: bool = False) -> dict:
     return payload
 
 
+def serialize_order_for_merchant(document: dict, merchant_product_ids: set, include_shipment: bool = False) -> dict:
+    payload = serialize_order(document, include_shipment=include_shipment)
+    if not payload:
+        return payload
+    payload['items'] = [item for item in payload.get('items', []) if item.get('product_id') in merchant_product_ids]
+    merchant_total = sum(float(item.get('price') or 0) * int(item.get('quantity') or 0) for item in payload['items'])
+    payload['total_amount'] = merchant_total
+    payload['order_value'] = merchant_total
+    return payload
+
+
+
 def normalize_payment_status(value: str, fallback: str = 'PENDING') -> str:
     candidate = str(value or fallback).strip().upper()
     if candidate in PAYMENT_STATUSES:
@@ -6752,14 +6764,43 @@ def mark_out_for_delivery_alias(
 
 @app.get('/admin/dashboard-stats')
 def get_admin_dashboard_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
     now = now_utc()
     thirty_days_ago = now - timedelta(days=30)
     
-    orders = list(orders_collection.find(
-        active_orders_filter(), 
-        {'_id': 0, 'created_at': 1, 'total_amount': 1, 'customer_email': 1, 'status': 1}
-    ))
-    
+    if role == 'SUPER_ADMIN':
+        orders = list(orders_collection.find(
+            active_orders_filter(), 
+            {'_id': 0, 'created_at': 1, 'total_amount': 1, 'customer_email': 1, 'status': 1}
+        ))
+    else:
+        merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+        merchant_product_ids = {p['id'] for p in merchant_products}
+        
+        matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1, 'product_id': 1, 'quantity': 1}))
+        products_prices = {p['id']: float(p.get('price') or 0) for p in products_collection.find({'id': {'$in': list(merchant_product_ids)}})}
+        
+        order_totals = {}
+        for item in matching_items:
+            oid = item.get('order_id')
+            pid = item.get('product_id')
+            qty = int(item.get('quantity') or 0)
+            price = products_prices.get(pid, 0.0)
+            order_totals[oid] = order_totals.get(oid, 0.0) + (price * qty)
+            
+        matching_order_ids = list(order_totals.keys())
+        raw_orders = list(orders_collection.find(
+            active_orders_filter({'order_id': {'$in': matching_order_ids}}),
+            {'_id': 0, 'order_id': 1, 'created_at': 1, 'customer_email': 1, 'status': 1}
+        ))
+        
+        orders = []
+        for o in raw_orders:
+            o['total_amount'] = order_totals.get(o.get('order_id'), 0.0)
+            orders.append(o)
+            
     valid_orders = []
     for o in orders:
         cat = o.get('created_at')
@@ -6847,14 +6888,43 @@ def get_admin_dashboard_stats(current_user: dict = Depends(require_roles('ADMIN'
 
 @app.get('/admin/analytics-stats')
 def get_admin_analytics_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
     now = now_utc()
     year_ago = now - timedelta(days=365)
     
-    orders = list(orders_collection.find(
-        active_orders_filter(), 
-        {'_id': 0, 'created_at': 1, 'total_amount': 1, 'status': 1}
-    ))
-    
+    if role == 'SUPER_ADMIN':
+        orders = list(orders_collection.find(
+            active_orders_filter(), 
+            {'_id': 0, 'created_at': 1, 'total_amount': 1, 'status': 1}
+        ))
+    else:
+        merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+        merchant_product_ids = {p['id'] for p in merchant_products}
+        
+        matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1, 'product_id': 1, 'quantity': 1}))
+        products_prices = {p['id']: float(p.get('price') or 0) for p in products_collection.find({'id': {'$in': list(merchant_product_ids)}})}
+        
+        order_totals = {}
+        for item in matching_items:
+            oid = item.get('order_id')
+            pid = item.get('product_id')
+            qty = int(item.get('quantity') or 0)
+            price = products_prices.get(pid, 0.0)
+            order_totals[oid] = order_totals.get(oid, 0.0) + (price * qty)
+            
+        matching_order_ids = list(order_totals.keys())
+        raw_orders = list(orders_collection.find(
+            active_orders_filter({'order_id': {'$in': matching_order_ids}}),
+            {'_id': 0, 'order_id': 1, 'created_at': 1, 'status': 1}
+        ))
+        
+        orders = []
+        for o in raw_orders:
+            o['total_amount'] = order_totals.get(o.get('order_id'), 0.0)
+            orders.append(o)
+            
     valid_orders = []
     for o in orders:
         cat = o.get('created_at')
@@ -6881,7 +6951,6 @@ def get_admin_analytics_stats(current_user: dict = Depends(require_roles('ADMIN'
         
         orders_count = len(successful_orders)
         revenue = sum(float(o.get('total_amount') or 0) for o in successful_orders)
-        # Simulate visitors since we don't have real pageview tracking
         visitors = orders_count * 15 + int(days_ago * 5)
         
         return {
@@ -6915,9 +6984,21 @@ def get_admin_analytics_stats(current_user: dict = Depends(require_roles('ADMIN'
 
 @app.get('/admin/orders')
 def get_admin_orders(current_user: dict = Depends(require_roles('admin', 'merchant'))):
-    _ = current_user
-    orders = list(orders_collection.find(active_orders_filter()).sort('created_at', -1))
-    return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
+    if role == 'SUPER_ADMIN':
+        orders = list(orders_collection.find(active_orders_filter()).sort('created_at', -1))
+        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+        
+    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+    merchant_product_ids = {p['id'] for p in merchant_products}
+    
+    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
+    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
+    
+    orders = list(orders_collection.find(active_orders_filter({'order_id': {'$in': matching_order_ids}})).sort('created_at', -1))
+    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
 
 
 @app.post('/admin/orders/purge')
@@ -7121,9 +7202,21 @@ def cleanup_order_and_shipment_data(
 
 @app.get('/operations/orders')
 def get_operations_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    _ = current_user
-    orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED'})).sort('created_at', -1))
-    return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
+    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
+        orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED'})).sort('created_at', -1))
+        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+        
+    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+    merchant_product_ids = {p['id'] for p in merchant_products}
+    
+    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
+    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
+    
+    orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED', 'order_id': {'$in': matching_order_ids}})).sort('created_at', -1))
+    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
 
 
 @app.put('/admin/orders/{order_id}/assign')
@@ -7380,34 +7473,66 @@ def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict
 
 @app.get('/operations/packed-orders')
 def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    _ = current_user
-    orders = list(
-        orders_collection.find(
-            active_orders_filter(
-            {
-                'status': 'PACKED',
-                '$or': [
-                    {'shipment_id': {'$exists': False}},
-                    {'shipment_id': None},
-                    {'shipment_id': ''},
-                ],
-            }
-            )
-        ).sort('updated_at', -1)
-    )
-    return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
+    query = {
+        'status': 'PACKED',
+        '$or': [
+            {'shipment_id': {'$exists': False}},
+            {'shipment_id': None},
+            {'shipment_id': ''},
+        ],
+    }
+    
+    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
+        orders = list(orders_collection.find(active_orders_filter(query)).sort('updated_at', -1))
+        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
+        
+    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+    merchant_product_ids = {p['id'] for p in merchant_products}
+    
+    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
+    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
+    
+    query['order_id'] = {'$in': matching_order_ids}
+    orders = list(orders_collection.find(active_orders_filter(query)).sort('updated_at', -1))
+    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
 
 
 @app.get('/operations/shipments')
 def get_operations_shipments(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    _ = current_user
-    shipments = list(shipments_collection.find({}).sort('created_at', -1))
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
+    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
+        shipments = list(shipments_collection.find({}).sort('created_at', -1))
+        enriched_shipments = []
+        for shipment in shipments:
+            payload = serialize_shipment(shipment) or {}
+            order_ids = get_shipment_order_ids(str(payload.get('shipment_id') or ''))
+            payload['order_ids'] = order_ids
+            payload['order_count'] = len(order_ids)
+            enriched_shipments.append(payload)
+        return {'shipments': enriched_shipments}
+        
+    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+    merchant_product_ids = {p['id'] for p in merchant_products}
+    
+    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
+    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
+    
+    shipment_items = list(shipment_items_collection.find({'order_id': {'$in': matching_order_ids}}, {'_id': 0, 'shipment_id': 1}))
+    matching_shipment_ids = list({item['shipment_id'] for item in shipment_items if item.get('shipment_id')})
+    
+    shipments = list(shipments_collection.find({'shipment_id': {'$in': matching_shipment_ids}}).sort('created_at', -1))
     enriched_shipments = []
     for shipment in shipments:
         payload = serialize_shipment(shipment) or {}
-        order_ids = get_shipment_order_ids(str(payload.get('shipment_id') or ''))
-        payload['order_ids'] = order_ids
-        payload['order_count'] = len(order_ids)
+        all_order_ids = get_shipment_order_ids(str(payload.get('shipment_id') or ''))
+        filtered_order_ids = [oid for oid in all_order_ids if oid in matching_order_ids]
+        payload['order_ids'] = filtered_order_ids
+        payload['order_count'] = len(filtered_order_ids)
         enriched_shipments.append(payload)
     return {'shipments': enriched_shipments}
 
@@ -7550,8 +7675,8 @@ def get_delivery_pincode_orders(current_user: dict = Depends(require_roles('DELI
     if not service_pincodes and not is_delivery_partner_all_india(profile):
         return {'orders': [], 'message': 'No service pincodes configured in your profile.'}
 
-    # Build the query: all non-terminal orders for this partner's pincodes
-    active_statuses = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'DISPATCHED', 'OUT_FOR_DELIVERY']
+    # Build the query: only show SHIPPED, DISPATCHED, and OUT_FOR_DELIVERY orders
+    active_statuses = ['SHIPPED', 'DISPATCHED', 'OUT_FOR_DELIVERY']
     if is_delivery_partner_all_india(profile):
         pincode_filter = active_orders_filter({'status': {'$in': active_statuses}})
     else:
@@ -7575,11 +7700,36 @@ def get_delivery_pincode_orders(current_user: dict = Depends(require_roles('DELI
         payload['customer_name'] = customer_name
         payload['delivery_address'] = delivery_address
         payload['order_value'] = float(payload.get('total_amount') or 0)
+        
         assigned_to_me = (
             payload.get('assigned_delivery_partner') == email
             or payload.get('assigned_delivery_id') == user_id
         )
         payload['assigned_to_me'] = assigned_to_me
+        
+        assigned_partner_email = payload.get('assigned_delivery_partner')
+        assigned_partner_id = payload.get('assigned_delivery_id')
+        
+        assigned_to_other = False
+        assigned_to_name = None
+        
+        if assigned_partner_email or assigned_partner_id:
+            if not assigned_to_me:
+                assigned_to_other = True
+                query = {}
+                if assigned_partner_email:
+                    query['email'] = assigned_partner_email.strip().lower()
+                elif assigned_partner_id:
+                    query['id'] = assigned_partner_id
+                
+                partner_doc = users_collection.find_one(query, {'full_name': 1})
+                if partner_doc:
+                    assigned_to_name = partner_doc.get('full_name')
+                else:
+                    assigned_to_name = assigned_partner_email or 'Another Partner'
+
+        payload['assigned_to_other'] = assigned_to_other
+        payload['assigned_to_name'] = assigned_to_name
         enriched.append(payload)
 
     return {'orders': enriched}

@@ -567,6 +567,8 @@ export default function DeliveryDashboard() {
                     <StatusBadge status={order.status} />
                     {isAssignedToMe ? (
                       <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: 600 }}>✔ Assigned to you</span>
+                    ) : order.assigned_to_other ? (
+                      <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: 600 }}>Assigned to {order.assigned_to_name || 'another driver'}</span>
                     ) : (
                       <span style={{ fontSize: '11px', color: '#9ca3af' }}>In your coverage area</span>
                     )}
@@ -648,14 +650,20 @@ export default function DeliveryDashboard() {
 
                   {/* Not assigned to me yet — show Accept button */}
                   {!isAssignedToMe && !isDelivered ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => selfAssignOrder(order.order_id)}
-                      disabled={isActionLoading}
-                    >
-                      {isActionLoading ? 'Accepting...' : 'Accept Order'}
-                    </button>
+                    order.assigned_to_other ? (
+                      <span style={{ fontSize: '13px', color: '#dc2626', fontWeight: 600, display: 'flex', alignItems: 'center' }}>
+                        Assigned to {order.assigned_to_name || 'another partner'}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => selfAssignOrder(order.order_id)}
+                        disabled={isActionLoading}
+                      >
+                        {isActionLoading ? 'Accepting...' : 'Accept Order'}
+                      </button>
+                    )
                   ) : null}
 
                   {/* Assigned + ready for pickup */}
