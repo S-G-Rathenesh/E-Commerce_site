@@ -2139,6 +2139,15 @@ def get_shipment_order_ids(shipment_id: str) -> list[str]:
         order_id = str(item.get('order_id') or '').strip()
         if order_id:
             order_ids.append(order_id)
+            
+    if not order_ids:
+        # Fallback for auto-created shipments that didn't populate shipment_items_collection
+        orders = list(orders_collection.find({'shipment_id': shipment_id}, {'_id': 0, 'order_id': 1}))
+        for o in orders:
+            order_id = str(o.get('order_id') or '').strip()
+            if order_id:
+                order_ids.append(order_id)
+                
     return order_ids
 
 
@@ -5806,6 +5815,11 @@ def create_shipment_from_order(order: dict, current_user: dict | None = None, st
                 'updated_at': now_utc(),
             }
         },
+    )
+    shipment_items_collection.update_one(
+        {'shipment_id': shipment_id, 'order_id': order.get('order_id')},
+        {'$set': {'shipment_id': shipment_id, 'order_id': order.get('order_id')}},
+        upsert=True,
     )
     return shipment
 
