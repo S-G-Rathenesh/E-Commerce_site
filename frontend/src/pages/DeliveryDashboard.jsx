@@ -383,7 +383,7 @@ export default function DeliveryDashboard() {
     const currentLocation = draft.current_location || 'Last mile route'
     const body = { current_location: currentLocation }
 
-    const actionPath = action.toLowerCase().replace('_', '-')
+    const actionPath = action.toLowerCase().replaceAll('_', '-')
     const endpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/${actionPath}`
 
     try {
