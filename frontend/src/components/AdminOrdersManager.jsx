@@ -23,6 +23,7 @@ function defaultDraft(order) {
 
 export default function AdminOrdersManager({ compact = false }) {
   const [orders, setOrders] = useState([])
+  const [transitioningOrders, setTransitioningOrders] = useState({})
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(true)
   const [drafts, setDrafts] = useState({})
@@ -306,6 +307,8 @@ export default function AdminOrdersManager({ compact = false }) {
   }
 
   const transitionOrder = async (orderId, action, payload = {}, successMessage = '') => {
+    if (transitioningOrders[orderId]) return
+    setTransitioningOrders((current) => ({ ...current, [orderId]: true }))
     try {
       const response = await fetch(`${API_BASE}/orders/${orderId}/${action}`, {
         method: 'PATCH',
@@ -321,9 +324,24 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
       setMessage(successMessage || data?.message || 'Order updated.')
-      await loadOrders()
+      if (data?.order) {
+        setOrders((currentOrders) =>
+          currentOrders.map((o) =>
+            o.order_id === orderId
+              ? {
+                  ...o,
+                  ...data.order,
+                  items: o.items,
+                  total_amount: o.total_amount,
+                }
+              : o
+          )
+        )
+      }
     } catch {
       setMessage('Unable to update order status.')
+    } finally {
+      setTransitioningOrders((current) => ({ ...current, [orderId]: false }))
     }
   }
 
@@ -665,6 +683,7 @@ export default function AdminOrdersManager({ compact = false }) {
                           <button
                             type="button"
                             className="btn btn-primary"
+                            disabled={!!transitioningOrders[order.order_id]}
                             onClick={() => transitionOrder(order.order_id, 'confirm', { current_location: 'Merchant confirmation desk' }, 'Order confirmed.')}
                           >
                             Confirm
@@ -672,6 +691,7 @@ export default function AdminOrdersManager({ compact = false }) {
                           <button
                             type="button"
                             className="btn btn-secondary"
+                            disabled={!!transitioningOrders[order.order_id]}
                             onClick={() => transitionOrder(order.order_id, 'reject', { current_location: 'Merchant review desk', reason: 'Rejected by merchant' }, 'Order rejected.')}
                           >
                             Reject
@@ -682,12 +702,13 @@ export default function AdminOrdersManager({ compact = false }) {
                         <button
                           type="button"
                           className="btn btn-primary"
+                          disabled={!!transitioningOrders[order.order_id]}
                           onClick={() => transitionOrder(order.order_id, 'pack', { current_location: 'Warehouse packing unit' }, 'Order packed.')}
                         >
                           Pack
                         </button>
                       ) : null}
-                      {normalizeOrderStatus(order.status) === 'PACKED' ? (
+                      {normalizeOrderStatus(order.status) === 'PACKED' || normalizeOrderStatus(order.status) === 'SHIPPED' ? (
                         <span className="admin-auto-dispatched-label" style={{ color: '#10b981', fontWeight: '500' }}>
                           ✓ Auto-dispatched
                         </span>
