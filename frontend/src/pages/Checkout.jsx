@@ -5,7 +5,7 @@ import Input from '../components/Input'
 import PhoneInput from '../components/PhoneInput'
 import PageWrapper from '../components/PageWrapper'
 import DeliveryInfo from '../components/DeliveryInfo'
-import { buildAuthHeaders, getStoredUser, refreshAuthToken } from '../utils/auth'
+import { buildAuthHeaders, getStoredUser, refreshAuthToken, getAuthToken } from '../utils/auth'
 import { clearCart, getCartItems } from '../utils/cart'
 import { getFinalDeliveryCharge } from '../utils/shipping'
 import { getSavedDefaultAddress } from '../utils/profileAddress'
@@ -235,6 +235,12 @@ export default function Checkout() {
   }
 
   const handlePlaceOrder = async () => {
+    const token = getAuthToken()
+    if (!token) {
+      setMessage('Your current login session is not authenticated (missing token). Please sign out (using the top navigation) and sign back in, or register a new account to proceed.')
+      return
+    }
+
     if (!cartItems.length) {
       setMessage('Your cart is empty. Add products before placing an order.')
       return
@@ -250,10 +256,6 @@ export default function Checkout() {
       return
     }
 
-    if (!address.includes(postalCode.trim())) {
-      setMessage('Address must contain the entered pincode.')
-      return
-    }
 
     if (String(phone || '').replace(/\D/g, '').length < 10) {
       setMessage('Please enter a valid phone number for shipping.')
@@ -352,7 +354,7 @@ export default function Checkout() {
           </p>
         </div>
       ) : null}
-      <div className="checkout-grid">
+      <form className="checkout-grid" onSubmit={(e) => e.preventDefault()}>
         <section className="panel panel-stack checkout-form-card">
           <h2>Shipping details</h2>
           <div className="form-grid">
@@ -429,11 +431,6 @@ export default function Checkout() {
               </div>
             ) : null}
 
-            {address && postalCode && !address.includes(postalCode.trim()) ? (
-              <div className="delivery-info delivery-info-error" style={{ marginTop: '12px' }}>
-                ⚠ Address must contain the entered pincode.
-              </div>
-            ) : null}
 
             {savedMethods.length > 0 ? (
               <div className="checkout-saved-methods">
@@ -579,7 +576,7 @@ export default function Checkout() {
           </Button>
           {message ? <p className="wishlist-message">{message}</p> : null}
         </aside>
-      </div>
+      </form>
     </PageWrapper>
   )
 }

@@ -41,16 +41,16 @@ export default function OperationsDashboard() {
         setOrders([])
         setMessage(ordersData?.detail || 'Unable to load orders waiting for packing.')
       } else {
-        setOrders(Array.isArray(ordersData?.orders) ? ordersData.orders : [])
+        setOrders(Array.isArray(ordersData) ? ordersData : (Array.isArray(ordersData?.orders) ? ordersData.orders : []))
       }
-
+      
       if (!shipmentsResponse.ok) {
         setShipments([])
         if (!message) {
           setMessage(shipmentsData?.detail || 'Unable to load shipments.')
         }
       } else {
-        setShipments(Array.isArray(shipmentsData?.shipments) ? shipmentsData.shipments : [])
+        setShipments(Array.isArray(shipmentsData) ? shipmentsData : (Array.isArray(shipmentsData?.shipments) ? shipmentsData.shipments : []))
       }
     } catch {
       setOrders([])

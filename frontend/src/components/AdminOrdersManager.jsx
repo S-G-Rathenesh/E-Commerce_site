@@ -7,9 +7,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const WS_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace('http', 'ws')
 const COURIERS = ['BlueDart', 'Delhivery', 'DTDC', 'Ecom Express']
 const VEHICLE_TYPES = ['TRUCK', 'VAN', 'BIKE']
-const ADMIN_STATUSES = ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
-const ORDER_TABS = ['ALL', 'PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'REJECTED', 'CANCELLED']
-const TIMELINE_STEPS = ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const ADMIN_STATUSES = ['PACKED', 'ACCEPTED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const ORDER_TABS = ['ALL', 'PLACED', 'CONFIRMED', 'PACKED', 'ACCEPTED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'REJECTED', 'CANCELLED']
+const TIMELINE_STEPS = ['PLACED', 'CONFIRMED', 'PACKED', 'ACCEPTED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 function defaultDraft(order) {
   return {
@@ -23,7 +23,8 @@ function defaultDraft(order) {
 
 export default function AdminOrdersManager({ compact = false }) {
   const [orders, setOrders] = useState([])
-  const [transitioningOrders, setTransitioningOrders] = useState({})
+  const ordersRef = useRef([])
+  ordersRef.current = orders
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(true)
   const [drafts, setDrafts] = useState({})
@@ -54,9 +55,11 @@ export default function AdminOrdersManager({ compact = false }) {
     tracking_id: '',
   })
   const [dispatchingShipmentId, setDispatchingShipmentId] = useState('')
+  const [transitioningOrders, setTransitioningOrders] = useState({})
 
   const wsRef = useRef(null)
   const reconnectRef = useRef(null)
+  const lastFetchTimeRef = useRef(0)
 
   const formatDateTime = (value) => {
     if (!value) {
@@ -103,8 +106,12 @@ export default function AdminOrdersManager({ compact = false }) {
     [activeOrderId, displayedOrders],
   )
 
-  const loadOrders = async () => {
-    setLoading(true)
+  const loadOrders = async (showLoading = false) => {
+    const fetchTime = Date.now()
+    lastFetchTimeRef.current = fetchTime
+    if (showLoading || ordersRef.current.length === 0) {
+      setLoading(true)
+    }
     setMessage('')
 
     try {
@@ -113,13 +120,16 @@ export default function AdminOrdersManager({ compact = false }) {
         cache: 'no-store',
       })
       const data = await response.json()
+      if (fetchTime < lastFetchTimeRef.current) {
+        return
+      }
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to load orders.')
         setOrders([])
         return
       }
 
-      const nextOrders = Array.isArray(data?.orders) ? data.orders : []
+      const nextOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [])
       setOrders(nextOrders)
       setDrafts(
         nextOrders.reduce((accumulator, order) => {
@@ -129,10 +139,14 @@ export default function AdminOrdersManager({ compact = false }) {
       )
       setLastSyncedAt(new Date().toISOString())
     } catch {
-      setMessage('Unable to load orders right now.')
-      setOrders([])
+      if (fetchTime >= lastFetchTimeRef.current) {
+        setMessage('Unable to load orders right now.')
+        setOrders([])
+      }
     } finally {
-      setLoading(false)
+      if (fetchTime >= lastFetchTimeRef.current) {
+        setLoading(false)
+      }
     }
   }
 
@@ -147,12 +161,12 @@ export default function AdminOrdersManager({ compact = false }) {
         shipmentsResponse.json(),
       ])
       if (packedResponse.ok) {
-        const nextPacked = Array.isArray(packedData?.orders) ? packedData.orders : []
+        const nextPacked = Array.isArray(packedData) ? packedData : (Array.isArray(packedData?.orders) ? packedData.orders : [])
         setPackedOrders(nextPacked)
         setSelectedPackedOrders((current) => current.filter((id) => nextPacked.some((o) => o.order_id === id)))
       }
       if (shipmentsResponse.ok) {
-        setShipments(Array.isArray(shipmentsData?.shipments) ? shipmentsData.shipments : [])
+        setShipments(Array.isArray(shipmentsData) ? shipmentsData : (Array.isArray(shipmentsData?.shipments) ? shipmentsData.shipments : []))
       }
     } catch {
       // non-fatal — shipment list is supplemental
@@ -202,7 +216,7 @@ export default function AdminOrdersManager({ compact = false }) {
   }
 
   useEffect(() => {
-    loadOrders()
+    loadOrders(true)
     loadPackedOrdersAndShipments()
   }, [])
 
@@ -213,8 +227,10 @@ export default function AdminOrdersManager({ compact = false }) {
     }, 10000)
 
     const syncOnFocus = () => {
-      loadOrders()
-      loadPackedOrdersAndShipments()
+      if (Date.now() - lastFetchTimeRef.current > 5000) {
+        loadOrders()
+        loadPackedOrdersAndShipments()
+      }
     }
 
     window.addEventListener('focus', syncOnFocus)
@@ -234,7 +250,10 @@ export default function AdminOrdersManager({ compact = false }) {
       return undefined
     }
 
+    let isDisposed = false
+
     const connect = () => {
+      if (isDisposed) return
       try {
         const ws = new WebSocket(`${WS_BASE}/ws/orders/${encodeURIComponent(userId)}`)
         wsRef.current = ws
@@ -251,19 +270,28 @@ export default function AdminOrdersManager({ compact = false }) {
         }
 
         ws.onclose = () => {
-          if (reconnectRef.current) {
-            clearTimeout(reconnectRef.current)
+          if (!isDisposed) {
+            if (reconnectRef.current) {
+              clearTimeout(reconnectRef.current)
+            }
+            reconnectRef.current = setTimeout(connect, 3000)
           }
-          reconnectRef.current = setTimeout(connect, 3000)
+        }
+
+        ws.onerror = () => {
+          ws.close()
         }
       } catch {
-        reconnectRef.current = setTimeout(connect, 3000)
+        if (!isDisposed) {
+          reconnectRef.current = setTimeout(connect, 3000)
+        }
       }
     }
 
     connect()
 
     return () => {
+      isDisposed = true
       if (reconnectRef.current) {
         clearTimeout(reconnectRef.current)
       }
@@ -307,7 +335,6 @@ export default function AdminOrdersManager({ compact = false }) {
   }
 
   const transitionOrder = async (orderId, action, payload = {}, successMessage = '') => {
-    if (transitioningOrders[orderId]) return
     setTransitioningOrders((current) => ({ ...current, [orderId]: true }))
     try {
       const response = await fetch(`${API_BASE}/orders/${orderId}/${action}`, {
@@ -324,20 +351,27 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
       setMessage(successMessage || data?.message || 'Order updated.')
-      if (data?.order) {
+
+      // Optimistic local state update
+      const actionStatusMap = {
+        confirm: 'CONFIRMED',
+        reject: 'REJECTED',
+        pack: 'PACKED',
+        cancel: 'CANCELLED',
+        'start-delivery': 'SHIPPED',
+        'out-for-delivery': 'OUT_FOR_DELIVERY',
+        'delivered': 'DELIVERED',
+      }
+      const nextStatus = actionStatusMap[String(action || '').toLowerCase().trim()]
+      if (nextStatus) {
         setOrders((currentOrders) =>
-          currentOrders.map((o) =>
-            o.order_id === orderId
-              ? {
-                  ...o,
-                  ...data.order,
-                  items: o.items,
-                  total_amount: o.total_amount,
-                }
-              : o
+          currentOrders.map((order) =>
+            order.order_id === orderId ? { ...order, status: nextStatus } : order
           )
         )
       }
+
+      await loadOrders()
     } catch {
       setMessage('Unable to update order status.')
     } finally {
@@ -471,6 +505,35 @@ export default function AdminOrdersManager({ compact = false }) {
     }
   }
 
+  const renderSkeletonRows = () => {
+    return Array.from({ length: 5 }).map((_, idx) => (
+      <tr key={`skeleton-row-${idx}`}>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ width: '20px' }}></div></td>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ height: '14px', width: '80px' }}></div></td>
+        <td>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div className="skeleton-line skeleton-shimmer" style={{ height: '12px', width: '120px' }}></div>
+            <div className="skeleton-line skeleton-shimmer" style={{ height: '10px', width: '80px' }}></div>
+          </div>
+        </td>
+        <td>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <div className="skeleton-line skeleton-shimmer" style={{ width: '32px', height: '32px', borderRadius: '4px' }}></div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+              <div className="skeleton-line skeleton-shimmer" style={{ height: '10px', width: '100px' }}></div>
+              <div className="skeleton-line skeleton-shimmer" style={{ height: '8px', width: '60px' }}></div>
+            </div>
+          </div>
+        </td>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ width: '100px' }}></div></td>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ height: '16px', borderRadius: '4px', width: '60px' }}></div></td>
+        <td style={{ textAlign: 'right' }}><div className="skeleton-line skeleton-shimmer" style={{ marginLeft: 'auto', width: '70px' }}></div></td>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ width: '50px' }}></div></td>
+        <td><div className="skeleton-line skeleton-shimmer" style={{ width: '80px', height: '28px', borderRadius: '4px' }}></div></td>
+      </tr>
+    ))
+  }
+
   return (
     <section className="panel panel-stack card">
       <div className="section-head">
@@ -485,8 +548,6 @@ export default function AdminOrdersManager({ compact = false }) {
       </div>
 
       {message ? <p className="wishlist-message">{message}</p> : null}
-
-      {loading ? <p>Loading orders...</p> : null}
 
       {!loading && displayedOrders.length === 0 ? <p>No orders found.</p> : null}
 
@@ -603,127 +664,146 @@ export default function AdminOrdersManager({ compact = false }) {
               </tr>
             </thead>
             <tbody>
-              {displayedOrders.map((order) => {
-                const eligibleForShipment = ['PACKED'].includes(String(order.status || '').toUpperCase())
-                const shipping = order.shipping_details || {}
-                const customerName = String(shipping.full_name || order.customer_name || '').trim()
-                const customerPhone = String(shipping.phone || order.phone || '').trim()
-                const customerCity = String(shipping.city || '').trim()
-                const customerAddress = String(shipping.address || '').trim()
-                const customerPincode = String(shipping.pincode || order.destination_pincode || '').trim()
-                const orderItems = Array.isArray(order.items) ? order.items : []
+              {loading && displayedOrders.length === 0 ? (
+                renderSkeletonRows()
+              ) : (
+                displayedOrders.map((order) => {
+                  const eligibleForShipment = ['PACKED'].includes(String(order.status || '').toUpperCase())
+                  const shipping = order.shipping_details || {}
+                  const customerName = String(shipping.full_name || order.customer_name || '').trim()
+                  const customerPhone = String(shipping.phone || order.phone || '').trim()
+                  const customerCity = String(shipping.city || '').trim()
+                  const customerAddress = String(shipping.address || '').trim()
+                  const customerPincode = String(shipping.pincode || order.destination_pincode || '').trim()
+                  const orderItems = Array.isArray(order.items) ? order.items : []
 
-                return (
-                  <tr key={`table-${order.order_id}`}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selectedOrders.includes(order.order_id)}
-                        onChange={() => toggleOrderSelection(order.order_id)}
-                        disabled={!eligibleForShipment}
-                      />
-                    </td>
-                    <td>
-                      <span className="admin-order-id">{order.order_id}</span>
-                    </td>
+                  return (
+                    <tr key={`table-${order.order_id}`}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedOrders.includes(order.order_id)}
+                          onChange={() => toggleOrderSelection(order.order_id)}
+                          disabled={!eligibleForShipment}
+                        />
+                      </td>
+                      <td>
+                        <span className="admin-order-id">{order.order_id}</span>
+                      </td>
 
-                    {/* ── Customer: name + phone + address ── */}
-                    <td>
-                      <div className="admin-customer-cell">
-                        {customerName ? (
-                          <span className="admin-customer-name">{customerName}</span>
-                        ) : (
-                          <span className="admin-customer-email">{order.customer_email}</span>
-                        )}
-                        {customerPhone ? (
-                          <span className="admin-customer-phone">📞 {customerPhone}</span>
-                        ) : null}
-                        {customerCity || customerAddress ? (
-                          <span className="admin-customer-address">
-                            📍 {[customerAddress, customerCity, customerPincode].filter(Boolean).join(', ')}
-                          </span>
-                        ) : null}
-                      </div>
-                    </td>
+                      {/* ── Customer: name + phone + address ── */}
+                      <td>
+                        <div className="admin-customer-cell">
+                          {customerName ? (
+                            <span className="admin-customer-name">{customerName}</span>
+                          ) : (
+                            <span className="admin-customer-email">{order.customer_email}</span>
+                          )}
+                          {customerPhone ? (
+                            <span className="admin-customer-phone">📞 {customerPhone}</span>
+                          ) : null}
+                          {customerCity || customerAddress ? (
+                            <span className="admin-customer-address">
+                              📍 {[customerAddress, customerCity, customerPincode].filter(Boolean).join(', ')}
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
 
-                    {/* ── Products: thumbnail + name + qty ── */}
-                    <td>
-                      <div className="admin-products-cell">
-                        {orderItems.length > 0 ? orderItems.map((item, idx) => (
-                          <div key={`${order.order_id}-item-${idx}`} className="admin-product-chip">
-                            {item.image ? (
-                              <img
-                                src={item.image}
-                                alt={item.name || 'Product'}
-                                className="admin-product-thumb"
-                              />
-                            ) : (
-                              <div className="admin-product-thumb admin-product-thumb-placeholder">📦</div>
-                            )}
-                            <div className="admin-product-chip-info">
-                              <span className="admin-product-chip-name">{item.name || `Product ${item.product_id}`}</span>
-                              <span className="admin-product-chip-qty">Qty: {item.quantity}</span>
+                      {/* ── Products: thumbnail + name + qty ── */}
+                      <td>
+                        <div className="admin-products-cell">
+                          {orderItems.length > 0 ? orderItems.map((item, idx) => (
+                            <div key={`${order.order_id}-item-${idx}`} className="admin-product-chip">
+                              {item.image ? (
+                                <img
+                                  src={item.image}
+                                  alt={item.name || 'Product'}
+                                  className="admin-product-thumb"
+                                />
+                              ) : (
+                                <div className="admin-product-thumb admin-product-thumb-placeholder">📦</div>
+                              )}
+                              <div className="admin-product-chip-info">
+                                <span className="admin-product-chip-name">{item.name || `Product ${item.product_id}`}</span>
+                                <span className="admin-product-chip-qty">Qty: {item.quantity}</span>
+                              </div>
                             </div>
-                          </div>
-                        )) : (
-                          <span className="admin-no-items">—</span>
-                        )}
-                      </div>
-                    </td>
+                          )) : (
+                            <span className="admin-no-items">—</span>
+                          )}
+                        </div>
+                      </td>
 
-                    <td>{formatDateTime(order.created_at)}</td>
-                    <td><StatusBadge status={order.status} /></td>
-                    <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</td>
-                    <td>
-                      <span className={getSlaState(order).className}>{getSlaState(order).label}</span>
-                    </td>
-                    <td className="row-gap">
-                      {normalizeOrderStatus(order.status) === 'PLACED' ? (
-                        <>
+                      <td>{formatDateTime(order.created_at)}</td>
+                      <td><StatusBadge status={order.status} /></td>
+                      <td style={{ textAlign: 'right' }}>Rs. {Number(order.total_amount || 0).toLocaleString('en-IN')}</td>
+                      <td>
+                        <span className={getSlaState(order).className}>{getSlaState(order).label}</span>
+                      </td>
+                      <td className="row-gap">
+                        {normalizeOrderStatus(order.status) === 'PLACED' ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => transitionOrder(order.order_id, 'confirm', { current_location: 'Merchant confirmation desk' }, 'Order confirmed.')}
+                              disabled={transitioningOrders[order.order_id]}
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => transitionOrder(order.order_id, 'reject', { current_location: 'Merchant review desk', reason: 'Rejected by merchant' }, 'Order rejected.')}
+                              disabled={transitioningOrders[order.order_id]}
+                            >
+                              Reject
+                            </button>
+                          </>
+                        ) : null}
+                        {normalizeOrderStatus(order.status) === 'CONFIRMED' ? (
                           <button
                             type="button"
                             className="btn btn-primary"
-                            disabled={!!transitioningOrders[order.order_id]}
-                            onClick={() => transitionOrder(order.order_id, 'confirm', { current_location: 'Merchant confirmation desk' }, 'Order confirmed.')}
+                            onClick={() => transitionOrder(order.order_id, 'pack', { current_location: 'Warehouse packing unit' }, 'Order packed.')}
+                            disabled={transitioningOrders[order.order_id]}
                           >
-                            Confirm
+                            Pack
                           </button>
+                        ) : null}
+                        {normalizeOrderStatus(order.status) === 'PACKED' ? (
                           <button
                             type="button"
                             className="btn btn-secondary"
-                            disabled={!!transitioningOrders[order.order_id]}
-                            onClick={() => transitionOrder(order.order_id, 'reject', { current_location: 'Merchant review desk', reason: 'Rejected by merchant' }, 'Order rejected.')}
+                            disabled
                           >
-                            Reject
+                            Packed
                           </button>
-                        </>
-                      ) : null}
-                      {normalizeOrderStatus(order.status) === 'CONFIRMED' ? (
+                        ) : null}
+                        {normalizeOrderStatus(order.status) === 'ACCEPTED' ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => transitionOrder(order.order_id, 'start-delivery', { current_location: 'Warehouse dispatch bay' }, 'Order shipped.')}
+                            disabled={transitioningOrders[order.order_id]}
+                          >
+                            Shipped
+                          </button>
+                        ) : null}
                         <button
                           type="button"
-                          className="btn btn-primary"
-                          disabled={!!transitioningOrders[order.order_id]}
-                          onClick={() => transitionOrder(order.order_id, 'pack', { current_location: 'Warehouse packing unit' }, 'Order packed.')}
+                          className="btn btn-secondary"
+                          onClick={() => openTrackingModal(order.order_id)}
+                          disabled={transitioningOrders[order.order_id]}
                         >
-                          Pack
+                          View Status
                         </button>
-                      ) : null}
-                      {normalizeOrderStatus(order.status) === 'PACKED' || normalizeOrderStatus(order.status) === 'SHIPPED' ? (
-                        <span className="admin-auto-dispatched-label" style={{ color: '#10b981', fontWeight: '500' }}>
-                          ✓ Auto-dispatched
-                        </span>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={() => openTrackingModal(order.order_id)}
-                      >
-                        View Status
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
             </tbody>
           </table>
         </div>
@@ -841,126 +921,71 @@ export default function AdminOrdersManager({ compact = false }) {
                       <div className="admin-customer-cell admin-customer-cell-inline">
                         {name ? <span className="admin-customer-name">{name}</span> : <span className="admin-customer-email">{order.customer_email}</span>}
                         {phone ? <span className="admin-customer-phone">📞 {phone}</span> : null}
-                        {city || addr ? <span className="admin-customer-address">📍 {[addr, city, pin].filter(Boolean).join(', ')}</span> : null}
+                        {city || addr ? (
+                          <span className="admin-customer-address">
+                            📍 {[addr, city, pin].filter(Boolean).join(', ')}
+                          </span>
+                        ) : null}
                       </div>
                     )
                   })()}
-                  <p>Placed on: {formatDateTime(order.created_at)}</p>
                 </div>
-                <div className="row-gap">
-                  <StatusBadge status={order.status} />
-                  <span className={sla.className}>{sla.label}</span>
-                </div>
+                <StatusBadge status={order.status} />
               </div>
 
-              <div className="tracking-timeline">
-                {TIMELINE_STEPS.map((step, index) => {
-                  const isCompleted = currentStepIndex > index
-                  const isActive = currentStepIndex === index
-                  return (
-                    <div
-                      key={`${order.order_id}-${step}`}
-                      className={`tracking-step ${isCompleted ? 'tracking-step-completed' : ''} ${isActive ? 'tracking-step-active' : ''}`}
+              {/* Action grid for assignment and dispatch */}
+              <div className="admin-orders-grid" style={{ marginTop: '16px' }}>
+                <div className="field-group">
+                  <span className="field-label">Assign Last Mile Delivery Partner</span>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <select
+                      className="field"
+                      value={draft.delivery_partner_email}
+                      onChange={(e) => updateDraft(order.order_id, 'delivery_partner_email', e.target.value)}
                     >
-                      <span className="tracking-dot" />
-                      <span>{formatStatusLabel(step)}</span>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="admin-orders-grid">
-                {/* Shipment is auto-created and dispatched when order is packed */}
-                {normalizeOrderStatus(order.status) === 'PACKED' || normalizeOrderStatus(order.status) === 'SHIPPED' ? (
-                  <div className="admin-auto-dispatch-info" style={{ gridColumn: '1 / -1', padding: '1rem', backgroundColor: '#f0fdf4', borderRadius: '0.5rem', border: '1px solid #86efac' }}>
-                    <p style={{ margin: 0, color: '#166534', fontWeight: '500' }}>
-                      ✓ Shipment automatically created and dispatched
-                    </p>
-                    <p style={{ margin: '0.5rem 0 0 0', color: '#15803d', fontSize: '0.875rem' }}>
-                      Tracking ID: {shipment.tracking_id || 'Pending'} · Courier: {shipment.courier_name || 'Assigned'}
-                    </p>
+                      <option value="delivery@veloura.com">delivery@veloura.com</option>
+                      <option value="delivery.demo@veloura.com">delivery.demo@veloura.com</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => assignDeliveryPartner(order.order_id)}
+                      disabled={transitioningOrders[order.order_id]}
+                    >
+                      Assign
+                    </button>
                   </div>
-                ) : null}
+                </div>
 
-                <label className="field-group">
-                  <span className="field-label">Delivery Partner Email</span>
-                  <input
-                    className="field"
-                    value={draft.delivery_partner_email}
-                    onChange={(event) => updateDraft(order.order_id, 'delivery_partner_email', event.target.value)}
-                  />
-                </label>
-
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => assignDeliveryPartner(order.order_id)}
-                >
-                  Assign Partner
-                </button>
-
-                <label className="field-group">
-                  <span className="field-label">Courier</span>
-                  <select
-                    className="field"
-                    value={draft.courier_name}
-                    onChange={(event) => updateDraft(order.order_id, 'courier_name', event.target.value)}
-                  >
-                    {COURIERS.map((courier) => (
-                      <option key={courier} value={courier}>
-                        {courier}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="field-group">
-                  <span className="field-label">Tracking ID</span>
-                  <input
-                    className="field"
-                    value={draft.tracking_id}
-                    onChange={(event) => updateDraft(order.order_id, 'tracking_id', event.target.value)}
-                    placeholder={shipment.tracking_id || 'Tracking ID'}
-                  />
-                </label>
-
-                <label className="field-group">
-                  <span className="field-label">Current Location</span>
-                  <input
-                    className="field"
-                    value={draft.current_location}
-                    onChange={(event) => updateDraft(order.order_id, 'current_location', event.target.value)}
-                  />
-                </label>
-
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => loadTrackingLogs(order.order_id)}
-                >
-                  View Tracking Logs
-                </button>
+                <div className="field-group">
+                  <span className="field-label">Update Courier Location</span>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <input
+                      type="text"
+                      className="field"
+                      value={draft.current_location}
+                      placeholder="e.g. Warehouse"
+                      onChange={(e) => updateDraft(order.order_id, 'current_location', e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => saveShipment(order.order_id)}
+                      disabled={transitioningOrders[order.order_id]}
+                    >
+                      Update
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              {trackingLogs.length ? (
-                <div className="summary-row">
-                  {trackingLogs.map((entry) => (
-                    <p key={`${order.order_id}-${entry.id || entry.timestamp}`}>
-                      {String(entry.status || '').replaceAll('_', ' ')} · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
-                    </p>
-                  ))}
+              {/* Show shipment details if available */}
+              {order.shipment_id ? (
+                <div className="section-card panel-stack tracking-subcard" style={{ marginTop: '16px', padding: '12px' }}>
+                  <p className="field-label" style={{ fontWeight: '600' }}>Active Shipment: {order.shipment_id}</p>
+                  <p>Courier: {shipment.courier_name || 'BlueDart'} · Tracking ID: {shipment.tracking_id || 'Pending'}</p>
+                  <p>Current Location: {shipment.current_location || 'Warehouse'} · Status: {shipment.status || 'CREATED'}</p>
                 </div>
-              ) : null}
-
-              {Array.isArray(trackingStatus?.status_history) && trackingStatus.status_history.length ? (
-                <section className="section-card panel-stack tracking-subcard">
-                  <p className="field-label">Status history</p>
-                  {trackingStatus.status_history.map((entry, index) => (
-                    <p key={`${order.order_id}-history-${index}`}>
-                      {formatStatusLabel(entry.status)} · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
-                    </p>
-                  ))}
-                </section>
               ) : null}
             </article>
           )
@@ -968,68 +993,34 @@ export default function AdminOrdersManager({ compact = false }) {
         </div>
       </section>
 
+      {/* Render status modal if open */}
       {statusModalOrderId ? (() => {
         const modalOrder = orders.find((order) => order.order_id === statusModalOrderId)
-        const modalStatus = trackingStatusByOrder[statusModalOrderId]
-        const modalLogs = trackingLogsByOrder[statusModalOrderId] || []
-        console.log('Modal render - statusModalOrderId:', statusModalOrderId)
-        console.log('Modal render - modalOrder found:', !!modalOrder)
-        console.log('Modal render - modalStatus:', modalStatus)
-        console.log('Modal render - modalLogs count:', modalLogs.length)
-        const modalStepIndex = modalOrder ? TIMELINE_STEPS.indexOf(normalizeOrderStatus(modalOrder.status)) : -1
-        const statusHistory = Array.isArray(modalStatus?.status_history) ? modalStatus.status_history : []
-        const latestHistoryByStatus = statusHistory.reduce((accumulator, entry) => {
-          const key = normalizeOrderStatus(entry?.status)
+        const modalStatus = String(trackingStatusByOrder[statusModalOrderId]?.order?.status || modalOrder?.status || '').toUpperCase()
+        const modalHistory = Array.isArray(trackingStatusByOrder[statusModalOrderId]?.order?.status_history)
+          ? trackingStatusByOrder[statusModalOrderId].order.status_history
+          : []
+        const latestByStatus = modalHistory.reduce((accumulator, entry) => {
+          const key = String(entry?.status || '').trim().toUpperCase()
           if (key) {
             accumulator[key] = entry
           }
           return accumulator
         }, {})
-        const progressRatio = modalStepIndex <= 0 ? 0 : Math.min(1, modalStepIndex / (TIMELINE_STEPS.length - 1))
+        const progressRatio = Math.max(0, TIMELINE_STEPS.indexOf(modalStatus)) / (TIMELINE_STEPS.length - 1 || 1)
+        const shipment = trackingStatusByOrder[statusModalOrderId]?.order?.shipment || modalOrder?.shipment || {}
+        const logs = trackingLogsByOrder[statusModalOrderId] || []
 
-        if (!modalOrder) {
-          console.warn('Modal order not found in orders array for ID:', statusModalOrderId)
-          return (
-            <div
-              role="presentation"
-              onClick={closeTrackingModal}
-              style={{
-                position: 'fixed',
-                inset: 0,
-                background: 'rgba(15, 23, 42, 0.62)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: '24px',
-                zIndex: 60,
-              }}
-            >
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-label="Order not found"
-                onClick={(event) => event.stopPropagation()}
-                className="section-card panel-stack"
-                style={{ 
-                  maxWidth: '520px', 
-                  width: '100%', 
-                  padding: '32px',
-                  backgroundColor: '#ffffff',
-                  position: 'relative',
-                  zIndex: 70
-                }}
-              >
-                <h3>Order Not Found</h3>
-                <p>Unable to load order details. The order may have been deleted or you may need to refresh the page.</p>
-                <button type="button" className="btn btn-primary" onClick={closeTrackingModal}>
-                  Close
-                </button>
-              </div>
-            </div>
-          )
+        const getLocalStepState = (statusVal, stepVal) => {
+          const status = String(statusVal || '').trim().toUpperCase()
+          const currentIndex = TIMELINE_STEPS.indexOf(status)
+          const stepIndex = TIMELINE_STEPS.indexOf(stepVal)
+          if (stepIndex < currentIndex) return 'completed'
+          if (stepIndex === currentIndex) return 'active'
+          return 'pending'
         }
 
-        return modalOrder ? (
+        return (
           <div
             role="presentation"
             onClick={closeTrackingModal}
@@ -1047,84 +1038,62 @@ export default function AdminOrdersManager({ compact = false }) {
             <div
               role="dialog"
               aria-modal="true"
-              aria-label={`Status history for ${modalOrder.order_id}`}
+              aria-label={`Tracking details for ${statusModalOrderId}`}
               onClick={(event) => event.stopPropagation()}
               className="section-card panel-stack"
-              style={{ 
-                maxWidth: '920px', 
-                width: '100%', 
-                maxHeight: '85vh', 
-                overflow: 'auto',
-                backgroundColor: '#ffffff',
-                position: 'relative',
-                zIndex: 70
-              }}
+              style={{ maxWidth: '920px', width: '100%', maxHeight: '85vh', overflow: 'auto', background: 'white', padding: '24px', borderRadius: '8px' }}
             >
-              <div className="section-head">
+              <div className="section-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 <div>
-                  <p className="eyebrow">STATUS DETAILS</p>
-                  <h3>{modalOrder.order_id}</h3>
-                  {(() => {
-                    const s = modalOrder.shipping_details || {}
-                    const name = String(s.full_name || modalOrder.customer_name || '').trim()
-                    const phone = String(s.phone || '').trim()
-                    const city = String(s.city || '').trim()
-                    const addr = String(s.address || '').trim()
-                    const pin = String(s.pincode || modalOrder.destination_pincode || '').trim()
-                    return (
-                      <div className="admin-customer-cell admin-customer-cell-inline">
-                        {name ? <span className="admin-customer-name">{name}</span> : <span className="admin-customer-email">{modalOrder.customer_email}</span>}
-                        {phone ? <span className="admin-customer-phone">📞 {phone}</span> : null}
-                        {city || addr ? <span className="admin-customer-address">📍 {[addr, city, pin].filter(Boolean).join(', ')}</span> : null}
-                      </div>
-                    )
-                  })()}
+                  <p className="eyebrow">TRACKING STATUS</p>
+                  <h3>{statusModalOrderId}</h3>
+                  <p>{modalOrder?.customer_email}</p>
+                  {shipment?.tracking_id ? <p>Tracking ID: {shipment.tracking_id}</p> : null}
+                  {shipment?.status ? <p>Shipment status: {shipment.status}</p> : null}
                 </div>
                 <button type="button" className="btn btn-secondary" onClick={closeTrackingModal}>
                   Close
                 </button>
               </div>
 
-              <section className="tracking-progress-shell">
-                <div className="tracking-progress-line" aria-hidden="true">
-                  <span className="tracking-progress-fill" style={{ width: `${progressRatio * 100}%` }} />
+              <section className="tracking-progress-shell" style={{ marginTop: '24px' }}>
+                <div className="tracking-progress-line" aria-hidden="true" style={{ height: '4px', background: '#e2e8f0', position: 'relative' }}>
+                  <span className="tracking-progress-fill" style={{ position: 'absolute', top: 0, left: 0, height: '100%', background: '#3b82f6', width: `${Number.isFinite(progressRatio) ? progressRatio * 100 : 0}%` }} />
                 </div>
-                <div className="tracking-progress-steps">
-                  {TIMELINE_STEPS.map((step, index) => {
-                    const isCompleted = modalStepIndex > index
-                    const isActive = modalStepIndex === index
+                <div className="tracking-progress-steps" style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px' }}>
+                  {TIMELINE_STEPS.map((step) => {
+                    const state = getLocalStepState(modalStatus, step)
                     return (
                       <div
-                        key={`${modalOrder.order_id}-modal-${step}`}
-                        className={`tracking-progress-step ${isCompleted ? 'tracking-progress-step-completed' : ''} ${isActive ? 'tracking-progress-step-active' : ''}`}
+                        key={`${statusModalOrderId}-${step}`}
+                        className={`tracking-progress-step ${state === 'completed' ? 'tracking-progress-step-completed' : ''} ${state === 'active' ? 'tracking-progress-step-active' : ''}`}
+                        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1 }}
                       >
-                        <span className="tracking-progress-dot">{isCompleted ? '✓' : ''}</span>
-                        <span>{formatStatusLabel(step)}</span>
+                        <span className="tracking-progress-dot" aria-hidden="true" style={{ fontWeight: 'bold', color: state === 'completed' ? '#3b82f6' : state === 'active' ? '#10b981' : '#94a3b8' }}>
+                          {state === 'completed' ? '✓' : state === 'active' ? '●' : '○'}
+                        </span>
+                        <span className="tracking-progress-label-wrap" style={{ textAlign: 'center', fontSize: '12px', marginTop: '4px' }}>
+                          <span style={{ display: 'block', fontWeight: state === 'active' ? '600' : 'normal' }}>{step.replaceAll('_', ' ')}</span>
+                          <span className="tracking-progress-time" style={{ fontSize: '10px', color: '#64748b' }}>{latestByStatus[step]?.timestamp ? new Date(latestByStatus[step].timestamp).toLocaleTimeString() : ''}</span>
+                        </span>
                       </div>
                     )
                   })}
                 </div>
               </section>
 
-              <section className="section-card panel-stack tracking-subcard">
-                <p className="field-label">Timeline</p>
-                <div className="tracking-vertical-timeline">
-                  {TIMELINE_STEPS.map((step, index) => {
-                    const isCompleted = modalStepIndex > index
-                    const isActive = modalStepIndex === index
-                    const entry = latestHistoryByStatus[step]
-                    const statusText = isCompleted
-                      ? (entry?.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Completed')
-                      : isActive
-                        ? 'In progress'
-                        : 'Pending'
-
+              <section className="section-card panel-stack tracking-subcard" style={{ marginTop: '24px', padding: '16px', background: '#f8fafc', borderRadius: '6px' }}>
+                <p className="field-label" style={{ fontWeight: '600', marginBottom: '8px' }}>Timeline</p>
+                <div className="tracking-vertical-timeline" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {TIMELINE_STEPS.map((step) => {
+                    const state = getLocalStepState(modalStatus, step)
+                    const entry = latestByStatus[step]
                     return (
-                      <div key={`${modalOrder.order_id}-timeline-${step}`} className={`tracking-vertical-item ${isCompleted ? 'tracking-vertical-item-completed' : ''} ${isActive ? 'tracking-vertical-item-active' : ''}`}>
-                        <span className="tracking-vertical-marker">{isCompleted ? '✓' : isActive ? '●' : '○'}</span>
+                      <div key={`${statusModalOrderId}-timeline-${step}`} className={`tracking-vertical-item ${state === 'completed' ? 'tracking-vertical-item-completed' : ''} ${state === 'active' ? 'tracking-vertical-item-active' : ''}`} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                        <span className="tracking-vertical-marker" style={{ color: state === 'completed' ? '#3b82f6' : state === 'active' ? '#10b981' : '#94a3b8' }}>{state === 'completed' ? '✓' : state === 'active' ? '●' : '○'}</span>
                         <div>
-                          <p className="tracking-vertical-title">{formatStatusLabel(step)}</p>
-                          <p className="tracking-vertical-time">{statusText}</p>
+                          <p className="tracking-vertical-title" style={{ fontWeight: state === 'active' ? '600' : 'normal', margin: 0 }}>{step.replaceAll('_', ' ')}</p>
+                          <p className="tracking-vertical-time" style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{entry?.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Pending'}</p>
                         </div>
                       </div>
                     )
@@ -1132,33 +1101,25 @@ export default function AdminOrdersManager({ compact = false }) {
                 </div>
               </section>
 
-              <section className="section-card panel-stack tracking-subcard">
-                <p className="field-label">Status history</p>
-                {Array.isArray(modalStatus?.status_history) && modalStatus.status_history.length ? (
-                  modalStatus.status_history.map((entry, index) => (
-                    <p key={`${modalOrder.order_id}-modal-history-${index}`}>
-                      {formatStatusLabel(entry.status)} · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
-                      {entry.updated_by_role ? ` · ${entry.updated_by_role}` : ''}
-                    </p>
-                  ))
-                ) : (
-                  <p>No history available yet.</p>
-                )}
+              <section className="section-card panel-stack tracking-subcard" style={{ marginTop: '24px', padding: '16px', background: '#f8fafc', borderRadius: '6px' }}>
+                <p className="field-label" style={{ fontWeight: '600', marginBottom: '8px' }}>Tracking Logs & Events</p>
+                <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                  {logs.length ? (
+                    logs.map((entry) => (
+                      <p key={`${statusModalOrderId}-modal-log-${entry.id || entry.timestamp}`} style={{ margin: '4px 0', fontSize: '13px' }}>
+                        <strong style={{ color: '#334155' }}>{String(entry.status || '').replaceAll('_', ' ')}</strong> · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
+                        {entry.location ? ` (at ${entry.location})` : ''}
+                        {entry.message ? ` - ${entry.message}` : ''}
+                      </p>
+                    ))
+                  ) : (
+                    <p style={{ margin: 0, color: '#64748b' }}>No tracking events available yet.</p>
+                  )}
+                </div>
               </section>
-
-              {modalLogs.length ? (
-                <section className="section-card panel-stack tracking-subcard">
-                  <p className="field-label">Tracking logs</p>
-                  {modalLogs.map((entry) => (
-                    <p key={`${modalOrder.order_id}-modal-log-${entry.id || entry.timestamp}`}>
-                      {String(entry.status || '').replaceAll('_', ' ')} · {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Updated'}
-                    </p>
-                  ))}
-                </section>
-              ) : null}
             </div>
           </div>
-        ) : null
+        )
       })() : null}
     </section>
   )

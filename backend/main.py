@@ -3,7 +3,11 @@ import base64
 import os
 import random
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from typing import Callable
 from uuid import uuid4
 
@@ -34,8 +38,6 @@ MAX_IMAGE_UPLOAD_BYTES = 2 * 1024 * 1024
 
 os.makedirs(UPLOAD_IMAGE_ROOT, exist_ok=True)
 
-# Serve upload images with a graceful placeholder for missing files instead of
-# a bare 404, so the frontend never shows empty image slots.
 _MISSING_IMAGE_PLACEHOLDER = b'''<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360" role="img" aria-label="Image unavailable">
     <defs>
         <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -89,7 +91,7 @@ def health_check():
 
     return health_status
 
-# WebSocket Manager for Real-Time Order Updates
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
@@ -117,14 +119,18 @@ class ConnectionManager:
             
             for conn in disconnected:
                 await self.disconnect(user_id, conn)
-    
-    async def broadcast_to_role(self, role: str, message: dict):
-        """Broadcast to all users with a specific role"""
-        from pymongo import MongoClient
-        # This will be implemented after mongo_client is available
-        pass
 
 manager = ConnectionManager()
+
+
+@app.websocket('/ws/orders/{user_id}')
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect(user_id, websocket)
 
 app.add_middleware(
     CORSMiddleware,
@@ -147,6 +153,7 @@ ORDER_STATUS_FLOW = [
     'PLACED',
     'CONFIRMED',
     'PACKED',
+    'ACCEPTED',
     'SHIPPED',
     'OUT_FOR_DELIVERY',
     'DELIVERED',
@@ -157,7 +164,8 @@ DELIVERY_FINAL_STATES = {'OUT_FOR_DELIVERY', 'DELIVERED'}
 ORDER_STATUS_TRANSITIONS = {
     'PLACED': {'CONFIRMED', 'REJECTED', 'CANCELLED'},
     'CONFIRMED': {'PACKED'},
-    'PACKED': {'SHIPPED'},
+    'PACKED': {'ACCEPTED'},
+    'ACCEPTED': {'SHIPPED'},
     'SHIPPED': {'OUT_FOR_DELIVERY'},
     'OUT_FOR_DELIVERY': {'DELIVERED'},
 }
@@ -165,9 +173,10 @@ STATUS_PERFORMER_ROLE_MAP = {
     'CONFIRMED': {'ADMIN'},
     'REJECTED': {'ADMIN'},
     'PACKED': {'ADMIN', 'OPERATIONS_STAFF'},
-    'SHIPPED': {'ADMIN', 'OPERATIONS_STAFF'},
-    'OUT_FOR_DELIVERY': {'DELIVERY_ASSOCIATE'},
-    'DELIVERED': {'DELIVERY_ASSOCIATE'},
+    'ACCEPTED': {'DELIVERY_ASSOCIATE', 'ADMIN', 'OPERATIONS_STAFF'},
+    'SHIPPED': {'ADMIN', 'OPERATIONS_STAFF', 'DELIVERY_ASSOCIATE'},
+    'OUT_FOR_DELIVERY': {'DELIVERY_ASSOCIATE', 'ADMIN', 'OPERATIONS_STAFF'},
+    'DELIVERED': {'DELIVERY_ASSOCIATE', 'ADMIN', 'OPERATIONS_STAFF'},
     'CANCELLED': {'CUSTOMER'},
 }
 PAYMENT_STATUSES = {'PENDING', 'SUCCESS', 'FAILED', 'REFUNDED'}
@@ -463,11 +472,6 @@ class DeliveryCoverageRequest(BaseModel):
     cities: list[DeliveryCoverageCity] | None = None
     deliver_all_cities_in_selected_states: bool = False
 
-
-# ============================================================================
-# NEW: AMAZON-LIKE SHIPPING SYSTEM MODELS
-# ============================================================================
-
 class WarehouseConfig(BaseModel):
     address: str
     pincode: str
@@ -497,12 +501,12 @@ class MerchantShippingSettingsRequest(BaseModel):
     couriers: CourierConfig
     cod_rules: CODRules
     allow_all_india: bool = True
-    serviceable_pincodes: list[str] | None = None  # CSV or list
+    serviceable_pincodes: list[str] | None = None 
     blocked_pincodes: list[str] | None = None
 
 
 class SavePaymentMethodRequest(BaseModel):
-    method_type: str  # UPI, CARD, NETBANKING, WALLET
+    method_type: str
     nickname: str | None = None
     upi_id: str | None = None
     card_number: str | None = None
@@ -585,13 +589,13 @@ class WishlistRequest(BaseModel):
 
 
 class ProductReviewRequest(BaseModel):
-    rating: int  # 1-5 stars
+    rating: int
     review_text: str | None = None
     order_id: str
 
 
 class DeliveryRatingRequest(BaseModel):
-    rating: int  # 1-5 stars
+    rating: int 
     feedback: str | None = None
 
 
@@ -1088,6 +1092,7 @@ except (ConfigurationError, PyMongoError) as exc:
     print(f'[WARN] MongoDB client setup failed, using in-memory database: {exc}')
     mongo_client = mongomock.MongoClient()
     database = mongo_client[mongo_db_name]
+
 products_collection = database['products']
 users_collection = database['users']
 orders_collection = database['orders']
@@ -1105,7 +1110,6 @@ notifications_collection = database['notifications']
 product_reviews_collection = database['product_reviews']
 delivery_ratings_collection = database['delivery_ratings']
 wishlists_collection = database['wishlists']
-# NEW: Shipping system collections
 merchant_shipping_settings_collection = database['merchant_shipping_settings']
 serviceable_pincodes_collection = database['serviceable_pincodes']
 blocked_pincodes_collection = database['blocked_pincodes']
@@ -1199,7 +1203,6 @@ def activate_in_memory_database(reason: str) -> None:
     global uploaded_images_collection
     global database_mode
 
-    # Guard against malformed MONGOMOCK_SERVER_VERSION values that can crash mongomock internals.
     mocked_version = str(os.getenv('MONGOMOCK_SERVER_VERSION', '5.0.5') or '').strip()
     if not re.fullmatch(r'\d+(\.\d+){1,2}', mocked_version):
         os.environ['MONGOMOCK_SERVER_VERSION'] = '5.0.5'
@@ -1223,7 +1226,6 @@ def activate_in_memory_database(reason: str) -> None:
     returns_collection = database['returns']
     notifications_collection = database['notifications']
     wishlists_collection = database['wishlists']
-    # NEW: Shipping system collections
     merchant_shipping_settings_collection = database['merchant_shipping_settings']
     serviceable_pincodes_collection = database['serviceable_pincodes']
     blocked_pincodes_collection = database['blocked_pincodes']
@@ -1317,7 +1319,6 @@ _LOCALHOST_IMAGE_RE = re.compile(r'^https?://(?:127\.0\.0\.1|localhost)(?::\d+)?
 
 
 def _normalize_image_url(raw: str | None) -> str:
-    """Convert absolute localhost image URLs to relative paths so they work in any deployment."""
     url = str(raw or '').strip()
     if not url:
         return url
@@ -1330,7 +1331,6 @@ def _normalize_image_url(raw: str | None) -> str:
 def serialize_product(document: dict) -> dict:
     payload = enrich_product_specifications(document)
     payload.pop('_id', None)
-    # Normalize image URLs so localhost paths from dev are rewritten to relative paths
     if 'image' in payload:
         payload['image'] = _normalize_image_url(payload.get('image'))
     if 'additional_images' in payload and isinstance(payload['additional_images'], list):
@@ -1574,7 +1574,6 @@ def build_product_spec_defaults(product: dict) -> dict:
         'available_sizes': infer_product_available_sizes(product),
         'color': str(product.get('color') or '').strip() or infer_product_color(product),
         'stock_status': infer_product_stock_status(product),
-        # Inventory fields
         'stock_quantity': int(product.get('stock_quantity') if product.get('stock_quantity') is not None else product.get('stock') or 0),
         'reserved_stock': int(product.get('reserved_stock') or 0),
         'low_stock_threshold': int(product.get('low_stock_threshold') or 5),
@@ -1594,10 +1593,21 @@ def enrich_product_specifications(document: dict) -> dict:
         if payload.get(key) in (None, '', []):
             payload[key] = value
 
-    # Compute canonical stock fields for API consumers
-    payload['stock_quantity'] = int(payload.get('stock_quantity') if payload.get('stock_quantity') is not None else payload.get('stock') or 0)
+    pid = payload.get('id')
+    # Calculate stock dynamically from warehouses_collection
+    total_stock = 0
+    if pid is not None:
+        try:
+            total_stock = sum(int(w.get('stock', 0) or 0) for w in warehouses_collection.find({'product_id': int(pid)}))
+        except Exception:
+            pass
+    if total_stock == 0:
+        total_stock = int(payload.get('stock') if payload.get('stock') is not None else payload.get('stock_quantity') or 0)
+
+    payload['stock'] = total_stock
+    payload['stock_quantity'] = total_stock
     payload['reserved_stock'] = int(payload.get('reserved_stock') or 0)
-    payload['available_stock'] = max(0, payload['stock_quantity'] - payload['reserved_stock'])
+    payload['available_stock'] = max(0, total_stock - payload['reserved_stock'])
     payload['low_stock_threshold'] = int(payload.get('low_stock_threshold') or defaults.get('low_stock_threshold') or 5)
     payload['stock_status'] = infer_product_stock_status(payload)
 
@@ -2141,7 +2151,6 @@ def get_shipment_order_ids(shipment_id: str) -> list[str]:
             order_ids.append(order_id)
             
     if not order_ids:
-        # Fallback for auto-created shipments that didn't populate shipment_items_collection
         orders = list(orders_collection.find({'shipment_id': shipment_id}, {'_id': 0, 'order_id': 1}))
         for o in orders:
             order_id = str(o.get('order_id') or '').strip()
@@ -2183,7 +2192,6 @@ def validate_order_workflow_transition(current_status: str, target_status: str) 
     if current == target:
         return
 
-    # Cancelled, Rejected, Delivery Failed, Delivered are terminal statuses and cannot progress
     if current in {'REJECTED', 'CANCELLED', 'DELIVERY_FAILED', 'DELIVERED'}:
         raise HTTPException(
             status_code=400,
@@ -2216,7 +2224,6 @@ def update_status_timestamp(order_created_at, status_timestamps: dict | None, ta
             except Exception:
                 pass
 
-    # Ensure PLACED timestamp exists
     placed_dt = parsed_ts.get('PLACED') or order_created_at
     if isinstance(placed_dt, str):
         try:
@@ -2227,7 +2234,6 @@ def update_status_timestamp(order_created_at, status_timestamps: dict | None, ta
         placed_dt = placed_dt.replace(tzinfo=UTC)
     parsed_ts['PLACED'] = placed_dt
 
-    # Ensure target timestamp is set
     target_dt = target_time
     if isinstance(target_dt, str):
         try:
@@ -2240,14 +2246,12 @@ def update_status_timestamp(order_created_at, status_timestamps: dict | None, ta
 
     target_idx = flow.index(normalized_target)
 
-    # 1. Fill gaps up to target status by propagating the last known real timestamp
     for i in range(1, target_idx + 1):
         prev_status = flow[i-1]
         curr_status = flow[i]
         if curr_status not in parsed_ts or not parsed_ts[curr_status]:
             parsed_ts[curr_status] = parsed_ts[prev_status]
 
-    # 2. Scan backward to cap any preceding status timestamp at its successor's value (ensures chronological order)
     for i in range(target_idx - 1, -1, -1):
         curr_status = flow[i]
         next_status = flow[i+1]
@@ -2255,7 +2259,6 @@ def update_status_timestamp(order_created_at, status_timestamps: dict | None, ta
             if parsed_ts[curr_status] > parsed_ts[next_status]:
                 parsed_ts[curr_status] = parsed_ts[next_status]
 
-    # Convert back to ISO strings
     for k, v in parsed_ts.items():
         new_ts[k] = v.isoformat()
     return new_ts
@@ -2357,16 +2360,13 @@ def get_order_items(order_id: str) -> list[dict]:
         payload = dict(item)
         product = products_collection.find_one({'id': payload.get('product_id')}, {'_id': 0}) if payload.get('product_id') is not None else None
         if product:
-            # Keep backwards-compatible top-level item fields
             payload.setdefault('name', product.get('name'))
             payload.setdefault('image', product.get('image'))
             payload.setdefault('price', product.get('price'))
             payload.setdefault('category', product.get('category'))
-            # Provide a full `product` object with enriched specifications for frontend use
             try:
                 payload['product'] = serialize_product(product)
             except Exception:
-                # Fall back to minimal product fields if enrichment fails
                 payload['product'] = {
                     'id': product.get('id'),
                     'name': product.get('name'),
@@ -2433,6 +2433,129 @@ def serialize_order(document: dict, include_shipment: bool = False) -> dict:
         payload['shipment_events'] = get_shipment_events(payload['shipment_id'])
 
     return payload
+
+
+def serialize_orders_batch(orders: list[dict], include_shipment: bool = False) -> list[dict]:
+    if not orders:
+        return []
+
+    order_ids = [o.get('order_id') for o in orders if o.get('order_id')]
+
+    # 1. Fetch items and pre-fetch products
+    raw_items = list(order_items_collection.find({'order_id': {'$in': order_ids}}, {'_id': 0}))
+    product_ids = sorted({item.get('product_id') for item in raw_items if item.get('product_id') is not None})
+    products = list(products_collection.find({'id': {'$in': product_ids}}, {'_id': 0}))
+    product_map = {p.get('id'): p for p in products}
+
+    items_by_order = {}
+    for item in raw_items:
+        payload = dict(item)
+        product = product_map.get(payload.get('product_id'))
+        if product:
+            payload.setdefault('name', product.get('name'))
+            payload.setdefault('image', product.get('image'))
+            payload.setdefault('price', product.get('price'))
+            payload.setdefault('category', product.get('category'))
+            try:
+                payload['product'] = serialize_product(product)
+            except Exception:
+                payload['product'] = {
+                    'id': product.get('id'),
+                    'name': product.get('name'),
+                    'image': product.get('image'),
+                    'price': product.get('price'),
+                    'category': product.get('category'),
+                }
+        items_by_order.setdefault(item.get('order_id'), []).append(payload)
+
+    # 2. Fetch order status history
+    raw_history = list(order_status_history_collection.find({'order_id': {'$in': order_ids}}).sort('timestamp', 1))
+    history_by_order = {}
+    for entry in raw_history:
+        payload = dict(entry)
+        payload.pop('_id', None)
+        history_by_order.setdefault(entry.get('order_id'), []).append(payload)
+
+    # 3. Fetch tracking logs
+    raw_logs = list(delivery_logs_collection.find({'order_id': {'$in': order_ids}}).sort('timestamp', 1))
+    logs_by_order = {}
+    for log in raw_logs:
+        payload = serialize_delivery_log(log)
+        logs_by_order.setdefault(log.get('order_id'), []).append(payload)
+
+    # 4. Fetch payments
+    raw_payments = list(payments_collection.find({'order_id': {'$in': order_ids}}, {'_id': 0}))
+    payments_by_order = {}
+    for p in raw_payments:
+        payment = dict(p)
+        if isinstance(payment.get('created_at'), datetime):
+            payment['created_at'] = payment['created_at'].isoformat()
+        if isinstance(payment.get('updated_at'), datetime):
+            payment['updated_at'] = payment['updated_at'].isoformat()
+        payment['status'] = normalize_payment_status(payment.get('status', 'PENDING'))
+        payments_by_order[payment.get('order_id')] = payment
+
+    # 5. Fetch return requests
+    raw_returns = list(returns_collection.find({'order_id': {'$in': order_ids}}, {'_id': 0}))
+    returns_by_order = {}
+    for r in raw_returns:
+        request = dict(r)
+        if isinstance(request.get('created_at'), datetime):
+            request['created_at'] = request['created_at'].isoformat()
+        if isinstance(request.get('updated_at'), datetime):
+            request['updated_at'] = request['updated_at'].isoformat()
+        request['status'] = normalize_return_status(request.get('status', 'RETURN_REQUESTED'))
+        returns_by_order[request.get('order_id')] = request
+
+    # 6. Pre-fetch shipments & shipment events
+    shipment_map = {}
+    shipment_events_by_shipment = {}
+    shipment_ids = [o.get('shipment_id') for o in orders if o.get('shipment_id')]
+    if shipment_ids:
+        if include_shipment:
+            shipments = list(shipments_collection.find({'shipment_id': {'$in': shipment_ids}}))
+            shipment_map = {s.get('shipment_id'): serialize_shipment(s) for s in shipments}
+        events = list(shipment_events_collection.find({'shipment_id': {'$in': shipment_ids}}).sort('timestamp', 1))
+        for event in events:
+            payload = dict(event)
+            payload.pop('_id', None)
+            if isinstance(payload.get('timestamp'), datetime):
+                payload['timestamp'] = payload['timestamp'].isoformat()
+            shipment_events_by_shipment.setdefault(event.get('shipment_id'), []).append(payload)
+
+    # 7. Serialize each order using pre-fetched structures
+    serialized_orders = []
+    for doc in orders:
+        payload = dict(doc)
+        payload.pop('_id', None)
+        order_id = payload.get('order_id', '')
+
+        if isinstance(payload.get('created_at'), datetime):
+            payload['created_at'] = payload['created_at'].isoformat()
+        if isinstance(payload.get('updated_at'), datetime):
+            payload['updated_at'] = payload['updated_at'].isoformat()
+        payload['id'] = payload.get('id') or order_id
+        payload['status'] = normalize_order_status(payload.get('status', 'PLACED'))
+        payload['is_deleted'] = bool(payload.get('is_deleted', False))
+        payload['status_timestamps'] = payload.get('status_timestamps') or {}
+        payload['status_history'] = history_by_order.get(order_id) or []
+        payload['assigned_delivery_id'] = payload.get('assigned_delivery_id')
+        payload['items'] = items_by_order.get(order_id) or []
+        payload['tracking_logs'] = logs_by_order.get(order_id) or []
+        payload['payment'] = payments_by_order.get(order_id)
+        payload['return_request'] = returns_by_order.get(order_id)
+
+        if include_shipment and payload.get('shipment_id'):
+            sid = payload['shipment_id']
+            payload['shipment'] = shipment_map.get(sid)
+            payload['shipment_events'] = shipment_events_by_shipment.get(sid, [])
+        elif payload.get('shipment_id'):
+            sid = payload['shipment_id']
+            payload['shipment_events'] = shipment_events_by_shipment.get(sid, [])
+        
+        serialized_orders.append(payload)
+
+    return serialized_orders
 
 
 def serialize_order_for_merchant(document: dict, merchant_product_ids: set, include_shipment: bool = False) -> dict:
@@ -2536,7 +2659,6 @@ def create_notification(
     user_id: str | None = None,
     title: str | None = None
 ) -> None:
-    """Create notification and emit WebSocket event"""
     normalized_event = str(event_type or '').strip().upper()
     if normalized_event in {'SHIPPED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}:
         notification_type = 'DELIVERY'
@@ -2559,7 +2681,6 @@ def create_notification(
     
     notifications_collection.insert_one(notification)
     
-    # Emit WebSocket event if user is connected
     if user_id:
         import asyncio
         try:
@@ -2574,7 +2695,6 @@ def create_notification(
 
 
 def generate_notification_title(event_type: str) -> str:
-    """Generate notification title based on event type"""
     titles = {
         'PLACED': '📝 Order Placed',
         'CONFIRMED': '✅ Order Confirmed',
@@ -2649,7 +2769,8 @@ def set_payment_status(
 
 
 def sanitize_pincode(value: str) -> str:
-    return ''.join(ch for ch in str(value or '') if ch.isdigit())
+    cleaned = ''.join(ch for ch in str(value or '').strip() if ch.isdigit())
+    return cleaned[:6] if cleaned else ''
 
 
 def sanitize_phone_number(value: str) -> str:
@@ -2677,6 +2798,9 @@ def parse_service_pincodes(value: str | list[str] | None) -> list[str]:
         cleaned.append(pincode)
         seen.add(pincode)
     return cleaned
+
+
+parse_serviceable_pincodes = parse_service_pincodes
 
 
 def is_demo_delivery_partner_account(account: dict | None) -> bool:
@@ -2938,7 +3062,6 @@ def choose_best_warehouse(product_id: int, user_location: dict) -> dict:
         }
         return fallback
 
-    # Safe pincode comparison with fallback
     user_pincode = str(user_location.get('pincode', '560001'))[:3]
     
     ranked = sorted(
@@ -3029,13 +3152,10 @@ def chunk_orders(values: list[dict], size: int) -> list[list[dict]]:
 
 
 def get_order_destination_location(order: dict) -> dict:
-    """Extract destination location from order with multiple fallback sources"""
-    # Try to get from shipping_details first (most accurate)
     shipping = order.get('shipping_details') or {}
     city_from_shipping = str(shipping.get('city') or '').strip()
     state_from_shipping = str(shipping.get('state') or '').strip()
     
-    # If shipping has both city and state, use them
     if city_from_shipping and state_from_shipping:
         return {
             'city': city_from_shipping,
@@ -3043,14 +3163,12 @@ def get_order_destination_location(order: dict) -> dict:
             'pincode': sanitize_pincode(shipping.get('pincode') or order.get('destination_pincode', ''))
         }
     
-    # Otherwise, resolve from pincode
     destination_pincode = sanitize_pincode(order.get('destination_pincode') or shipping.get('pincode') or '')
     if not is_valid_indian_pincode(destination_pincode):
         destination_pincode = '560001'
     
     location = get_location_for_pincode(destination_pincode)
     
-    # Override with shipping details if available
     if city_from_shipping:
         location['city'] = city_from_shipping
     if state_from_shipping:
@@ -3081,7 +3199,6 @@ def get_warehouse_location(order: dict) -> dict:
 
 
 def group_orders_for_shipments(orders: list[dict], max_orders_per_shipment: int) -> list[list[dict]]:
-    """Group orders by destination (warehouse, state, city) for shipment creation"""
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     for order in orders:
         destination = get_order_destination_location(order)
@@ -3090,21 +3207,12 @@ def group_orders_for_shipments(orders: list[dict], max_orders_per_shipment: int)
         state_key = normalize_state_name(destination.get('state', '')).lower()
         group_key = (warehouse_id, state_key, city_key)
         
-        # Debug logging
-        print(f"[GROUP_ORDERS] Order {order.get('order_id')}: warehouse={warehouse_id}, state={state_key}, city={city_key}")
-        print(f"[GROUP_ORDERS] Destination from order: {destination}")
-        
         grouped.setdefault(group_key, []).append(order)
-
-    print(f"[GROUP_ORDERS] Created {len(grouped)} shipment groups from {len(orders)} orders")
-    for group_key, group_orders in grouped.items():
-        print(f"[GROUP_ORDERS] Group {group_key}: {len(group_orders)} orders")
 
     batches: list[list[dict]] = []
     for group_orders in grouped.values():
         batches.extend(chunk_orders(group_orders, max_orders_per_shipment))
     
-    print(f"[GROUP_ORDERS] Final batches: {len(batches)} shipments will be created")
     return batches
 
 
@@ -3156,31 +3264,7 @@ def score_delivery_partner(partner: dict, destination: dict, destination_pincode
 
 
 def auto_assign_delivery_partner(destination: dict, destination_pincode: str) -> tuple[str | None, str | None]:
-    partners = list(
-        users_collection.find(
-            {'role': 'DELIVERY_ASSOCIATE', 'status': 'ACTIVE'},
-            {'_id': 0, 'id': 1, 'email': 1, 'profile_details': 1, 'city': 1, 'state': 1},
-        )
-    )
-    if not partners:
-        return None, None
-
-    for partner in partners:
-        if is_demo_delivery_partner_account(partner):
-            ensure_demo_partner_service_sync(partner, destination, destination_pincode)
-
-    workload_map = get_delivery_partner_workload()
-    ranked = sorted(
-        partners,
-        key=lambda partner: score_delivery_partner(partner, destination, destination_pincode, workload_map),
-        reverse=True,
-    )
-    selected = ranked[0]
-    if score_delivery_partner(selected, destination, destination_pincode, workload_map) <= -10_000:
-        return None, None
-    selected_id = str(selected.get('id') or '').strip() or None
-    selected_email = str(selected.get('email') or '').strip().lower() or None
-    return selected_id, selected_email
+    return None, None
 
 
 def build_tracking_id_for_batch(base_tracking_id: str, index: int) -> str:
@@ -3197,7 +3281,6 @@ def ensure_indexes() -> None:
         try:
             collection.create_index(keys, **kwargs)
         except OperationFailure as exc:
-            # Existing indexes in live DB can differ by options (e.g., unique). Ignore conflict and continue.
             if getattr(exc, 'code', None) == 86:
                 return
             raise
@@ -3242,18 +3325,16 @@ def seed_products() -> None:
         if not product_id:
             continue
 
-        # Only insert seed products if they don't exist — never overwrite merchant products
         existing = products_collection.find_one({'id': product_id})
         if existing:
-            continue  # Skip: product already exists (may be modified or a merchant product)
+            continue 
 
         payload['merchant_id'] = str(payload.get('merchant_id') or 'USR-DEMO-ADMIN-01').strip() or 'USR-DEMO-ADMIN-01'
         payload['review_status'] = normalize_product_review_status(payload.get('review_status', 'APPROVED'))
         payload['created_at'] = now_utc()
         
-        # Set default stock if not specified (prevent "Out of Stock" for all seed products)
         if 'stock' not in payload and 'stock_quantity' not in payload:
-            payload['stock'] = 50  # Default stock for seed products
+            payload['stock'] = 50 
 
         products_collection.insert_one(payload)
 
@@ -3262,19 +3343,15 @@ def seed_users() -> None:
     for _, account in SEED_USERS.items():
         email = account['email'].strip().lower()
         
-        # Only insert seed users if they don't exist — never overwrite real user data
         existing = users_collection.find_one({'email': email})
         if existing:
-            # User already exists — skip to preserve their profile data, settings, etc.
             continue
         
         profile_details = account.get('profile_details') if isinstance(account.get('profile_details'), dict) else {}
         bank_details = profile_details.get('bank_details') if isinstance(profile_details.get('bank_details'), dict) else {}
         user_role = normalize_role(account.get('role', 'CUSTOMER'))
         
-        # Build profile_details based on role
         if user_role == 'DELIVERY_ASSOCIATE':
-            # Delivery partner profile
             user_profile = {
                 'phone_number': str(profile_details.get('phone_number') or account.get('phone_number') or '').strip(),
                 'vehicle_type': str(profile_details.get('vehicle_type') or '').strip().upper(),
@@ -3290,7 +3367,6 @@ def seed_users() -> None:
                 'is_online': bool(profile_details.get('is_online', True)),
             }
         else:
-            # Merchant/admin profile
             user_profile = {
                 'store_name': str(profile_details.get('store_name') or '').strip(),
                 'gst_number': str(profile_details.get('gst_number') or '').strip(),
@@ -3377,7 +3453,6 @@ def backfill_merchant_statuses() -> None:
         {'role': {'$nin': ['ADMIN', 'MERCHANT']}, 'merchant_status': {'$exists': False}},
         {'$set': {'merchant_status': 'PENDING', 'updated_at': now_utc()}},
     )
-    # Approval system removed — activate all existing PENDING delivery/ops accounts
     users_collection.update_many(
         {'role': {'$in': ['DELIVERY_ASSOCIATE', 'OPERATIONS_STAFF']}, 'status': 'PENDING'},
         {'$set': {'status': 'ACTIVE', 'updated_at': now_utc()}},
@@ -3392,10 +3467,8 @@ def backfill_product_review_status() -> None:
 
 
 def backfill_seed_product_stock() -> None:
-    """One-time backfill to add stock to seed products that have 0 or no stock"""
     seed_product_ids = [product['id'] for product in SEED_PRODUCTS]
     
-    # Update seed products that have 0 or missing stock
     products_collection.update_many(
         {
             'id': {'$in': seed_product_ids},
@@ -3429,10 +3502,9 @@ def seed_shipments() -> None:
 
 def seed_orders() -> None:
     for order in SEED_ORDERS:
-        # Only insert demo orders if they do not exist yet — never overwrite real workflow state
         existing = orders_collection.find_one({'order_id': order['order_id']})
         if existing:
-            continue  # Skip: order already exists (may have real status/history)
+            continue 
         order_payload = dict(order)
         order_created_at = order_payload.pop('created_at', None)
         order_payload['created_at'] = order_created_at or now_utc()
@@ -3490,20 +3562,16 @@ def backfill_orders_workflow_state() -> None:
         current_status = order.get('status') or 'PLACED'
         created_at = order.get('created_at') or order.get('updated_at') or now_utc()
         
-        # Ensure chronological and fill in missing steps up to the current status
         existing_timestamps = order.get('status_timestamps') or {}
         updated_ts = update_status_timestamp(created_at, existing_timestamps, current_status, order.get('updated_at') or now_utc())
         update_fields['status_timestamps'] = updated_ts
 
-        # Normalize status only if missing or invalid
         if not order.get('status'):
             update_fields['status'] = normalize_order_status(current_status)
 
-        # Normalize payment method only if missing
         if not order.get('payment_method'):
             update_fields['payment_method'] = normalize_payment_method('COD')
 
-        # Only update if there are fields to backfill
         if update_fields:
             update_fields['updated_at'] = now_utc()
             orders_collection.update_one(
@@ -3511,7 +3579,6 @@ def backfill_orders_workflow_state() -> None:
                 {'$set': update_fields}
             )
 
-        # Create initial payment record if missing
         if payments_collection.count_documents({'order_id': order_id}) == 0:
             payment_method = normalize_payment_method(order.get('payment_method') or 'COD')
             initial_payment_status = 'PENDING' if payment_method == 'COD' else 'SUCCESS'
@@ -3529,13 +3596,11 @@ def backfill_demo_seed_tracking_state() -> None:
         if not order:
             continue
 
-        # Skip if order has real workflow history (not just seed baseline)
         history_count = order_status_history_collection.count_documents({'order_id': order_id})
         updated_by = order.get('updated_by', '')
         
-        # If history count > 1 or updated_by is not system/seed, this is a real order now
         if history_count > 1 or (updated_by and updated_by not in ['system-seed', 'seed-backfill', 'system']):
-            continue  # Don't reset orders with real workflow progress
+            continue 
 
         created_at = order.get('created_at') or now_utc()
         orders_collection.update_one(
@@ -3676,9 +3741,7 @@ def seed_demo_merchant_shipping_settings() -> None:
         if not normalized_merchant_id:
             continue
 
-        existing = merchant_shipping_settings_collection.find_one({'merchant_id': normalized_merchant_id}, {'_id': 1})
-        if existing:
-            continue
+        # Always overwrite or insert the demo settings on startup to ensure a working default.
 
         merchant_shipping_settings_collection.update_one(
             {'merchant_id': normalized_merchant_id},
@@ -3697,8 +3760,8 @@ def seed_demo_merchant_shipping_settings() -> None:
             upsert=True,
         )
 
-        serviceable = parse_serviceable_pincodes(settings.get('serviceable_pincodes') or [])
-        blocked = parse_serviceable_pincodes(settings.get('blocked_pincodes') or [])
+        serviceable = parse_service_pincodes(settings.get('serviceable_pincodes') or [])
+        blocked = parse_service_pincodes(settings.get('blocked_pincodes') or [])
 
         serviceable_pincodes_collection.delete_many({'merchant_id': normalized_merchant_id})
         blocked_pincodes_collection.delete_many({'merchant_id': normalized_merchant_id})
@@ -3736,6 +3799,7 @@ def backfill_user_auth_shape() -> None:
 
 def seed_collections() -> None:
     seed_platform_defaults()
+    seed_demo_merchant_shipping_settings()
     backfill_merchant_statuses()
     backfill_product_merchant_ids()
     backfill_product_review_status()
@@ -3747,58 +3811,24 @@ def seed_collections() -> None:
     backfill_demo_seed_tracking_state()
 
 
-# ============================================================================
-# SHIPPING SYSTEM HELPERS
-# ============================================================================
-
-PINCODE_DISTANCE_CACHE = {}  # Simple in-memory cache for pincode distances
-
-
-def sanitize_pincode(value: str) -> str:
-    """Extract only digits from pincode input."""
-    cleaned = ''.join(ch for ch in str(value or '').strip() if ch.isdigit())
-    return cleaned[:6] if cleaned else ''
-
-
-def parse_serviceable_pincodes(value: str | list) -> list[str]:
-    """Parse pincode input (CSV string or list) and return valid pincodes."""
-    if isinstance(value, list):
-        pincodes = value
-    else:
-        pincodes = [p.strip() for p in str(value or '').split(',')]
-    
-    result = []
-    for p in pincodes:
-        cleaned = sanitize_pincode(p)
-        if len(cleaned) == 6:
-            result.append(cleaned)
-    return result
+PINCODE_DISTANCE_CACHE = {} 
 
 
 def calculate_distance(pincode1: str, pincode2: str) -> float:
-    """
-    Calculate approximate distance between two pincodes using simple mapping.
-    Uses cached values or internal pincode mapping table.
-    
-    In production, integrate Google Maps or OpenRoute API.
-    """
     cache_key = f"{pincode1}:{pincode2}"
     if cache_key in PINCODE_DISTANCE_CACHE:
         return PINCODE_DISTANCE_CACHE[cache_key]
     
-    # Reverse lookup also
     reverse_key = f"{pincode2}:{pincode1}"
     if reverse_key in PINCODE_DISTANCE_CACHE:
         return PINCODE_DISTANCE_CACHE[reverse_key]
     
-    # Simple approximation: use pincode prefix as rough geography
     prefix1 = int(pincode1[:2]) if len(pincode1) >= 2 else 0
     prefix2 = int(pincode2[:2]) if len(pincode2) >= 2 else 0
     
-    # Rough distance: difference in prefix * 100 km per state
     distance = abs(prefix1 - prefix2) * 100
     if distance == 0:
-        distance = 10  # Same state, assume ~10km average
+        distance = 10 
     
     PINCODE_DISTANCE_CACHE[cache_key] = float(distance)
     return float(distance)
@@ -3808,18 +3838,16 @@ def calculate_delivery_charge(
     distance_km: float,
     order_total: float,
 ) -> float:
-    """Calculate the final customer-facing delivery charge."""
     return 0.0 if order_total >= 500 else 49.0
 
 
 def estimate_delivery_timeframe(distance_km: float) -> tuple[int, int]:
-    """Estimate delivery days based on distance."""
     if distance_km <= 50:
-        return (1, 2)  # 1-2 days
+        return (1, 2) 
     elif distance_km <= 200:
-        return (2, 4)  # 2-4 days
+        return (2, 4) 
     else:
-        return (4, 7)  # 4-7 days
+        return (4, 7) 
 
 
 def is_pincode_serviceable(
@@ -3827,27 +3855,22 @@ def is_pincode_serviceable(
     merchant_id: str,
     allow_all_india: bool = True,
 ) -> bool:
-    """Check if customer pincode is serviceable by merchant."""
     customer_pincode = sanitize_pincode(customer_pincode)
     if not customer_pincode:
         return False
     
-    # Check blocked pincodes first
     if blocked_pincodes_collection.find_one({'merchant_id': merchant_id, 'pincode': customer_pincode}):
         return False
     
-    # Check allow_all_india flag
     if allow_all_india:
-        return True  # Serve all of India except blocked
+        return True 
     
-    # Check serviceable pincodes list
     return bool(
         serviceable_pincodes_collection.find_one({'merchant_id': merchant_id, 'pincode': customer_pincode})
     )
 
 
 def get_merchant_shipping_settings(merchant_id: str) -> dict | None:
-    """Retrieve merchant shipping settings."""
     return merchant_shipping_settings_collection.find_one(
         {'merchant_id': merchant_id},
         {'_id': 0},
@@ -3856,56 +3879,20 @@ def get_merchant_shipping_settings(merchant_id: str) -> dict | None:
 
 async def auto_dispatch_shipment_after_delay(shipment_id: str, delay_seconds: int = 3) -> None:
     """
-    AUTO-DISPATCH: Automatically dispatch shipment after a short delay
-    Called when order is packed to simulate real-world warehouse processing
+    AUTO-DISPATCH: Disabled to allow manual shipping and delivery partner control.
     """
-    await asyncio.sleep(delay_seconds)
-    try:
-        shipment = shipments_collection.find_one({'shipment_id': shipment_id})
-        if not shipment:
-            return
-        
-        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-        if current_status != 'CREATED':
-            return
-        
-        # Auto-dispatch with system actor
-        transition_shipment_status(
-            shipment,
-            'DISPATCHED',
-            actor_id='system-auto-dispatch',
-            performer_role='SYSTEM',
-            performer_email='system@local',
-            location='Warehouse auto-dispatch',
-        )
-    except Exception:
-        pass
+    pass
 
 
 def start_shipment_simulator() -> None:
+    """
+    Disabled background automation to allow manual assignment and tracking
+    """
     global shipment_simulation_started
     global shipment_simulation_task
     if shipment_simulation_started:
         return
-    if str(os.getenv('ENABLE_SHIPMENT_SIMULATION', '1')).strip() == '0':
-        return
-
-    shipment_simulation_started = True
-
-    async def run_loop() -> None:
-        try:
-            while True:
-                try:
-                    simulate_shipment_progress_once()
-                except Exception:
-                    pass
-                # AGGRESSIVE: Check every 1 second instead of 5
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            return
-
-    loop = asyncio.get_running_loop()
-    shipment_simulation_task = loop.create_task(run_loop())
+    return
 
 
 @app.on_event('shutdown')
@@ -3967,7 +3954,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise credentials_error
 
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
-    # Only block explicitly BLOCKED accounts — PENDING is no longer a barrier
     if account_status == 'BLOCKED':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Account is blocked. Please contact support.')
 
@@ -4019,7 +4005,6 @@ async def upload_image(request: Request, file: UploadFile = File(...), current_u
 
     _store_uploaded_image(file_name, content_type, payload, current_user.get('email'))
 
-    # Return a relative path so it works regardless of the deployment host.
     image_url = f'/uploads/images/{file_name}'
     return {
         'message': 'Image uploaded successfully.',
@@ -4050,7 +4035,6 @@ def refresh_auth_token(payload: RefreshTokenRequest):
         raise refresh_error
 
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
-    # Only block explicitly BLOCKED accounts — PENDING is no longer a barrier
     if account_status == 'BLOCKED':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Account is blocked. Please contact support.')
 
@@ -4159,7 +4143,6 @@ def create_product_review(
     payload: ProductReviewRequest,
     current_user: dict = Depends(require_roles('CUSTOMER'))
 ):
-    """Submit a product review with star rating and optional text feedback."""
     if not (1 <= payload.rating <= 5):
         raise HTTPException(status_code=400, detail='Rating must be between 1 and 5 stars')
 
@@ -4355,7 +4338,6 @@ def get_product_reviews(product_id: int, limit: int = 20, offset: int = 0):
         .limit(limit)
     )
     
-    # Get review stats
     all_reviews = list(product_reviews_collection.find(
         {'product_id': product_id, 'status': 'APPROVED'},
         {'rating': 1}
@@ -4364,7 +4346,6 @@ def get_product_reviews(product_id: int, limit: int = 20, offset: int = 0):
     total_reviews = len(all_reviews)
     average_rating = sum(r['rating'] for r in all_reviews) / total_reviews if total_reviews > 0 else 0
     
-    # Rating distribution
     rating_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
     for review in all_reviews:
         rating_counts[review['rating']] = rating_counts.get(review['rating'], 0) + 1
@@ -4467,39 +4448,6 @@ def get_delivery_rating(
     return {'rating': rating.get('rating'), 'feedback': rating.get('feedback') or ''}
 
 
-@app.get('/delivery/ratings')
-def get_delivery_partner_ratings(limit: int = 50, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    """Get all delivery ratings for the currently logged-in delivery partner."""
-    partner_email = str(current_user.get('email') or '').strip().lower()
-    partner_id = str(current_user.get('id') or '').strip()
-    limit = max(1, min(int(limit or 50), 200))
-
-    query = {
-        '$or': [
-            {'delivery_partner_email': partner_email},
-            {'delivery_partner_id': partner_id},
-        ]
-    }
-
-    ratings = list(
-        delivery_ratings_collection.find(query, {'_id': 0})
-        .sort('created_at', -1)
-        .limit(limit)
-    )
-
-    total_ratings = delivery_ratings_collection.count_documents(query)
-    average_rating = (
-        sum(float(item.get('rating') or 0) for item in delivery_ratings_collection.find(query, {'rating': 1})) / total_ratings
-        if total_ratings else 0
-    )
-
-    return {
-        'ratings': ratings,
-        'total_ratings': total_ratings,
-        'average_rating': round(average_rating, 1),
-    }
-
-
 def update_product_rating(product_id: int):
     """Update product's average rating and review count"""
     reviews = list(product_reviews_collection.find(
@@ -4513,7 +4461,6 @@ def update_product_rating(product_id: int):
     total_reviews = len(reviews)
     average_rating = sum(r['rating'] for r in reviews) / total_reviews
     
-    # Update product in database
     products_collection.update_one(
         {'id': product_id},
         {
@@ -4528,21 +4475,7 @@ def update_product_rating(product_id: int):
 
 @app.get('/recommendations/{customer_id}')
 def get_recommendations_for_customer(customer_id: str, limit: int = 15):
-    """Return a ranked list of recommended products for a customer.
-
-    Scoring priorities (aligned with product team):
-      - same category (+5)
-      - same gender/section (+4)
-      - shared tokens/tags (+3)
-      - similar price range (+2)
-      - frequently ordered together (+2)
-      - trending (+1)
-
-    This endpoint is read-only and builds recommendations from the product catalog
-    and past orders in the database. Returns simplified discovery payloads.
-    """
     user = find_user_by_id_or_email(customer_id) or {}
-    # Gather customer's purchased product ids from orders
     purchased_ids = []
     try:
         email = str(user.get('email') or '').strip()
@@ -4550,12 +4483,10 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
         if email:
             query['$or'].append({'customer_email': email})
         query['$or'].append({'customer_id': str(user.get('id') or '')})
-        # Clean up query
         if not any(query['$or']):
             query = {}
 
         orders = list(orders_collection.find(query, {'_id': 0})) if query else []
-        # sort orders by created_at desc if present
         orders = sorted(orders, key=lambda o: o.get('created_at') or o.get('updated_at') or now_utc(), reverse=True)
         for o in orders:
             for it in o.get('items', []):
@@ -4568,14 +4499,12 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
     catalog = get_approved_product_catalog()
     blocked = set(purchased_ids)
 
-    # Build source_products from most recent purchases (up to 4)
     source_products = [get_catalog_product_by_id(pid) for pid in (purchased_ids[:4] or [])]
     source_products = [p for p in source_products if p]
 
     scored: list[tuple[float, dict]] = []
     trending_ids = {int(p.get('id') or 0) for p in get_trending_products(limit=50)}
 
-    # Precompute co-purchase counts (simple): for each order, mark items that appeared together
     copurchase_counts: dict[int, int] = {}
     try:
         all_orders = list(orders_collection.find({}, {'_id': 0, 'items': 1}))
@@ -4593,10 +4522,8 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
         cid = int(candidate.get('id') or 0)
         if cid in blocked:
             continue
-        # base score from similarity/ranking function
         base = rank_candidate_for_recommendation(source_products, candidate)
 
-        # apply additional business boosts
         boost = 0.0
         for sp in source_products:
             if not sp: continue
@@ -4605,11 +4532,9 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
                     boost += 5
                 if normalize_product_text(sp.get('section')) and normalize_product_text(sp.get('section')) == normalize_product_text(candidate.get('section')):
                     boost += 4
-                # shared tokens
                 overlap = tokenize_product(sp) & tokenize_product(candidate)
                 if overlap:
                     boost += min(len(overlap), 3) * 3
-                # price proximity
                 try:
                     sp_price = float(sp.get('price') or 0)
                     c_price = float(candidate.get('price') or 0)
@@ -4617,7 +4542,6 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
                         boost += 2
                 except Exception:
                     pass
-                # frequently bought together (simple lookup)
                 if copurchase_counts.get((int(sp.get('id') or 0), cid), 0) > 0:
                     boost += 2
             except Exception:
@@ -4632,7 +4556,6 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
     scored.sort(key=lambda item: (item[0], -int(item[1].get('id') or 0)), reverse=True)
     recommended = [build_discovery_card(candidate, score=score, rank=i) for i, (score, candidate) in enumerate(scored[:limit])]
 
-    # Map to simplified response
     result = []
     for p in recommended:
         pid = int(p.get('id') or 0)
@@ -4667,13 +4590,9 @@ def get_recommendations_for_customer(customer_id: str, limit: int = 15):
 
 @app.get('/merchant/products')
 def get_merchant_products(current_user: dict = Depends(require_roles('ADMIN'))):
-    merchant_id = str(current_user.get('id') or '').strip()
-    if not merchant_id:
-        return []
-
     products = list(
         products_collection.find(
-            {'merchant_id': merchant_id},
+            {},
             {'_id': 0},
         ).sort('updated_at', -1),
     )
@@ -4718,7 +4637,7 @@ def update_merchant_product(
     if not merchant_id:
         raise HTTPException(status_code=400, detail='Merchant account is missing an id.')
 
-    existing_product = products_collection.find_one({'id': product_id, 'merchant_id': merchant_id}, {'_id': 0})
+    existing_product = products_collection.find_one({'id': product_id}, {'_id': 0})
     if not existing_product:
         raise HTTPException(status_code=404, detail='Product not found.')
 
@@ -4734,14 +4653,20 @@ def update_merchant_product(
         raise HTTPException(status_code=400, detail='Price must be zero or higher.')
 
     product = build_merchant_product_payload(payload, existing_product)
-    product['merchant_id'] = merchant_id
+    product['merchant_id'] = existing_product.get('merchant_id') or merchant_id
     product['updated_at'] = now_utc()
     products_collection.update_one(
-        {'id': product_id, 'merchant_id': merchant_id},
+        {'id': product_id},
         {'$set': product},
     )
 
-    updated = products_collection.find_one({'id': product_id, 'merchant_id': merchant_id}, {'_id': 0})
+    new_stock = int(product.get('stock') if product.get('stock') is not None else product.get('stock_quantity') or 0)
+    warehouses_collection.update_many(
+        {'product_id': product_id},
+        {'$set': {'stock': new_stock, 'updated_at': now_utc()}}
+    )
+
+    updated = products_collection.find_one({'id': product_id}, {'_id': 0})
     return {'message': 'Product updated successfully.', 'product': serialize_product(updated)}
 
 
@@ -4766,9 +4691,13 @@ def admin_update_product_stock(
     new_stock_qty = int(payload.stock_quantity)
     products_collection.update_one({'id': product_id}, {'$set': {'stock_quantity': new_stock_qty, 'updated_at': now_utc()}})
 
+    warehouses_collection.update_many(
+        {'product_id': product_id},
+        {'$set': {'stock': new_stock_qty, 'updated_at': now_utc()}}
+    )
+
     new_available = max(0, new_stock_qty - old_reserved)
 
-    # If product was out of stock and now restocked, notify wishlist owners
     if old_available <= 0 and new_available > 0:
         wishers = list(wishlists_collection.find({'product_id': product_id}, {'_id': 0}))
         product_name = existing.get('name') or f'Product {product_id}'
@@ -4817,7 +4746,6 @@ def get_my_wishlist(current_user: dict = Depends(require_roles('CUSTOMER'))):
     user_email = str(current_user.get('email') or '').strip().lower()
     owner = user_id or user_email
     entries = list(wishlists_collection.find({'user_id': owner}, {'_id': 0}).sort('created_at', -1))
-    # enrich with product details
     for e in entries:
         prod = products_collection.find_one({'id': e.get('product_id')}, {'_id': 0})
         e['product'] = serialize_product(prod) if prod else None
@@ -4841,10 +4769,11 @@ def delete_merchant_product(product_id: int, current_user: dict = Depends(requir
     if not merchant_id:
         raise HTTPException(status_code=400, detail='Merchant account is missing an id.')
 
-    result = products_collection.delete_one({'id': product_id, 'merchant_id': merchant_id})
+    result = products_collection.delete_one({'id': product_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail='Product not found.')
 
+    warehouses_collection.delete_many({'product_id': product_id})
     return {'message': 'Product deleted successfully.'}
 
 
@@ -4883,7 +4812,6 @@ def login(payload: AuthLoginRequest):
     account_status = normalize_account_status(account.get('status', 'ACTIVE'))
     role = normalize_role(account.get('role', 'CUSTOMER'))
 
-    # Auto-activate any PENDING account — approval system removed
     if account_status == 'PENDING':
         account_status = 'ACTIVE'
         users_collection.update_one(
@@ -4895,7 +4823,6 @@ def login(payload: AuthLoginRequest):
     if account_status == 'BLOCKED':
         raise HTTPException(status_code=403, detail='Account is blocked. Please contact support.')
 
-    # Auto-approve admin/merchant merchant_status
     if role in {'ADMIN', 'MERCHANT'}:
         users_collection.update_one(
             {'email': email},
@@ -4936,7 +4863,6 @@ def signup(payload: SignupRequest):
         raise HTTPException(status_code=403, detail='Super admin registration is disabled. Create this account manually in database.')
 
     normalized_role = normalize_role(payload.role)
-    # All new accounts are ACTIVE immediately — approval system removed
     account_status = 'ACTIVE'
     merchant_status = 'APPROVED' if normalized_role == 'ADMIN' else 'PENDING'
 
@@ -5024,10 +4950,15 @@ def signup(payload: SignupRequest):
     }
     users_collection.insert_one(account)
 
+    token = create_access_token(email, normalized_role)
+    refresh_token = create_refresh_token(email, normalized_role)
+
     return {
         'message': f"Account created for {account['full_name']}.",
         'role': account['role'],
         'status': account_status,
+        'token': token,
+        'refresh_token': refresh_token,
         'user': serialize_user(account),
     }
 
@@ -5082,7 +5013,6 @@ def update_user_profile(
     if not user:
         raise HTTPException(status_code=404, detail='User not found.')
 
-    # Using payload.model_dump() instead of payload.dict() if Pydantic v2, but stick to dict() for broad compatibility
     address_data = payload.dict()
 
     users_collection.update_one(
@@ -5124,24 +5054,20 @@ def update_merchant_profile(
     user_id = current_user.get('id')
     email = current_user.get('email', '').strip().lower()
 
-    # Get current user document
     user = users_collection.find_one({'$or': [{'id': user_id}, {'email': email}]})
     if not user:
         raise HTTPException(status_code=404, detail='User not found.')
 
-    # Merge profile details
     current_profile_details = user.get('profile_details', {}) or {}
     if payload.profile_details:
         current_profile_details.update(payload.profile_details)
 
-    # Add phone number if provided — store in both profile_details AND top-level field
     top_level_set: dict = {'profile_details': None, 'updated_at': now_utc()}
     if payload.phone_number:
         cleaned_phone = str(payload.phone_number).strip()
         current_profile_details['phone_number'] = cleaned_phone
         top_level_set['phone_number'] = cleaned_phone
 
-    # Merge bank details
     if payload.bank_details:
         current_bank_details = current_profile_details.get('bank_details', {}) or {}
         current_bank_details.update(payload.bank_details)
@@ -5149,7 +5075,6 @@ def update_merchant_profile(
 
     top_level_set['profile_details'] = current_profile_details
 
-    # Update user document
     result = users_collection.update_one(
         {'id': user_id},
         {'$set': top_level_set},
@@ -5158,7 +5083,6 @@ def update_merchant_profile(
     if result.matched_count == 0:
         raise HTTPException(status_code=400, detail='Failed to update profile.')
 
-    # Return updated user
     updated_user = users_collection.find_one({'id': user_id})
     return {
         'message': 'Merchant profile updated successfully.',
@@ -5276,10 +5200,6 @@ def update_admin_delivery_coverage(
     return {'message': 'Delivery coverage settings saved.', **updated}
 
 
-# ============================================================================
-# NEW: AMAZON-LIKE SHIPPING SYSTEM ENDPOINTS
-# ============================================================================
-
 @app.get('/admin/shipping-settings')
 def get_merchant_shipping_config(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
     """Retrieve merchant shipping configuration."""
@@ -5289,7 +5209,6 @@ def get_merchant_shipping_config(current_user: dict = Depends(require_roles('ADM
     
     settings = get_merchant_shipping_settings(merchant_id)
     if not settings:
-        # Return default empty config
         return {
             'merchant_id': merchant_id,
             'warehouse': {
@@ -5316,7 +5235,6 @@ def get_merchant_shipping_config(current_user: dict = Depends(require_roles('ADM
             'blocked_pincodes_count': 0,
         }
     
-    # Count pincodes
     serviceable_count = serviceable_pincodes_collection.count_documents({'merchant_id': merchant_id})
     blocked_count = blocked_pincodes_collection.count_documents({'merchant_id': merchant_id})
     settings['serviceable_pincodes_count'] = serviceable_count
@@ -5335,16 +5253,13 @@ def update_merchant_shipping_config(
     if not merchant_id:
         raise HTTPException(status_code=400, detail='Unable to resolve merchant ID.')
     
-    # Validate warehouse pincode
     warehouse_pincode = sanitize_pincode(payload.warehouse.pincode)
     if len(warehouse_pincode) != 6:
         raise HTTPException(status_code=400, detail='Warehouse pincode must be 6 digits.')
     
-    # Validate pricing
     if payload.distance_pricing.base_charge < 0 or payload.distance_pricing.per_km_rate < 0:
         raise HTTPException(status_code=400, detail='Charges cannot be negative.')
     
-    # Save main settings
     now = now_utc()
     merchant_shipping_settings_collection.update_one(
         {'merchant_id': merchant_id},
@@ -5363,9 +5278,8 @@ def update_merchant_shipping_config(
         upsert=True,
     )
     
-    # Update serviceable pincodes
     if not payload.allow_all_india and payload.serviceable_pincodes:
-        valid_pincodes = parse_serviceable_pincodes(payload.serviceable_pincodes)
+        valid_pincodes = parse_service_pincodes(payload.serviceable_pincodes)
         serviceable_pincodes_collection.delete_many({'merchant_id': merchant_id})
         if valid_pincodes:
             serviceable_pincodes_collection.insert_many([
@@ -5373,9 +5287,8 @@ def update_merchant_shipping_config(
                 for p in valid_pincodes
             ])
     
-    # Update blocked pincodes
     if payload.blocked_pincodes:
-        valid_blocked = parse_serviceable_pincodes(payload.blocked_pincodes)
+        valid_blocked = parse_service_pincodes(payload.blocked_pincodes)
         blocked_pincodes_collection.delete_many({'merchant_id': merchant_id})
         if valid_blocked:
             blocked_pincodes_collection.insert_many([
@@ -5397,77 +5310,19 @@ def check_delivery_serviceability(
     order_total: float = 0,
     current_user: dict | None = Depends(get_current_user_optional),
 ):
-    """
-    Check delivery serviceability for a customer pincode.
-    
-    Returns:
-    - is_serviceable: bool
-    - estimated_days: str (e.g., "2-4 days")
-    - delivery_charge: float
-    - cod_available: bool
-    """
-    role = normalize_role((current_user or {}).get('role', 'CUSTOMER'))
-    merchant_id = str((current_user or {}).get('id') or '').strip() if role in {'ADMIN', 'MERCHANT'} else ''
-    if not merchant_id:
-        merchant_id = get_default_merchant_id()
-    
-    if not merchant_id:
-        raise HTTPException(status_code=400, detail='No merchant found.')
-    
     customer_pincode = sanitize_pincode(customer_pincode)
     if len(customer_pincode) != 6:
         raise HTTPException(status_code=400, detail='Invalid customer pincode.')
     
-    # Get settings
-    settings = get_merchant_shipping_settings(merchant_id)
-    if not settings:
-        return {
-            'is_serviceable': False,
-            'estimated_days': 'Not available',
-            'delivery_charge': 0,
-            'cod_available': False,
-            'error': 'Shipping settings not configured.',
-        }
-    
-    # Check serviceability
-    is_serviceable = is_pincode_serviceable(
-        customer_pincode,
-        merchant_id,
-        settings.get('allow_all_india', True),
-    )
-    
-    if not is_serviceable:
-        return {
-            'is_serviceable': False,
-            'estimated_days': 'Not available',
-            'delivery_charge': 0,
-            'cod_available': False,
-        }
-    
-    # Calculate distance and delivery charge
-    warehouse_pincode = settings['warehouse']['pincode']
-    distance = calculate_distance(warehouse_pincode, customer_pincode)
-    
-    delivery_charge = calculate_delivery_charge(
-        distance,
-        float(order_total or 0),
-    )
-    
-    # Estimate delivery timeframe
-    min_days, max_days = estimate_delivery_timeframe(distance)
-    estimated_days = f'{min_days}-{max_days} days'
-    
-    # Check COD availability
-    cod_available = settings['cod_rules']['cod_enabled']
-    
+    # Always return serviceable to allow orders to be placed for any pincode entered by the user
     return {
         'is_serviceable': True,
-        'estimated_days': estimated_days,
-        'delivery_charge': delivery_charge,
+        'estimated_days': '3-5 days',
+        'delivery_charge': 0.0,
         'free_delivery_threshold': 500,
-        'standard_delivery_charge': 49,
-        'cod_available': cod_available,
-        'distance_km': round(distance, 2),
+        'standard_delivery_charge': 0,
+        'cod_available': True,
+        'distance_km': 10.0,
     }
 
 
@@ -5527,7 +5382,6 @@ def apply_order_status_update(
 
     customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip() or None
     
-    # Create notification with title
     event_type_map = {
         'CONFIRMED': 'ORDER_CONFIRMED',
         'PACKED': 'ORDER_PACKED',
@@ -5546,7 +5400,6 @@ def apply_order_status_update(
         user_id=customer_id,
     )
     
-    # Emit WebSocket event for real-time update
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -5587,7 +5440,6 @@ def apply_order_status_update(
 
 
 def get_status_message(status: str) -> str:
-    """Get customer-friendly message for status"""
     messages = {
         'PLACED': 'Your order has been placed successfully! 📝',
         'CONFIRMED': 'Your order is confirmed! ✅',
@@ -5726,7 +5578,6 @@ def assign_last_mile_partner_for_shipment(shipment: dict, destination: dict, des
         if not bool(partner.get('is_online', True)):
             continue
         availability = str(profile.get('availability') or '').strip().upper()
-        # Accept FULL_TIME, PART_TIME, ACTIVE, or empty (defaults to available)
         if availability and availability not in {'FULL_TIME', 'PART_TIME', 'ACTIVE', 'AVAILABLE'}:
             continue
         service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
@@ -5805,7 +5656,6 @@ def create_shipment_from_order(order: dict, current_user: dict | None = None, st
         'updated_by': str((current_user or {}).get('id') or (current_user or {}).get('email') or 'system'),
     }
     
-    # Remove created_at and tracking_id from document before update - will be set by $setOnInsert
     created_at_value = shipment_document.pop('created_at')
     tracking_id_value = shipment_document.pop('tracking_id')
     
@@ -5863,10 +5713,10 @@ def transition_shipment_status(
         return shipments_collection.find_one({'shipment_id': shipment_id}) or shipment
 
     valid_transitions = {
-        'CREATED': {'DISPATCHED'},
-        'DISPATCHED': {'IN_TRANSIT'},
-        'IN_TRANSIT': {'ARRIVED_AT_CITY'},
-        'ARRIVED_AT_CITY': {'OUT_FOR_DELIVERY'},
+        'CREATED': {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'},
+        'DISPATCHED': {'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'},
+        'IN_TRANSIT': {'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'},
+        'ARRIVED_AT_CITY': {'OUT_FOR_DELIVERY', 'DELIVERED'},
         'OUT_FOR_DELIVERY': {'DELIVERED'},
     }
     if next_status not in valid_transitions.get(current_status, set()):
@@ -5916,3125 +5766,741 @@ def transition_shipment_status(
     if next_status in {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY'}:
         for order_id in get_shipment_order_ids(shipment_id):
             order = orders_collection.find_one({'order_id': order_id})
-            customer_id = str((order or {}).get('user_id') or (order or {}).get('customer_email') or '').strip() or None
-            create_notification(
-                event_type=next_status,
-                order_id=order_id,
-                message=get_shipment_status_message(next_status),
-                user_id=customer_id,
-            )
+            customer_id = str(order or {}).get('user_id')
+            if customer_id:
+                send_order_notification(
+                    order_id=order_id,
+                    event_type='SHIPMENT_TRANSIT_UPDATE',
+                    message=f"Your order shipment is in transit: {location_value}",
+                    user_id=customer_id,
+                )
+    return latest_shipment
 
-    return shipments_collection.find_one({'shipment_id': shipment_id}) or latest_shipment
 
-
-def simulate_shipment_progress_once() -> None:
-    """
-    AGGRESSIVE AUTOMATION: Rapidly move shipments through transit stages
-    CREATED → DISPATCHED → IN_TRANSIT → ARRIVED_AT_CITY (auto-assigns delivery partner)
-    Delays reduced to 1-2 seconds for real-world e-commerce speed
-    """
-    pending_shipments = list(
-        shipments_collection.find(
-            {'status': {'$in': ['CREATED', 'DISPATCHED', 'IN_TRANSIT']}},
-            {'_id': 0},
-        ).sort('updated_at', 1)
-    )
-    now_value = now_utc()
-    for shipment in pending_shipments:
-        updated_at = shipment.get('updated_at')
-        if isinstance(updated_at, datetime):
-            elapsed = (now_value - updated_at).total_seconds()
-        else:
-            elapsed = 0
-        
-        # AGGRESSIVE: 1-2 second delay instead of 5 seconds
-        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-        required_delay = 1 if current_status == 'CREATED' else 2
-        
-        if elapsed < required_delay:
-            continue
-
-        next_status_map = {
-            'CREATED': 'DISPATCHED',
-            'DISPATCHED': 'IN_TRANSIT',
-            'IN_TRANSIT': 'ARRIVED_AT_CITY',
-        }
-        next_status = next_status_map.get(current_status)
-        if not next_status:
-            continue
-
-        transition_shipment_status(
-            shipment,
-            next_status,
-            actor_id='system',
-            performer_role='SYSTEM',
-            performer_email='system@local',
-            location=build_shipment_location(list(shipment.get('route') or []), next_status, shipment)[0],
-        )
-
+# ============================================================================
+# ORDER ENDPOINTS
+# ============================================================================
 
 @app.post('/orders')
-def create_order(payload: CreateOrderRequest, current_user: dict = Depends(require_roles('CUSTOMER'))):
+def create_order(
+    payload: CreateOrderRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get('id')
+    user_email = current_user.get('email', '').strip().lower()
+
     if not payload.items:
-        raise HTTPException(status_code=400, detail='At least one order item is required.')
+        raise HTTPException(status_code=400, detail="Cart is empty.")
 
-    cleaned_pincode = sanitize_pincode(payload.pincode)
-    if not is_valid_indian_pincode(cleaned_pincode):
-        raise HTTPException(status_code=400, detail='Please enter a valid 6-digit Indian pincode.')
-
+    # Calculate subtotal and details
     total_amount = 0.0
-    materialized_items = []
-    for request_item in payload.items:
-        if request_item.quantity <= 0:
-            raise HTTPException(status_code=400, detail='Quantity must be greater than 0.')
-        product = products_collection.find_one({'id': request_item.product_id}, {'_id': 0})
-        product_exists = bool(product)
-        if not product:
-            product = {
-                'id': request_item.product_id,
-                'name': request_item.name or f'Product {request_item.product_id}',
-                'price': float(request_item.price or 0),
-            }
-
-        line_total = float(product.get('price', 0)) * int(request_item.quantity)
-        total_amount += line_total
-        materialized_items.append(
-            {
-                'product_id': request_item.product_id,
-                'quantity': int(request_item.quantity),
-                'name': product.get('name', 'Product'),
-                'price': float(product.get('price', 0)),
-                'product_exists': product_exists,
-            }
-        )
-
-    # Validate requested quantities against available stock
-    for item in materialized_items:
-        if item.get('product_exists'):
-            p = products_collection.find_one({'id': item['product_id']}, {'_id': 0})
-            stock_qty = int(p.get('stock_quantity') if p.get('stock_quantity') is not None else p.get('stock') or 0)
-            reserved = int(p.get('reserved_stock') or 0)
-            available = max(0, stock_qty - reserved)
-            if available < item['quantity']:
-                raise HTTPException(status_code=400, detail=f"Only {available} items available for product {item.get('name')} (requested {item.get('quantity')}).")
-
-    first_product_id = next((item['product_id'] for item in materialized_items if item.get('product_exists')), materialized_items[0]['product_id'])
-    user_location = get_location_for_pincode(cleaned_pincode)
-    selected_warehouse = choose_best_warehouse(first_product_id, user_location)
-
-    shipping_payload = payload.shipping_details or {}
-    shipping_details = {
-        'full_name': str(shipping_payload.get('full_name') or current_user.get('full_name') or current_user.get('name') or '').strip(),
-        'phone': sanitize_phone_number(str(shipping_payload.get('phone') or current_user.get('phone_number') or '').strip()),
-        'city': str(shipping_payload.get('city') or user_location.get('city') or '').strip(),
-        'state': str(shipping_payload.get('state') or user_location.get('state') or '').strip(),
-        'address': str(shipping_payload.get('address') or '').strip(),
-        'pincode': cleaned_pincode,
-    }
-
+    items_to_save = []
     order_id = f"ORD-{uuid4().hex[:10].upper()}"
-    raw_payment_method = str(payload.payment_method or 'COD').strip().upper()
-    if raw_payment_method not in PAYMENT_METHODS:
-        raise HTTPException(status_code=400, detail='Unsupported payment method.')
-    payment_method = normalize_payment_method(raw_payment_method)
 
-    payment_details = sanitize_payment_details(payment_method, payload.payment_details)
+    for it in payload.items:
+        product = products_collection.find_one({'id': it.product_id})
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product with id {it.product_id} not found.")
+        
+        price = float(product.get('price') or 0.0)
+        quantity = int(it.quantity or 1)
+        total_amount += price * quantity
+        
+        items_to_save.append({
+            'id': f"OI-{uuid4().hex[:12].upper()}",
+            'order_id': order_id,
+            'product_id': it.product_id,
+            'quantity': quantity,
+        })
 
-    order_document = {
+    # Save to order_items_collection
+    if items_to_save:
+        order_items_collection.insert_many(items_to_save)
+
+    # Save to orders_collection
+    now = now_utc()
+    order_doc = {
         'id': order_id,
         'order_id': order_id,
-        'user_id': current_user.get('id') or current_user.get('email'),
-        'customer_email': current_user.get('email', '').strip().lower(),
-        'total_amount': round(total_amount, 2),
+        'user_id': user_id,
+        'customer_id': user_id,
+        'customer_email': user_email,
         'status': 'PLACED',
+        'created_at': now,
+        'updated_at': now,
+        'payment_method': payload.payment_method,
+        'destination_pincode': sanitize_pincode(payload.pincode),
+        'shipping_details': payload.shipping_details or {},
         'is_deleted': False,
-        'status_timestamps': build_initial_status_timestamps('PLACED'),
-        'assigned_delivery_id': None,
-        'assigned_delivery_partner': None,
-        'warehouse_id': selected_warehouse.get('warehouse_id'),
-        'shipment_id': None,
-        'destination_pincode': cleaned_pincode,
-        'shipping_details': shipping_details,
-        'payment_method': payment_method,
-        'updated_by': current_user.get('id') or current_user.get('email'),
-        'updated_by_role': 'CUSTOMER',
-        'updated_by_email': current_user.get('email', '').strip().lower(),
-        'created_at': now_utc(),
-        'updated_at': now_utc(),
+        'order_value': total_amount,
+        'total_amount': total_amount,
+        'status_timestamps': {
+            'PLACED': now.isoformat()
+        }
     }
-    orders_collection.insert_one(order_document)
+    orders_collection.insert_one(order_doc)
 
-    for item in materialized_items:
-        order_items_collection.insert_one(
-            {
-                'id': f"OI-{uuid4().hex[:12].upper()}",
-                'order_id': order_id,
-                'product_id': item['product_id'],
-                'quantity': item['quantity'],
-            }
-        )
+    # Record first delivery log
+    delivery_logs_collection.insert_one({
+        'id': f"DLOG-{uuid4().hex[:12].upper()}",
+        'order_id': order_id,
+        'status': 'PLACED',
+        'updated_by': user_id,
+        'location': 'Order placement',
+        'timestamp': now,
+    })
 
-    # Decrement stock quantities for each ordered item
-    for item in materialized_items:
-        try:
-            products_collection.update_one(
-                {'id': item['product_id']},
-                {'$inc': {'stock_quantity': -int(item['quantity'])}},
-            )
-        except Exception:
-            pass
+    # Save payment information if any
+    payment_doc = {
+        'id': f"PMT-{uuid4().hex[:10].upper()}",
+        'order_id': order_id,
+        'method': payload.payment_method,
+        'amount': total_amount,
+        'status': 'SUCCESS' if payload.payment_method != 'COD' else 'PENDING',
+        'payment_details': payload.payment_details or {},
+        'created_at': now,
+        'updated_at': now,
+    }
+    payments_collection.insert_one(payment_doc)
 
-    append_order_status_history(
-        order_id,
-        'PLACED',
-        current_user.get('id') or current_user.get('email', 'customer'),
-        performer_role='CUSTOMER',
-        performer_email=current_user.get('email', '').strip().lower(),
-        location='Order placed',
-    )
-    append_delivery_log(order_id, 'PLACED', current_user.get('id') or current_user.get('email', 'customer'))
+    # Trigger automatic shipment creation on placement
+    try:
+        create_shipment_from_order(order_doc, current_user=current_user)
+    except Exception as e:
+        print(f"[WARN] Auto shipment creation failed: {e}")
 
-    # Notify merchant/admin channels about newly placed orders for real-time dashboard sync.
+    # Trigger WebSocket notification for order creation
     import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            order_created_event = {
-                'type': 'order_created',
-                'data': {
-                    'order_id': order_id,
-                    'status': 'PLACED',
-                    'customer_email': current_user.get('email', '').strip().lower(),
-                    'created_at': now_utc().isoformat(),
-                },
+            event_data = {
+                "type": "order_created",
+                "data": {
+                    "order_id": order_id,
+                    "customer_id": user_id,
+                    "customer_email": user_email,
+                    "total_amount": total_amount,
+                    "created_at": now.isoformat(),
+                }
             }
-            for merchant_id in get_active_registered_merchant_ids():
-                asyncio.create_task(manager.broadcast_to_user(merchant_id, order_created_event))
-    except:
-        pass
+            if user_id:
+                asyncio.create_task(manager.broadcast_to_user(user_id, event_data))
+            if user_email:
+                asyncio.create_task(manager.broadcast_to_user(user_email, event_data))
+            
+            # Broadcast to any connected admins, merchants, or operations staff
+            admin_staff_users = list(users_collection.find(
+                {'role': {'$in': ['ADMIN', 'MERCHANT', 'OPERATIONS_STAFF', 'SUPER_ADMIN']}, 'status': 'ACTIVE'},
+                {'_id': 0, 'id': 1, 'email': 1}
+            ))
+            target_ids = set()
+            for u in admin_staff_users:
+                uid = str(u.get('id') or '').strip()
+                uemail = str(u.get('email') or '').strip().lower()
+                if uid:
+                    target_ids.add(uid)
+                if uemail:
+                    target_ids.add(uemail)
+            
+            for conn_user in list(manager.active_connections.keys()):
+                if conn_user in target_ids or conn_user.lower() in target_ids:
+                    asyncio.create_task(manager.broadcast_to_user(conn_user, event_data))
+    except Exception as e:
+        print(f"[WARN] WebSocket broadcast failed: {e}")
 
-    create_notification(
-        event_type='ORDER_PLACED',
-        order_id=order_id,
-        message=f'Order {order_id} placed successfully.',
-        user_id=str(current_user.get('id') or current_user.get('email') or ''),
-    )
+    return {
+        'message': 'Order placed successfully.',
+        'order_id': order_id,
+        'order': serialize_order(order_doc),
+    }
 
-    if payment_method in ONLINE_PAYMENT_METHODS:
-        online_status = 'SUCCESS' if random.random() >= 0.15 else 'FAILED'
-        set_payment_status(order_id, online_status, method=payment_method, payment_details=payment_details)
-        if online_status == 'SUCCESS':
-            create_notification(
-                event_type='PAYMENT_SUCCESS',
-                order_id=order_id,
-                message=f'Payment received for order {order_id}. Awaiting merchant confirmation.',
-                user_id=str(current_user.get('id') or current_user.get('email') or ''),
-            )
-        else:
-            create_notification(
-                event_type='PAYMENT_FAILED',
-                order_id=order_id,
-                message=f'Payment failed for order {order_id}.',
-                user_id=str(current_user.get('id') or current_user.get('email') or ''),
-            )
-    else:
-        set_payment_status(order_id, 'PENDING', method='COD', payment_details=payment_details)
-        create_notification(
-            event_type='PLACED',
-            order_id=order_id,
-            message=f'Order {order_id} placed successfully and is awaiting merchant confirmation.',
-            user_id=str(current_user.get('id') or current_user.get('email') or ''),
-        )
-
-    # Order stays at PLACED status - admin must manually confirm
-    # Manual workflow: PLACED → admin confirms → CONFIRMED → operations packs → PACKED → auto-create shipment → SHIPPED
-
-    latest = orders_collection.find_one({'order_id': order_id})
-    return {'message': 'Order placed successfully.', 'order': serialize_order(latest, include_shipment=True)}
 
 
 @app.get('/orders/my')
-def get_my_orders(current_user: dict = Depends(require_roles('CUSTOMER'))):
+def get_my_orders(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get('id')
-    email = current_user['email'].strip().lower()
-    orders = list(
-        orders_collection.find(
-            active_orders_filter({'$or': [{'user_id': user_id}, {'user_id': email}, {'customer_email': email}]})
-        ).sort('created_at', -1)
-    )
-    payload = [serialize_order(order, include_shipment=True) for order in orders]
-    return {'orders': payload, 'timeline_steps': ORDER_STATUS_FLOW}
-
-
-@app.get('/orders/{order_id}')
-def get_order_by_id(order_id: str, current_user: dict = Depends(get_current_user)):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    actor_id = str(current_user.get('id', '')).strip()
-    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
-    is_delivery_assignee = order.get('assigned_delivery_partner') == actor_email or order.get('assigned_delivery_id') == actor_id
-    if actor_role == 'CUSTOMER' and not is_owner:
-        raise HTTPException(status_code=403, detail='Access denied.')
-    if actor_role == 'DELIVERY_ASSOCIATE' and not is_delivery_assignee:
-        raise HTTPException(status_code=403, detail='Access denied.')
-
-    return {'order': serialize_order(order, include_shipment=True)}
-
-
-def calculate_order_eta(order: dict) -> dict:
-    order_id = order.get('order_id')
-    order_status = normalize_order_status(order.get('status', 'PLACED'))
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) or {}
-    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-    ts = order.get('status_timestamps') or {}
-    destination_pincode = sanitize_pincode(order.get('destination_pincode') or
-        (order.get('shipping_details') or {}).get('pincode') or '')
-
-    # ── Calculate original promise date (based on placed_at + estimated days) ──
-    placed_raw = ts.get('PLACED') or order.get('created_at')
-    placed_at = None
-    if placed_raw:
-        try:
-            placed_at = datetime.fromisoformat(str(placed_raw)) if isinstance(placed_raw, str) else placed_raw
-            if placed_at.tzinfo is None:
-                placed_at = placed_at.replace(tzinfo=UTC)
-        except Exception:
-            placed_at = now_utc()
-    else:
-        placed_at = now_utc()
-
-    # Estimate original delivery window
-    user_location = get_location_for_pincode(destination_pincode) if destination_pincode else {}
-    warehouse = get_warehouse_location(order)
-    base_days = estimate_delivery_days(user_location, warehouse)
-    original_delivery_date = placed_at + timedelta(days=base_days)
-
-    # ── Compute dynamic ETA based on current status ──
-    now = now_utc()
-    arrived_early = False
-    eta_date = None
-    eta_text = ''
-    status_message = ''
-    actual_delivered_at = None
-    arrival_status = 'On Time'
-
-    if order_status == 'DELIVERED' or shipment_status == 'DELIVERED':
-        delivered_raw = ts.get('DELIVERED') or order.get('updated_at')
-        try:
-            actual_delivered_at = datetime.fromisoformat(str(delivered_raw)) if isinstance(delivered_raw, str) else delivered_raw
-            if actual_delivered_at and actual_delivered_at.tzinfo is None:
-                actual_delivered_at = actual_delivered_at.replace(tzinfo=UTC)
-        except Exception:
-            actual_delivered_at = now
-        eta_date = actual_delivered_at
-        eta_text = f"Delivered on {format_delivery_date(actual_delivered_at)}"
-        status_message = eta_text
-        arrived_early = bool(actual_delivered_at and actual_delivered_at < original_delivery_date)
-        arrival_status = 'Delivered'
-
-    elif order_status in {'CANCELLED', 'REJECTED'}:
-        eta_text = 'Order cancelled'
-        status_message = eta_text
-        arrival_status = 'Cancelled'
-
-    elif shipment_status == 'OUT_FOR_DELIVERY' or order_status == 'OUT_FOR_DELIVERY':
-        # Out for delivery → arrives today
-        eta_date = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        eta_text = f"Arriving today by 9 PM"
-        status_message = 'Out for delivery — arriving today'
-        arrived_early = now.date() < original_delivery_date.date()
-        arrival_status = 'Arriving Today'
-
-    elif shipment_status == 'ARRIVED_AT_CITY':
-        # At city hub → 1 day
-        eta_date = now + timedelta(days=1)
-        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
-        status_message = 'At your city hub — out for delivery tomorrow'
-        arrived_early = eta_date.date() < original_delivery_date.date()
-        arrival_status = 'Arriving Tomorrow'
-
-    elif shipment_status == 'IN_TRANSIT':
-        # In transit → 1–2 days remaining
-        dispatched_raw = shipment.get('dispatched_at') or ts.get('SHIPPED')
-        try:
-            dispatched_at = datetime.fromisoformat(str(dispatched_raw)) if isinstance(dispatched_raw, str) else dispatched_raw
-            if dispatched_at and dispatched_at.tzinfo is None:
-                dispatched_at = dispatched_at.replace(tzinfo=UTC)
-        except Exception:
-            dispatched_at = now - timedelta(hours=6)
-        hours_in_transit = max(0, (now - dispatched_at).total_seconds() / 3600) if dispatched_at else 6
-        remaining_days = max(1, base_days - int(hours_in_transit / 24) - 1)
-        eta_date = now + timedelta(days=remaining_days)
-        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
-        status_message = f"In transit — arriving in {remaining_days} day{'s' if remaining_days != 1 else ''}"
-        arrived_early = eta_date.date() < original_delivery_date.date()
-        arrival_status = 'Arriving Earlier' if arrived_early else ('Delayed' if eta_date.date() > original_delivery_date.date() else 'In Transit')
-
-    elif shipment_status == 'DISPATCHED' or order_status == 'SHIPPED':
-        eta_date = now + timedelta(days=max(1, base_days - 1))
-        eta_text = f"Arriving by {format_delivery_date(eta_date)}"
-        status_message = 'Dispatched from warehouse'
-        arrived_early = eta_date.date() < original_delivery_date.date()
-        arrival_status = 'Arriving Earlier' if arrived_early else ('Delayed' if eta_date.date() > original_delivery_date.date() else 'In Transit')
-
-    elif order_status == 'PACKED':
-        eta_date = now + timedelta(days=base_days)
-        eta_text = f"Expected by {format_delivery_date(eta_date)}"
-        status_message = 'Packed and ready for dispatch'
-        arrival_status = 'On Time'
-
-    elif order_status == 'CONFIRMED':
-        eta_date = now + timedelta(days=base_days + 1)
-        eta_text = f"Expected by {format_delivery_date(eta_date)}"
-        status_message = 'Order confirmed'
-        arrival_status = 'On Time'
-
-    else:
-        eta_date = original_delivery_date
-        eta_text = f"Expected by {format_delivery_date(original_delivery_date)}"
-        status_message = 'Order placed'
-        arrival_status = 'On Time'
-
-    # Compute remaining time text
-    if eta_date:
-        if order_status == 'DELIVERED':
-            remaining_time_text = 'Delivered'
-        else:
-            diff = eta_date.date() - now.date()
-            if diff.days == 0:
-                remaining_time_text = 'today'
-            elif diff.days == 1:
-                remaining_time_text = 'tomorrow'
-            elif diff.days < 0:
-                remaining_time_text = 'delayed'
-            else:
-                remaining_time_text = f"{diff.days} days"
-    else:
-        remaining_time_text = '—'
-
-    progress_info = calculate_tracking_progress(order)
-
-    return {
-        'order_id': order_id,
-        'order_status': order_status,
-        'shipment_status': shipment_status,
-        'eta_text': eta_text,
-        'eta_date': eta_date.isoformat() if eta_date else None,
-        'original_delivery_date': original_delivery_date.isoformat(),
-        'original_delivery_text': f"Originally expected by {format_delivery_date(original_delivery_date)}",
-        'arrived_early': arrived_early,
-        'status_message': status_message,
-        'actual_delivered_at': actual_delivered_at.isoformat() if actual_delivered_at else None,
-        'estimated_delivery': eta_date.isoformat() if eta_date else None,
-        'remaining_time': remaining_time_text,
-        'current_progress': progress_info.get('progress_percentage', 0),
-        'arrival_status': arrival_status,
-    }
-
-
-def check_delivery_eta(order: dict) -> None:
-    order_id = order.get('order_id')
-    if not order_id:
-        return
-        
-    eta_info = calculate_order_eta(order)
-    arrival_status = eta_info.get('arrival_status')
-    customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip()
-    if not customer_id:
-        return
-
-    if arrival_status == 'Arriving Earlier':
-        notif_key = f'early_arrival_{order_id}'
-        existing = notifications_collection.find_one({'metadata.key': notif_key})
-        if not existing:
-            send_order_notification(
-                order_id=order_id,
-                event_type='EARLY_DELIVERY',
-                message=f"Great news! Your order {order_id} is arriving earlier than expected — {eta_info.get('eta_text')}.",
-                user_id=customer_id,
-                title='🚀 Arriving Early'
-            )
-            try:
-                notifications_collection.update_one(
-                    {'order_id': order_id, 'event_type': 'EARLY_DELIVERY'},
-                    {'$set': {'metadata.key': notif_key}},
-                )
-            except Exception:
-                pass
-                
-    elif arrival_status == 'Delayed':
-        notif_key = f'delayed_delivery_{order_id}'
-        existing = notifications_collection.find_one({'metadata.key': notif_key})
-        if not existing:
-            send_order_notification(
-                order_id=order_id,
-                event_type='DELIVERY_DELAYED',
-                message=f"Your order {order_id} delivery has been delayed. New ETA: {eta_info.get('eta_text')}.",
-                user_id=customer_id,
-                title='⚠️ Delivery Delayed'
-            )
-            try:
-                notifications_collection.update_one(
-                    {'order_id': order_id, 'event_type': 'DELIVERY_DELAYED'},
-                    {'$set': {'metadata.key': notif_key}},
-                )
-            except Exception:
-                pass
-
-
-@app.get('/orders/{order_id}/eta')
-def get_order_eta(order_id: str, current_user: dict = Depends(get_current_user)):
-    """
-    Returns a dynamic ETA for an order based on:
-    - The order's actual status transition timestamps
-    - The destination pincode and warehouse distance
-    - Whether the delivery is happening earlier than originally promised
-
-    The frontend should call this endpoint every time it polls orders
-    and update the displayed ETA and any 'Arriving Earlier!' banners.
-    """
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    actor_id = str(current_user.get('id', '')).strip()
-    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
-    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    if actor_role == 'CUSTOMER' and not is_owner:
-        raise HTTPException(status_code=403, detail='Access denied.')
-
-    eta_info = calculate_order_eta(order)
-    check_delivery_eta(order)
-    return eta_info
-
-
-@app.websocket('/ws/orders/{user_id}')
-async def websocket_order_updates(websocket: WebSocket, user_id: str):
-    """WebSocket endpoint for real-time order status updates"""
-    try:
-        await manager.connect(user_id, websocket)
-        # Keep connection open and listen for client messages
-        while True:
-            data = await websocket.receive_text()
-            # Optional: handle ping/pong or custom messages from client
-            if data == 'ping':
-                await websocket.send_json({'type': 'pong'})
-    except WebSocketDisconnect:
-        await manager.disconnect(user_id, websocket)
-    except Exception as e:
-        try:
-            await manager.disconnect(user_id, websocket)
-        except:
-            pass
-
-
-@app.get('/orders/{order_id}/tracking-status')
-def get_order_tracking_status(order_id: str, current_user: dict = Depends(get_current_user)):
-    """Get detailed order tracking information with status history"""
-    order = orders_collection.find_one({'order_id': order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
+    user_email = current_user.get('email', '').strip().lower()
     
-    # Verify access
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    actor_id = str(current_user.get('id', '')).strip()
-    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    
-    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
-    is_delivery_assignee = order.get('assigned_delivery_partner') == actor_email or order.get('assigned_delivery_id') == actor_id
-    is_staff = actor_role in {'ADMIN', 'OPERATIONS_STAFF', 'MERCHANT'}
-    
-    if actor_role == 'CUSTOMER' and not is_owner:
-        raise HTTPException(status_code=403, detail='Access denied.')
-    if actor_role == 'DELIVERY_ASSOCIATE' and not is_delivery_assignee and not is_staff:
-        raise HTTPException(status_code=403, detail='Access denied.')
-    
-    # Get status history from the dedicated history collection.
-    status_history = get_order_status_history(order_id)
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) if order.get('shipment_id') else None
-    shipment_events = get_shipment_events(str(order.get('shipment_id') or '')) if order.get('shipment_id') else []
-
-    # Get delivery logs
-    delivery_logs = list(delivery_logs_collection.find({'order_id': order_id}).sort('timestamp', 1))
-    
-    return {
-        'order_id': order_id,
-        'current_status': normalize_order_status(order.get('status', 'PLACED')),
-        'updated_by_role': order.get('updated_by_role'),
-        'updated_by_email': order.get('updated_by_email'),
-        'status_history': [
-            {
-                'id': h.get('id'),
-                'status': h.get('status'),
-                'timestamp': h.get('timestamp'),
-                'updated_by': h.get('updated_by'),
-                'updated_by_role': h.get('updated_by_role'),
-                'updated_by_email': h.get('updated_by_email'),
-                'location': h.get('location'),
-            }
-            for h in status_history
-        ],
-        'delivery_logs': [
-            {
-                'id': log.get('id'),
-                'status': log.get('status'),
-                'timestamp': log.get('timestamp').isoformat() if isinstance(log.get('timestamp'), datetime) else log.get('timestamp'),
-                'updated_by': log.get('updated_by'),
-                'performer_role': log.get('performer_role'),
-                'performer_email': log.get('performer_email'),
-                'location': log.get('location'),
-            }
-            for log in delivery_logs
-        ],
-        'status_timeline_steps': ORDER_STATUS_FLOW,
-        'shipment': serialize_shipment(shipment),
-        'shipment_events': shipment_events,
-        'created_at': order.get('created_at').isoformat() if isinstance(order.get('created_at'), datetime) else order.get('created_at'),
-        'updated_at': order.get('updated_at').isoformat() if isinstance(order.get('updated_at'), datetime) else order.get('updated_at'),
-    }
-
-
-@app.put('/orders/{order_id}/status')
-def update_order_status(
-    order_id: str,
-    payload: UpdateOrderStatusRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    target_status = normalize_order_status(payload.status)
-    actor_id = current_user.get('id') or current_user.get('email', 'system')
-    performer_email = current_user.get('email', 'system@local').strip().lower()
-
-    if target_status == 'SHIPPED':
-        raise HTTPException(status_code=400, detail='Use shipment dispatch to move an order to SHIPPED.')
-
-    if target_status not in STATUS_PERFORMER_ROLE_MAP:
-        raise HTTPException(status_code=403, detail='Only staff can update order statuses.')
-
-    if actor_role == 'DELIVERY_ASSOCIATE' and order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != current_user.get('email', '').strip().lower():
-        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
-
-    latest = apply_order_status_update(
-        order, 
-        target_status, 
-        str(actor_id),
-        location=(payload.current_location or '').strip(),
-        performer_role=actor_role,
-        performer_email=performer_email
-    )
-    return {'message': f'Order moved to {target_status}.', 'order': serialize_order(latest, include_shipment=True)}
-
-
-@app.patch('/orders/{order_id}/confirm')
-def confirm_order(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('ADMIN')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    location_value = (payload.current_location if payload and payload.current_location else 'Merchant confirmation').strip() if payload else 'Merchant confirmation'
-    latest = apply_order_status_update(
-        order,
-        'CONFIRMED',
-        str(current_user.get('id') or current_user.get('email', 'merchant')),
-        location=location_value or 'Merchant confirmation',
-        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-    )
-    return {'message': 'Order confirmed.', 'order': serialize_order(latest, include_shipment=True)}
-
-
-@app.post('/orders/{order_id}/confirm')
-def confirm_order_alias(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('ADMIN')),
-):
-    return confirm_order(order_id, payload, current_user)
-
-
-@app.patch('/orders/{order_id}/reject')
-def reject_order(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('ADMIN')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    location_value = (payload.current_location if payload and payload.current_location else 'Merchant rejection').strip() if payload else 'Merchant rejection'
-    latest = apply_order_status_update(
-        order,
-        'REJECTED',
-        str(current_user.get('id') or current_user.get('email', 'merchant')),
-        location=location_value or 'Merchant rejection',
-        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-    )
-    orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
-        {'$set': {'rejection_reason': str(payload.reason if payload and payload.reason else '').strip(), 'updated_at': now_utc()}},
-    )
-    return {'message': 'Order rejected.', 'order': serialize_order(latest, include_shipment=True)}
-
-
-@app.patch('/orders/{order_id}/pack')
-def pack_order(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    location_value = (payload.current_location if payload and payload.current_location else 'Warehouse packing unit').strip() if payload else 'Warehouse packing unit'
-    latest = apply_order_status_update(
-        order,
-        'PACKED',
-        str(current_user.get('id') or current_user.get('email', 'ops')),
-        location=location_value or 'Warehouse packing unit',
-        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-    )
-    
-    # AUTO-CREATE SHIPMENT: Create shipment when packed
-    shipment = create_shipment_from_order(latest, current_user, status='CREATED')
-    
-    # AUTO-DISPATCH IMMEDIATELY: Dispatch the shipment right away
-    updated_shipment = transition_shipment_status(
-        shipment,
-        'DISPATCHED',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'system')),
-        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        location='Warehouse dispatch',
-    )
-    
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or latest
-    return {'message': 'Order packed, shipment created and dispatched automatically.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
-
-
-@app.post('/orders/{order_id}/pack')
-def pack_order_alias(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    return pack_order(order_id, payload, current_user)
-
-
-@app.patch('/orders/{order_id}/ship')
-def ship_order(
-    order_id: str,
-    payload: ShipmentUpdateRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
-    if not shipment:
-        shipment = create_shipment_from_order(order, current_user, status='CREATED')
-
-    location_value = payload.current_location.strip() if payload and payload.current_location else 'Warehouse dispatch'
-    updated_shipment = transition_shipment_status(
-        shipment,
-        'DISPATCHED',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'ops')),
-        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        location=location_value,
-    )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
-    return {'message': 'Shipment dispatched.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
-
-
-@app.patch('/orders/{order_id}/out-for-delivery')
-def mark_out_for_delivery(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
-        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
-
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
-    if not shipment:
-        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
-
-    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-    if shipment_status == 'OUT_FOR_DELIVERY':
-        raise HTTPException(status_code=409, detail='Order is already out for delivery.')
-    # Allow starting delivery from DISPATCHED, IN_TRANSIT, or ARRIVED_AT_CITY
-    valid_start_statuses = {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY'}
-    if shipment_status not in valid_start_statuses:
-        raise HTTPException(status_code=400, detail='Order can only move to out for delivery after the shipment has been dispatched.')
-
-    location_value = (payload.current_location if payload and payload.current_location else 'Last mile route').strip() if payload else 'Last mile route'
-    actor_id = str(current_user.get('id') or current_user.get('email', 'delivery'))
-    performer_email = str(current_user.get('email', 'system@local')).strip().lower()
-
-    # Auto-advance shipment through intermediate stages to reach OUT_FOR_DELIVERY
-    shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or shipment
-    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-    advance_stages = []
-    if shipment_status == 'DISPATCHED':
-        advance_stages = ['IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
-    elif shipment_status == 'IN_TRANSIT':
-        advance_stages = ['ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
-    else:
-        advance_stages = ['OUT_FOR_DELIVERY']
-
-    updated_shipment = shipment
-    for stage in advance_stages:
-        try:
-            updated_shipment = transition_shipment_status(
-                updated_shipment,
-                stage,
-                actor_id=actor_id,
-                performer_role='DELIVERY_ASSOCIATE',
-                performer_email=performer_email,
-                location=location_value if stage == 'OUT_FOR_DELIVERY' else (updated_shipment.get('current_location') or 'Hub network'),
-            )
-            updated_shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or updated_shipment
-        except Exception:
-            break
-    orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
-        {
-            '$set': {
-                'delivery_meta.out_for_delivery_at': now_utc().isoformat(),
-                'delivery_meta.last_action': 'OUT_FOR_DELIVERY',
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
-    return {'message': 'Order marked out for delivery.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
-
-
-@app.patch('/orders/{order_id}/deliver')
-def mark_delivered(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
-):
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
-        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
-
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
-    if not shipment:
-        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
-
-    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-    if shipment_status == 'DELIVERED':
-        raise HTTPException(status_code=409, detail='Order is already delivered.')
-    if shipment_status != 'OUT_FOR_DELIVERY':
-        raise HTTPException(status_code=400, detail='Order can only be delivered from OUT_FOR_DELIVERY shipment status.')
-
-    location_value = (payload.current_location if payload and payload.current_location else 'Customer address').strip() if payload else 'Customer address'
-    updated_shipment = transition_shipment_status(
-        shipment,
-        'DELIVERED',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'delivery')),
-        performer_role='DELIVERY_ASSOCIATE',
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        location=location_value or 'Customer address',
-    )
-    orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
-        {
-            '$set': {
-                'delivery_meta.delivered_at': now_utc().isoformat(),
-                'delivery_meta.last_action': 'DELIVERED',
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
-    return {'message': 'Order delivered.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
-
-
-@app.post('/orders/{order_id}/delivered')
-def mark_delivered_alias(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
-):
-    return mark_delivered(order_id, payload, current_user)
-
-
-@app.post('/orders/{order_id}/start-delivery')
-def mark_out_for_delivery_alias(
-    order_id: str,
-    payload: OrderActionRequest | None = None,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
-):
-    # Delegate to the main function which has proper shipment status validation
-    return mark_out_for_delivery(order_id, payload, current_user)
+    query = {'$or': [{'user_id': user_id}, {'customer_id': user_id}, {'customer_email': user_email}]}
+    orders = list(orders_collection.find(query).sort('created_at', -1))
+    return serialize_orders_batch(orders)
 
 
 @app.get('/admin/dashboard-stats')
-def get_admin_dashboard_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
+def get_admin_dashboard_stats(
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF', 'MERCHANT')),
+):
     now = now_utc()
-    thirty_days_ago = now - timedelta(days=30)
-    
-    if role == 'SUPER_ADMIN':
-        orders = list(orders_collection.find(
-            active_orders_filter(), 
-            {'_id': 0, 'created_at': 1, 'total_amount': 1, 'customer_email': 1, 'status': 1}
-        ))
-    else:
-        merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-        merchant_product_ids = {p['id'] for p in merchant_products}
-        
-        matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1, 'product_id': 1, 'quantity': 1}))
-        products_prices = {p['id']: float(p.get('price') or 0) for p in products_collection.find({'id': {'$in': list(merchant_product_ids)}})}
-        
-        order_totals = {}
-        for item in matching_items:
-            oid = item.get('order_id')
-            pid = item.get('product_id')
-            qty = int(item.get('quantity') or 0)
-            price = products_prices.get(pid, 0.0)
-            order_totals[oid] = order_totals.get(oid, 0.0) + (price * qty)
-            
-        matching_order_ids = list(order_totals.keys())
-        raw_orders = list(orders_collection.find(
-            active_orders_filter({'order_id': {'$in': matching_order_ids}}),
-            {'_id': 0, 'order_id': 1, 'created_at': 1, 'customer_email': 1, 'status': 1}
-        ))
-        
-        orders = []
-        for o in raw_orders:
-            o['total_amount'] = order_totals.get(o.get('order_id'), 0.0)
-            orders.append(o)
-            
-    valid_orders = []
-    for o in orders:
-        cat = o.get('created_at')
-        if not cat: continue
-        if isinstance(cat, str):
-            try:
-                cat = datetime.fromisoformat(cat.replace('Z', '+00:00'))
-                if cat.tzinfo is None:
-                    cat = cat.replace(tzinfo=UTC)
-            except Exception:
-                continue
-        elif isinstance(cat, datetime):
-            if cat.tzinfo is None:
-                cat = cat.replace(tzinfo=UTC)
-                
-        if cat >= thirty_days_ago:
-            o['created_at'] = cat
-            valid_orders.append(o)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
 
-    def get_stats_for_window(window_start, window_end, intervals_count):
-        window_orders = [o for o in valid_orders if window_start <= o['created_at'] <= window_end]
-        successful_orders = [o for o in window_orders if str(o.get('status')).upper() != 'CANCELLED']
+    # Fetch and parse orders
+    all_orders = list(orders_collection.find({'status': {'$nin': ['CANCELLED', 'REJECTED']}}))
+    for o in all_orders:
+        created = o.get('created_at')
+        if isinstance(created, str):
+            try:
+                val = created.replace('Z', '+00:00')
+                o['_parsed_created_at'] = datetime.fromisoformat(val)
+            except Exception:
+                o['_parsed_created_at'] = now
+        elif isinstance(created, datetime):
+            o['_parsed_created_at'] = created
+        else:
+            o['_parsed_created_at'] = now
         
-        total_sales = sum(float(o.get('total_amount') or 0) for o in successful_orders)
-        order_count = len(successful_orders)
-        unique_customers = len(set(o.get('customer_email', '').lower() for o in window_orders if o.get('customer_email')))
-        
-        interval_duration = (window_end - window_start) / intervals_count
-        sparkline_sales = [0] * intervals_count
-        sparkline_orders = [0] * intervals_count
-        sparkline_customers_sets = [set() for _ in range(intervals_count)]
-        
-        for o in successful_orders:
-            delta = o['created_at'] - window_start
-            idx = int(delta / interval_duration)
-            if idx >= intervals_count: idx = intervals_count - 1
-            sparkline_sales[idx] += float(o.get('total_amount') or 0)
-            sparkline_orders[idx] += 1
-            if o.get('customer_email'):
-                sparkline_customers_sets[idx].add(o.get('customer_email').lower())
-                
-        sparkline_customers = [len(s) for s in sparkline_customers_sets]
-        
-        def format_currency(val):
-            if val >= 100000:
-                return f"Rs. {val/100000:.1f}L"
-            elif val >= 1000:
-                return f"Rs. {val/1000:.1f}k"
-            return f"Rs. {int(val)}"
-            
-        return [
-            {'label': 'Total Sales', 'value': format_currency(total_sales), 'trend': '', 'sparkline': sparkline_sales},
-            {'label': 'Orders', 'value': str(order_count), 'trend': '', 'sparkline': sparkline_orders},
-            {'label': 'New Customers', 'value': str(unique_customers), 'trend': '', 'sparkline': sparkline_customers},
+        if o['_parsed_created_at'].tzinfo is None:
+            o['_parsed_created_at'] = o['_parsed_created_at'].replace(tzinfo=timezone.utc)
+
+    def get_metrics_for_period(orders_list, start_time: datetime, end_time: datetime):
+        period_orders = [o for o in orders_list if start_time <= o['_parsed_created_at'] < end_time]
+        rev = sum(o.get('total_amount') or o.get('order_value') or 0 for o in period_orders)
+        cnt = len(period_orders)
+        avg = rev / cnt if cnt > 0 else 0
+        return rev, cnt, avg
+
+    def get_sparkline_for_period(orders_list, start_time: datetime, end_time: datetime, num_intervals: int, metric_type: str):
+        interval_delta = (end_time - start_time) / num_intervals
+        values = []
+        for i in range(num_intervals):
+            t1 = start_time + i * interval_delta
+            t2 = t1 + interval_delta
+            interval_orders = [o for o in orders_list if t1 <= o['_parsed_created_at'] < t2]
+            if metric_type == 'revenue':
+                val = sum(o.get('total_amount') or o.get('order_value') or 0 for o in interval_orders)
+            elif metric_type == 'orders':
+                val = len(interval_orders)
+            else:
+                rev = sum(o.get('total_amount') or o.get('order_value') or 0 for o in interval_orders)
+                val = rev / len(interval_orders) if len(interval_orders) > 0 else 0
+            values.append(float(val))
+        return values
+
+    def calculate_trend(current_val, previous_val, period_name="yesterday"):
+        if previous_val == 0:
+            if current_val > 0:
+                return f"+100% from {period_name}"
+            return f"0% from {period_name}"
+        pct = ((current_val - previous_val) / previous_val) * 100
+        sign = "+" if pct >= 0 else ""
+        return f"{sign}{pct:.1f}% from {period_name}"
+
+    # TODAY
+    t_rev, t_ord, t_avg = get_metrics_for_period(all_orders, now - timedelta(days=1), now)
+    pt_rev, pt_ord, pt_avg = get_metrics_for_period(all_orders, now - timedelta(days=2), now - timedelta(days=1))
+    t_spark_rev = get_sparkline_for_period(all_orders, now - timedelta(days=1), now, 10, 'revenue')
+    t_spark_ord = get_sparkline_for_period(all_orders, now - timedelta(days=1), now, 10, 'orders')
+    t_spark_avg = get_sparkline_for_period(all_orders, now - timedelta(days=1), now, 10, 'avg')
+    
+    # WEEK
+    w_rev, w_ord, w_avg = get_metrics_for_period(all_orders, now - timedelta(days=7), now)
+    pw_rev, pw_ord, pw_avg = get_metrics_for_period(all_orders, now - timedelta(days=14), now - timedelta(days=7))
+    w_spark_rev = get_sparkline_for_period(all_orders, now - timedelta(days=7), now, 7, 'revenue')
+    w_spark_ord = get_sparkline_for_period(all_orders, now - timedelta(days=7), now, 7, 'orders')
+    w_spark_avg = get_sparkline_for_period(all_orders, now - timedelta(days=7), now, 7, 'avg')
+    
+    # MONTH
+    m_rev, m_ord, m_avg = get_metrics_for_period(all_orders, now - timedelta(days=30), now)
+    pm_rev, pm_ord, pm_avg = get_metrics_for_period(all_orders, now - timedelta(days=60), now - timedelta(days=30))
+    m_spark_rev = get_sparkline_for_period(all_orders, now - timedelta(days=30), now, 10, 'revenue')
+    m_spark_ord = get_sparkline_for_period(all_orders, now - timedelta(days=30), now, 10, 'orders')
+    m_spark_avg = get_sparkline_for_period(all_orders, now - timedelta(days=30), now, 10, 'avg')
+
+    statsByRange = {
+        'TODAY': [
+            { 'label': 'Revenue', 'value': f"Rs. {int(t_rev)}", 'trend': calculate_trend(t_rev, pt_rev, 'yesterday'), 'sparkline': t_spark_rev },
+            { 'label': 'Orders', 'value': str(t_ord), 'trend': calculate_trend(t_ord, pt_ord, 'yesterday'), 'sparkline': t_spark_ord },
+            { 'label': 'Average Value', 'value': f"Rs. {int(t_avg)}", 'trend': calculate_trend(t_avg, pt_avg, 'yesterday'), 'sparkline': t_spark_avg }
+        ],
+        'WEEK': [
+            { 'label': 'Revenue', 'value': f"Rs. {int(w_rev)}", 'trend': calculate_trend(w_rev, pw_rev, 'last week'), 'sparkline': w_spark_rev },
+            { 'label': 'Orders', 'value': str(w_ord), 'trend': calculate_trend(w_ord, pw_ord, 'last week'), 'sparkline': w_spark_ord },
+            { 'label': 'Average Value', 'value': f"Rs. {int(w_avg)}", 'trend': calculate_trend(w_avg, pw_avg, 'last week'), 'sparkline': w_spark_avg }
+        ],
+        'MONTH': [
+            { 'label': 'Revenue', 'value': f"Rs. {int(m_rev)}", 'trend': calculate_trend(m_rev, pm_rev, 'last month'), 'sparkline': m_spark_rev },
+            { 'label': 'Orders', 'value': str(m_ord), 'trend': calculate_trend(m_ord, pm_ord, 'last month'), 'sparkline': m_spark_ord },
+            { 'label': 'Average Value', 'value': f"Rs. {int(m_avg)}", 'trend': calculate_trend(m_avg, pm_avg, 'last month'), 'sparkline': m_spark_avg }
         ]
-
-    today_start = now - timedelta(days=1)
-    week_start = now - timedelta(days=7)
-    month_start = now - timedelta(days=30)
-
-    stats = {
-        'TODAY': get_stats_for_window(today_start, now, 6),
-        'WEEK': get_stats_for_window(week_start, now, 7),
-        'MONTH': get_stats_for_window(month_start, now, 6),
     }
 
-    chart_revenue = []
-    chart_orders = []
-    
+    # chartData.revenue
+    revenue_chart = []
+    for i in range(29, -1, -1):
+        day_start = now - timedelta(days=i+1)
+        day_end = now - timedelta(days=i)
+        day_str = day_end.strftime('%b %d')
+        period_orders = [o for o in all_orders if day_start <= o['_parsed_created_at'] < day_end]
+        rev = sum(o.get('total_amount') or o.get('order_value') or 0 for o in period_orders)
+        revenue_chart.append({'day': day_str, 'revenue': float(rev)})
+
+    # chartData.orders
+    orders_chart = []
     for i in range(6, -1, -1):
         day_start = now - timedelta(days=i+1)
         day_end = now - timedelta(days=i)
-        day_orders = [o for o in valid_orders if day_start <= o['created_at'] < day_end and str(o.get('status')).upper() != 'CANCELLED']
-        day_name = day_start.strftime('%a')
-        chart_revenue.append({'day': day_name, 'revenue': sum(float(o.get('total_amount') or 0) for o in day_orders)})
-        chart_orders.append({'day': day_name, 'orders': len(day_orders)})
+        day_str = day_end.strftime('%b %d')
+        period_orders = [o for o in all_orders if day_start <= o['_parsed_created_at'] < day_end]
+        orders_chart.append({'day': day_str, 'orders': len(period_orders)})
 
     return {
-        'statsByRange': stats,
+        'statsByRange': statsByRange,
         'chartData': {
-            'revenue': chart_revenue,
-            'orders': chart_orders
-        }
-    }
-
-@app.get('/admin/analytics-stats')
-def get_admin_analytics_stats(current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
-    now = now_utc()
-    year_ago = now - timedelta(days=365)
-    
-    if role == 'SUPER_ADMIN':
-        orders = list(orders_collection.find(
-            active_orders_filter(), 
-            {'_id': 0, 'created_at': 1, 'total_amount': 1, 'status': 1}
-        ))
-    else:
-        merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-        merchant_product_ids = {p['id'] for p in merchant_products}
-        
-        matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1, 'product_id': 1, 'quantity': 1}))
-        products_prices = {p['id']: float(p.get('price') or 0) for p in products_collection.find({'id': {'$in': list(merchant_product_ids)}})}
-        
-        order_totals = {}
-        for item in matching_items:
-            oid = item.get('order_id')
-            pid = item.get('product_id')
-            qty = int(item.get('quantity') or 0)
-            price = products_prices.get(pid, 0.0)
-            order_totals[oid] = order_totals.get(oid, 0.0) + (price * qty)
-            
-        matching_order_ids = list(order_totals.keys())
-        raw_orders = list(orders_collection.find(
-            active_orders_filter({'order_id': {'$in': matching_order_ids}}),
-            {'_id': 0, 'order_id': 1, 'created_at': 1, 'status': 1}
-        ))
-        
-        orders = []
-        for o in raw_orders:
-            o['total_amount'] = order_totals.get(o.get('order_id'), 0.0)
-            orders.append(o)
-            
-    valid_orders = []
-    for o in orders:
-        cat = o.get('created_at')
-        if not cat: continue
-        if isinstance(cat, str):
-            try:
-                cat = datetime.fromisoformat(cat.replace('Z', '+00:00'))
-                if cat.tzinfo is None:
-                    cat = cat.replace(tzinfo=UTC)
-            except Exception:
-                continue
-        elif isinstance(cat, datetime):
-            if cat.tzinfo is None:
-                cat = cat.replace(tzinfo=UTC)
-                
-        if cat >= year_ago:
-            o['created_at'] = cat
-            valid_orders.append(o)
-
-    def calculate_metrics(days_ago):
-        start_date = now - timedelta(days=days_ago)
-        period_orders = [o for o in valid_orders if start_date <= o['created_at'] <= now]
-        successful_orders = [o for o in period_orders if str(o.get('status')).upper() != 'CANCELLED']
-        
-        orders_count = len(successful_orders)
-        revenue = sum(float(o.get('total_amount') or 0) for o in successful_orders)
-        visitors = orders_count * 15 + int(days_ago * 5)
-        
-        return {
-            'visitors': visitors,
-            'orders': orders_count,
-            'revenue': revenue
-        }
-
-    metrics = {
-        'WEEKLY': calculate_metrics(7),
-        'MONTHLY': calculate_metrics(30),
-        'YEARLY': calculate_metrics(365),
-    }
-
-    chart_revenue = []
-    
-    for i in range(6, -1, -1):
-        day_start = now - timedelta(days=i+1)
-        day_end = now - timedelta(days=i)
-        day_orders = [o for o in valid_orders if day_start <= o['created_at'] < day_end and str(o.get('status')).upper() != 'CANCELLED']
-        day_name = day_start.strftime('%a')
-        chart_revenue.append({'day': day_name, 'revenue': sum(float(o.get('total_amount') or 0) for o in day_orders)})
-
-    return {
-        'metricsByRange': metrics,
-        'chartData': {
-            'revenue': chart_revenue
+            'revenue': revenue_chart,
+            'orders': orders_chart
         }
     }
 
 
 @app.get('/admin/orders')
-def get_admin_orders(current_user: dict = Depends(require_roles('admin', 'merchant'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
-    if role == 'SUPER_ADMIN':
-        orders = list(orders_collection.find(active_orders_filter()).sort('created_at', -1))
-        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
-        
-    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-    merchant_product_ids = {p['id'] for p in merchant_products}
-    
-    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
-    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
-    
-    orders = list(orders_collection.find(active_orders_filter({'order_id': {'$in': matching_order_ids}})).sort('created_at', -1))
-    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
-
-
-@app.post('/admin/orders/purge')
-def purge_orders(
-    payload: PurgeOrdersRequest,
-    current_user: dict = Depends(require_roles('admin', 'merchant')),
+def get_admin_orders(
+    status_filter: str | None = None,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    _ = current_user
-
-    requested_statuses = [str(value or '').strip().upper() for value in (payload.statuses or []) if str(value or '').strip()]
-    normalized_statuses = []
-    for status_value in requested_statuses:
-        if status_value == 'COMPLETED':
-            normalized_statuses.append('DELIVERED')
-            continue
-        normalized_statuses.append(normalize_order_status(status_value, fallback=status_value))
-    normalized_statuses = sorted(set(normalized_statuses))
-
-    delete_all = bool(payload.delete_all)
-    if not delete_all and not normalized_statuses:
-        raise HTTPException(status_code=400, detail='Provide statuses or set delete_all=true.')
-
-    query = {} if delete_all else {'status': {'$in': normalized_statuses}}
-    orders = list(orders_collection.find(active_orders_filter(query), {'_id': 0, 'order_id': 1, 'shipment_id': 1, 'status': 1}))
-    order_ids = [order.get('order_id') for order in orders if order.get('order_id')]
-
-    deleted = {
-        'orders': 0,
-        'order_items': 0,
-        'delivery_logs': 0,
-        'order_status_history': 0,
-        'payments': 0,
-        'returns': 0,
-        'notifications': 0,
-        'shipment_items': 0,
-        'shipments': 0,
-    }
-
-    if order_ids:
-        deleted['orders'] = orders_collection.update_many(
-            {'order_id': {'$in': order_ids}},
-            {
-                '$set': {
-                    'is_deleted': True,
-                    'deleted_at': now_utc(),
-                    'updated_at': now_utc(),
-                    'updated_by': str(current_user.get('id') or current_user.get('email') or 'admin-purge'),
-                    'updated_by_role': normalize_role(current_user.get('role', 'ADMIN')),
-                    'updated_by_email': str(current_user.get('email', 'system@local')).strip().lower(),
-                }
-            },
-        ).modified_count
-
-    orphaned_shipments = []
-    for shipment in shipments_collection.find({}, {'_id': 0, 'shipment_id': 1}):
-        shipment_id = shipment.get('shipment_id')
-        if not shipment_id:
-            continue
-        if shipment_items_collection.count_documents({'shipment_id': shipment_id}) == 0:
-            orphaned_shipments.append(shipment_id)
-
-    if orphaned_shipments:
-        deleted['shipments'] = shipments_collection.delete_many({'shipment_id': {'$in': orphaned_shipments}}).deleted_count
-
-    return {
-        'message': 'Orders purged successfully.',
-        'delete_all': delete_all,
-        'requested_statuses': requested_statuses,
-        'normalized_statuses': normalized_statuses,
-        'matched_orders': len(order_ids),
-        'deleted': deleted,
-    }
+    query = {}
+    if status_filter:
+        query['status'] = status_filter
+    
+    orders = list(orders_collection.find(query).sort('created_at', -1))
+    return serialize_orders_batch(orders)
 
 
-@app.post('/admin/orders/data-cleanup')
-def cleanup_order_and_shipment_data(
-    payload: OrderDataCleanupRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'SUPER_ADMIN')),
+@app.get('/orders/{order_id}/tracking')
+def get_order_tracking(
+    order_id: str,
+    current_user: dict = Depends(get_current_user_optional),
 ):
-    _ = current_user
-    mode = str(payload.mode or 'RESET').strip().upper()
-    demo_only = bool(payload.demo_only)
+    order = orders_collection.find_one({'order_id': order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    return serialize_order(order)
 
-    if mode not in {'RESET', 'DELETE'}:
-        raise HTTPException(status_code=400, detail='mode must be RESET or DELETE.')
 
-    order_filter = {'customer_email': 'customer.demo@veloura.com'} if demo_only else {}
-    orders = list(orders_collection.find(active_orders_filter(order_filter), {'_id': 0, 'order_id': 1, 'created_at': 1}))
-    order_ids = [str(order.get('order_id') or '').strip() for order in orders if str(order.get('order_id') or '').strip()]
-    related_shipment_ids = []
-    if order_ids:
-        related_shipment_ids = [
-            str(entry.get('shipment_id') or '').strip()
-            for entry in shipment_items_collection.find({'order_id': {'$in': order_ids}}, {'_id': 0, 'shipment_id': 1})
-            if str(entry.get('shipment_id') or '').strip()
-        ]
-        related_shipment_ids = sorted(set(related_shipment_ids))
+@app.post('/orders/{order_id}/{action}')
+@app.put('/orders/{order_id}/{action}')
+@app.patch('/orders/{order_id}/{action}')
+def handle_order_action(
+    order_id: str,
+    action: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    actor_id = current_user.get('id')
+    role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    email = current_user.get('email', 'system@local')
 
-    if mode == 'DELETE':
-        deleted = {
-            'order_items': 0,
-            'delivery_logs': 0,
-            'order_status_history': 0,
-            'payments': 0,
-            'returns': 0,
-            'notifications': 0,
-            'shipment_items': 0,
-            'orders': 0,
-            'shipments': 0,
-        }
-        if order_ids:
-            deleted['orders'] = orders_collection.update_many(
-                {'order_id': {'$in': order_ids}},
-                {
-                    '$set': {
-                        'is_deleted': True,
-                        'deleted_at': now_utc(),
-                        'updated_at': now_utc(),
-                        'updated_by': str(current_user.get('id') or current_user.get('email') or 'admin-cleanup'),
-                        'updated_by_role': normalize_role(current_user.get('role', 'ADMIN')),
-                        'updated_by_email': str(current_user.get('email', 'system@local')).strip().lower(),
-                    }
-                },
-            ).modified_count
-        return {
-            'message': 'Order and shipment data soft-deleted successfully.',
-            'mode': mode,
-            'demo_only': demo_only,
-            'matched_orders': len(order_ids),
-            'deleted': deleted,
-        }
+    order = orders_collection.find_one({'order_id': order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found.")
 
-    reset_count = 0
-    for order in orders:
-        order_id = str(order.get('order_id') or '').strip()
-        if not order_id:
-            continue
-
-        created_at = order.get('created_at') or now_utc()
-        placed_iso = created_at.isoformat() if isinstance(created_at, datetime) else now_utc().isoformat()
-        orders_collection.update_one(
-            {'order_id': order_id},
-            {
-                '$set': {
-                    'status': 'PLACED',
-                    'status_timestamps': {'PLACED': placed_iso},
-                    'shipment_id': None,
-                    'assigned_delivery_partner': None,
-                    'assigned_delivery_id': None,
-                    'updated_at': now_utc(),
-                    'updated_by': 'admin-cleanup',
-                    'updated_by_role': 'SYSTEM',
-                    'updated_by_email': 'system@local',
-                }
-            },
-        )
-        order_status_history_collection.delete_many({'order_id': order_id})
-        delivery_logs_collection.delete_many({'order_id': order_id})
-        append_order_status_history(
-            order_id,
-            'PLACED',
-            'admin-cleanup',
-            performer_role='SYSTEM',
-            performer_email='system@local',
-            location='Order reset cleanup',
-        )
-        append_delivery_log(
-            order_id,
-            'PLACED',
-            'admin-cleanup',
-            location='Order reset cleanup',
-            performer_role='SYSTEM',
-            performer_email='system@local',
-        )
-        reset_count += 1
-
-    updated_shipments = 0
-    if not demo_only or related_shipment_ids:
-        shipment_filter = {'shipment_id': {'$in': related_shipment_ids}} if demo_only else {}
-        updated_shipments = shipments_collection.update_many(
-            shipment_filter,
-            {
-                '$set': {
-                    'status': 'CREATED',
-                    'updated_at': now_utc(),
-                }
-            },
-        ).modified_count
-
-    if order_ids:
-        shipment_items_collection.delete_many({'order_id': {'$in': order_ids}})
-
-    return {
-        'message': 'Order and shipment data reset successfully.',
-        'mode': mode,
-        'demo_only': demo_only,
-        'orders_reset': reset_count,
-        'shipments_updated': updated_shipments,
+    action_lower = action.lower().strip()
+    action_status_map = {
+        'confirm': 'CONFIRMED',
+        'reject': 'REJECTED',
+        'pack': 'PACKED',
+        'cancel': 'CANCELLED',
+        'start-delivery': 'SHIPPED',
+        'out-for-delivery': 'OUT_FOR_DELIVERY',
+        'delivered': 'DELIVERED',
     }
 
+    target_status = action_status_map.get(action_lower)
+    if not target_status:
+        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
-@app.get('/operations/orders')
-def get_operations_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
-    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
-        orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED'})).sort('created_at', -1))
-        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
-        
-    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-    merchant_product_ids = {p['id'] for p in merchant_products}
-    
-    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
-    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
-    
-    orders = list(orders_collection.find(active_orders_filter({'status': 'CONFIRMED', 'order_id': {'$in': matching_order_ids}})).sort('created_at', -1))
-    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
+    # For delivery actions, update shipment status as well if there is an active shipment
+    shipment_id = order.get('shipment_id')
+    if shipment_id and target_status in {'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'}:
+        shipment = shipments_collection.find_one({'shipment_id': shipment_id})
+        if shipment:
+            shipment_status_map = {
+                'SHIPPED': 'DISPATCHED',
+                'OUT_FOR_DELIVERY': 'OUT_FOR_DELIVERY',
+                'DELIVERED': 'DELIVERED',
+            }
+            try:
+                transition_shipment_status(
+                    shipment,
+                    shipment_status_map[target_status],
+                    actor_id,
+                    role,
+                    email,
+                    location=(payload.current_location if payload else None),
+                )
+            except Exception as e:
+                print(f"[WARN] Syncing shipment status failed: {e}")
+
+    updated_order = apply_order_status_update(
+        order,
+        target_status,
+        actor_id,
+        location=(payload.current_location if payload else ""),
+        performer_role=role,
+        performer_email=email,
+    )
+    return {
+        'message': f"Order status updated to {target_status}.",
+        'order': serialize_order(updated_order),
+    }
 
 
 @app.put('/admin/orders/{order_id}/assign')
 def assign_delivery_partner(
     order_id: str,
     payload: AssignDeliveryRequest,
-    current_user: dict = Depends(require_roles('admin', 'merchant')),
-):
-    _ = current_user
-    delivery_email = payload.delivery_partner_email.strip().lower()
-    partner = users_collection.find_one({'email': delivery_email})
-
-    if (
-        not partner
-        or normalize_role(partner.get('role', '')) != 'DELIVERY_ASSOCIATE'
-        or normalize_account_status(partner.get('status', 'ACTIVE')) != 'ACTIVE'
-    ):
-        raise HTTPException(status_code=404, detail='Delivery partner account not found.')
-
-    result = orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
-        {
-            '$set': {
-                'assigned_delivery_partner': delivery_email,
-                'assigned_delivery_id': partner.get('id'),
-                'updated_at': now_utc(),
-            }
-        },
-    )
-
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    return {'message': 'Delivery partner assigned.', 'order': serialize_order(order, include_shipment=True)}
-
-
-@app.post('/shipments')
-def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))):
-    if not payload.order_ids:
-        raise HTTPException(status_code=400, detail='Select at least one order.')
-
-    unique_order_ids = list(dict.fromkeys(payload.order_ids))
-    orders = list(orders_collection.find(active_orders_filter({'order_id': {'$in': unique_order_ids}})))
-    if len(orders) != len(unique_order_ids):
-        raise HTTPException(status_code=404, detail='One or more orders were not found.')
-
-    invalid_orders = [
-        str(order.get('order_id') or '').strip()
-        for order in orders
-        if normalize_order_status(order.get('status', 'PLACED')) != 'PACKED'
-    ]
-    if invalid_orders:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Shipment creation only supports PACKED orders. Invalid order(s): {', '.join(invalid_orders)}",
-        )
-
-    already_assigned_orders = [
-        str(order.get('order_id') or '').strip()
-        for order in orders
-        if str(order.get('shipment_id') or '').strip()
-    ]
-    if already_assigned_orders:
-        raise HTTPException(
-            status_code=409,
-            detail=f"These orders are already attached to a shipment: {', '.join(already_assigned_orders)}",
-        )
-
-    max_orders = normalize_max_orders_per_shipment(payload.max_orders_per_shipment)
-    order_batches = group_orders_for_shipments(orders, max_orders)
-    if not order_batches:
-        raise HTTPException(status_code=400, detail='Unable to group selected orders for shipment creation.')
-
-    explicit_courier = str(payload.courier_name or '').strip()
-    explicit_tracking = str(payload.tracking_id or '').strip()
-    explicit_vehicle_type = normalize_shipment_vehicle_type(payload.vehicle_type, fallback='VAN')
-    explicit_notes = str(payload.shipment_notes or '').strip()
-    requested_destination_state = str(payload.destination_state or '').strip()
-    requested_destination_city = str(payload.destination_city or '').strip()
-
-    created_shipments = []
-    for batch_index, batch_orders in enumerate(order_batches):
-        primary_order = batch_orders[0]
-        destination = get_order_destination_location(primary_order)
-        warehouse = get_warehouse_location(primary_order)
-        destination_state = requested_destination_state or str(destination.get('state') or '').strip()
-        destination_city = requested_destination_city or str(destination.get('city') or '').strip()
-        destination_label = ', '.join([part for part in [destination_city, destination_state] if part])
-
-        shipment_id = f"SHP-{uuid4().hex[:10].upper()}"
-        tracking_id = build_tracking_id_for_batch(explicit_tracking, batch_index)
-        courier_name = explicit_courier if explicit_courier and explicit_courier != 'Assigned courier' else choose_courier_name(warehouse, destination)
-        route = build_shipment_route(warehouse, destination)
-        current_location, next_location = build_shipment_location(route, 'CREATED', {'source_warehouse': warehouse.get('warehouse_id')})
-
-        shipments_collection.insert_one(
-            {
-                'id': shipment_id,
-                'shipment_id': shipment_id,
-                'source_warehouse': warehouse.get('city') and f"{warehouse.get('city')} Warehouse" or warehouse.get('warehouse_id') or 'Warehouse',
-                'source_warehouse_id': warehouse.get('warehouse_id'),
-                'destination_pincode': sanitize_pincode(primary_order.get('destination_pincode', '')),
-                'destination_city': destination_city,
-                'destination_state': destination_state,
-                'tracking_id': tracking_id,
-                'warehouse_id': payload.warehouse_id or warehouse.get('warehouse_id'),
-                'status': 'CREATED',
-                'courier_name': courier_name,
-                'destination': destination_label,
-                'vehicle_type': explicit_vehicle_type,
-                'shipment_notes': explicit_notes,
-                'current_location': current_location,
-                'next_location': next_location,
-                'assigned_partner_id': None,
-                'assigned_partner_email': None,
-                'route': route,
-                'created_at': now_utc(),
-                'updated_at': now_utc(),
-                'updated_by': current_user.get('id') or current_user.get('email', 'admin'),
-            }
-        )
-        append_shipment_event(shipment_id, 'CREATED', current_location, 'Shipment created and queued for dispatch.', order_id=primary_order.get('order_id'))
-
-        batch_order_ids = []
-        for order in batch_orders:
-            batch_order_ids.append(order['order_id'])
-            shipment_items_collection.update_one(
-                {'shipment_id': shipment_id, 'order_id': order['order_id']},
-                {
-                    '$set': {
-                        'id': f"SI-{uuid4().hex[:12].upper()}",
-                        'shipment_id': shipment_id,
-                        'order_id': order['order_id'],
-                    }
-                },
-                upsert=True,
-            )
-
-            orders_collection.update_one(
-                {'order_id': order['order_id']},
-                {
-                    '$set': {
-                        'shipment_id': shipment_id,
-                        'assigned_delivery_partner': None,
-                        'assigned_delivery_id': None,
-                        'updated_at': now_utc(),
-                    }
-                },
-            )
-
-            customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip()
-            if customer_id:
-                send_order_notification(
-                    order_id=order['order_id'],
-                    event_type='SHIPMENT_CREATED',
-                    message=f"Great news! Shipment SHP-{shipment_id.replace('SHP-', '')} has been created for order {order['order_id']}.",
-                    user_id=customer_id,
-                    title='📦 Shipment Created'
-                )
-
-        shipment = shipments_collection.find_one({'shipment_id': shipment_id})
-        created_shipments.append(
-            {
-                'shipment': serialize_shipment(shipment),
-                'order_ids': batch_order_ids,
-            }
-        )
-
-    first_shipment = created_shipments[0]['shipment'] if created_shipments else None
-    return {
-        'message': f'Shipment records created. Created {len(created_shipments)} shipment(s).',
-        'shipment': first_shipment,
-        'shipments': created_shipments,
-        'order_ids': unique_order_ids,
-        'shipments_created': len(created_shipments),
-    }
-
-
-@app.post('/shipments/{shipment_id}/dispatch')
-def dispatch_shipment(
-    shipment_id: str,
-    payload: OrderActionRequest | None = None,
     current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    shipment = shipments_collection.find_one({'shipment_id': shipment_id})
-    if not shipment:
-        raise HTTPException(status_code=404, detail='Shipment not found.')
-
-    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
-    if shipment_status == 'DISPATCHED':
-        raise HTTPException(status_code=409, detail='Shipment is already dispatched.')
-    if shipment_status != 'CREATED':
-        raise HTTPException(status_code=400, detail='Shipment can only be dispatched from CREATED status.')
-
-    shipment_orders = list(shipment_items_collection.find({'shipment_id': shipment_id}, {'_id': 0, 'order_id': 1}))
-    order_ids = [str(item.get('order_id') or '').strip() for item in shipment_orders if str(item.get('order_id') or '').strip()]
-    if not order_ids:
-        raise HTTPException(status_code=400, detail='No orders attached to this shipment.')
-
-    location_value = (payload.current_location if payload and payload.current_location else '').strip() or str(shipment.get('current_location') or '').strip() or 'Warehouse dispatch'
-
-    updated_shipment = transition_shipment_status(
-        shipment,
-        'DISPATCHED',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'admin')),
-        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
-        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-        location=location_value,
-    )
-    dispatched_order_ids = order_ids
-    skipped_order_ids: list[str] = []
-
-    return {
-        'message': f"Shipment dispatched. {len(dispatched_order_ids)} order(s) moved to SHIPPED.",
-        'shipment_id': shipment_id,
-        'dispatched_order_ids': dispatched_order_ids,
-        'skipped_order_ids': skipped_order_ids,
-        'shipment': serialize_shipment(updated_shipment),
-    }
-
-
-@app.post('/shipments/auto')
-def auto_create_shipments(payload: AutoCreateShipmentRequest, current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))):
-    packed_orders = list(orders_collection.find(active_orders_filter({'status': 'PACKED'})).sort('created_at', 1))
-    print(f"[AUTO_CREATE_SHIPMENTS] Found {len(packed_orders)} PACKED orders")
-    
-    if not packed_orders:
-        return {
-            'message': 'No packed orders available for auto shipment creation.',
-            'shipments': [],
-            'shipments_created': 0,
-            'order_ids': [],
-        }
-
-    for order in packed_orders:
-        print(f"[AUTO_CREATE_SHIPMENTS] Order {order.get('order_id')}: shipment_id={order.get('shipment_id')}, destination_pincode={order.get('destination_pincode')}")
-        shipping = order.get('shipping_details') or {}
-        print(f"[AUTO_CREATE_SHIPMENTS] Shipping details: city={shipping.get('city')}, state={shipping.get('state')}, pincode={shipping.get('pincode')}")
-
-    order_ids = [order['order_id'] for order in packed_orders]
-    request_payload = CreateShipmentRequest(
-        order_ids=order_ids,
-        status='CREATED',
-        courier_name='Assigned courier',
-        tracking_id='',
-        assigned_delivery_id=None,
-        max_orders_per_shipment=payload.max_orders_per_shipment,
-    )
-    result = create_shipment(request_payload, current_user)
-    print(f"[AUTO_CREATE_SHIPMENTS] Result: {result.get('shipments_created')} shipments created")
-    return result
-
-
-@app.get('/operations/packed-orders')
-def get_operations_packed_orders(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
-    query = {
-        'status': 'PACKED',
-        '$or': [
-            {'shipment_id': {'$exists': False}},
-            {'shipment_id': None},
-            {'shipment_id': ''},
-        ],
-    }
-    
-    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
-        orders = list(orders_collection.find(active_orders_filter(query)).sort('updated_at', -1))
-        return {'orders': [serialize_order(order, include_shipment=True) for order in orders]}
-        
-    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-    merchant_product_ids = {p['id'] for p in merchant_products}
-    
-    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
-    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
-    
-    query['order_id'] = {'$in': matching_order_ids}
-    orders = list(orders_collection.find(active_orders_filter(query)).sort('updated_at', -1))
-    return {'orders': [serialize_order_for_merchant(order, merchant_product_ids, include_shipment=True) for order in orders]}
-
-
-@app.get('/operations/shipments')
-def get_operations_shipments(current_user: dict = Depends(require_roles('OPERATIONS_STAFF', 'ADMIN'))):
-    role = normalize_role(current_user.get('role', ''))
-    merchant_id = str(current_user.get('id') or '').strip()
-    
-    if role == 'OPERATIONS_STAFF' or role == 'SUPER_ADMIN':
-        shipments = list(shipments_collection.find({}).sort('created_at', -1))
-        enriched_shipments = []
-        for shipment in shipments:
-            payload = serialize_shipment(shipment) or {}
-            order_ids = get_shipment_order_ids(str(payload.get('shipment_id') or ''))
-            payload['order_ids'] = order_ids
-            payload['order_count'] = len(order_ids)
-            enriched_shipments.append(payload)
-        return {'shipments': enriched_shipments}
-        
-    merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
-    merchant_product_ids = {p['id'] for p in merchant_products}
-    
-    matching_items = list(order_items_collection.find({'product_id': {'$in': list(merchant_product_ids)}}, {'order_id': 1}))
-    matching_order_ids = list({item['order_id'] for item in matching_items if item.get('order_id')})
-    
-    shipment_items = list(shipment_items_collection.find({'order_id': {'$in': matching_order_ids}}, {'_id': 0, 'shipment_id': 1}))
-    matching_shipment_ids = list({item['shipment_id'] for item in shipment_items if item.get('shipment_id')})
-    
-    shipments = list(shipments_collection.find({'shipment_id': {'$in': matching_shipment_ids}}).sort('created_at', -1))
-    enriched_shipments = []
-    for shipment in shipments:
-        payload = serialize_shipment(shipment) or {}
-        all_order_ids = get_shipment_order_ids(str(payload.get('shipment_id') or ''))
-        filtered_order_ids = [oid for oid in all_order_ids if oid in matching_order_ids]
-        payload['order_ids'] = filtered_order_ids
-        payload['order_count'] = len(filtered_order_ids)
-        enriched_shipments.append(payload)
-    return {'shipments': enriched_shipments}
-
-
-@app.put('/admin/orders/{order_id}/shipment')
-def update_shipment_by_admin(
-    order_id: str,
-    payload: ShipmentUpdateRequest,
-    current_user: dict = Depends(require_roles('admin', 'merchant')),
-):
-    _ = current_user
-    status_value = normalize_order_status(payload.status)
-
-    if status_value != 'SHIPPED':
-        raise HTTPException(status_code=400, detail='Shipment update endpoint only supports transition to SHIPPED.')
-
     order = orders_collection.find_one({'order_id': order_id})
     if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
+        raise HTTPException(status_code=404, detail="Order not found.")
 
-    shipment_id = order.get('shipment_id') or f'SHP-{uuid4().hex[:10].upper()}'
-    shipment = shipments_collection.find_one({'shipment_id': shipment_id})
-    if not shipment:
-        shipment = create_shipment_from_order(order, current_user, status='CREATED')
+    partner_email = payload.delivery_partner_email.strip().lower()
+    partner = users_collection.find_one({'email': partner_email, 'role': 'DELIVERY_ASSOCIATE'})
+    if not partner:
+        raise HTTPException(status_code=404, detail=f"Delivery associate with email {partner_email} not found.")
 
-    shipments_collection.update_one(
-        {'shipment_id': shipment_id},
-        {
-            '$set': {
-                'courier_name': payload.courier_name.strip(),
-                'tracking_id': payload.tracking_id.strip() or f'TRK-{uuid4().hex[:12].upper()}',
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    updated_shipment = transition_shipment_status(
-        shipments_collection.find_one({'shipment_id': shipment_id}) or shipment,
-        'DISPATCHED',
-        actor_id=str(current_user.get('id') or current_user.get('email', 'admin')),
-        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
-        performer_email=current_user.get('email', 'system@local').strip().lower(),
-        location=(payload.current_location or '').strip() or 'Warehouse dispatch',
-    )
-
-    latest = orders_collection.find_one({'order_id': order_id}) or order
-    return {'message': 'Shipment updated.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
-
-
-@app.get('/delivery/orders')
-@app.get('/delivery/assigned')
-def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    email = current_user['email'].strip().lower()
-    user_id = current_user.get('id')
-    
-    # Fetch orders assigned to this delivery partner
-    # Include all statuses from SHIPPED onward, plus DISPATCHED in case of sync lag
-    orders = list(
-        orders_collection.find(
-            active_orders_filter({
-                '$or': [
-                    {'assigned_delivery_partner': email},
-                    {'assigned_delivery_id': user_id},
-                ],
-                'status': {'$in': ['DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
-            })
-        ).sort('updated_at', -1)
-    )
-    
-    enriched_orders = []
-    for order in orders:
-        payload = serialize_order(order, include_shipment=True)
-        
-        shipment_status = str((payload.get('shipment') or {}).get('status') or '').upper()
-        order_status = str(payload.get('status') or '').upper()
-        
-        # Show orders that are assigned to this partner and have been dispatched or further
-        # Include all shipment stages from DISPATCHED onward so partner sees incoming orders
-        valid_shipment_statuses = {'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'}
-        valid_order_statuses = {'DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}
-        
-        if shipment_status not in valid_shipment_statuses and order_status not in valid_order_statuses:
-            continue
-        
-        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
-        customer = users_collection.find_one({'email': str(payload.get('customer_email') or '').strip().lower()}, {'_id': 0}) or {}
-        customer_profile = customer.get('profile_details') if isinstance(customer.get('profile_details'), dict) else {}
-
-        customer_name = str(shipping.get('full_name') or customer.get('full_name') or customer.get('name') or '').strip()
-        customer_phone = sanitize_phone_number(str(shipping.get('phone') or customer.get('phone_number') or customer_profile.get('phone_number') or '').strip())
-        delivery_address = ', '.join(
-            [
-                str(shipping.get('address') or '').strip(),
-                str(shipping.get('city') or '').strip(),
-                str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
-            ]
-        ).strip(', ').strip()
-
-        payload['customer_name'] = customer_name or str(payload.get('customer_email') or 'Customer').split('@')[0]
-        payload['customer_phone'] = customer_phone
-        payload['delivery_address'] = delivery_address
-        payload['order_value'] = float(payload.get('total_amount') or 0)
-
-        delivery_meta = payload.get('delivery_meta') if isinstance(payload.get('delivery_meta'), dict) else {}
-        payload['delivery_meta'] = {
-            'accepted_at': delivery_meta.get('accepted_at'),
-            'picked_at': delivery_meta.get('picked_at'),
-            'out_for_delivery_at': delivery_meta.get('out_for_delivery_at'),
-            'delivered_at': delivery_meta.get('delivered_at'),
-            'failed_at': delivery_meta.get('failed_at'),
-            'rejected_at': delivery_meta.get('rejected_at'),
-        }
-        if payload.get('status') == 'DELIVERED':
-            payload['delivery_queue_state'] = 'COMPLETED'
-        elif payload.get('status') == 'DELIVERY_FAILED':
-            payload['delivery_queue_state'] = 'FAILED'
-        elif delivery_meta.get('accepted_at') or payload.get('status') in {'OUT_FOR_DELIVERY'}:
-            payload['delivery_queue_state'] = 'ACTIVE'
-        else:
-            payload['delivery_queue_state'] = 'ASSIGNED'
-        enriched_orders.append(payload)
-
-    return {'orders': enriched_orders}
-
-
-@app.get('/delivery/pincode-orders')
-def get_delivery_pincode_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    """
-    Returns all active (non-delivered, non-cancelled) orders whose destination_pincode
-    is in the delivery partner's service_pincodes list — regardless of assignment.
-    This lets the partner see and self-assign orders that belong to their coverage area.
-    """
-    email = current_user['email'].strip().lower()
-    user_id = current_user.get('id')
-    profile = normalize_delivery_partner_profile_for_scope(
-        current_user.get('profile_details') or {},
-        is_demo_partner=is_demo_delivery_partner_account(current_user),
-    )
-    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
-
-    if not service_pincodes and not is_delivery_partner_all_india(profile):
-        return {'orders': [], 'message': 'No service pincodes configured in your profile.'}
-
-    # Build the query: only show SHIPPED, DISPATCHED, and OUT_FOR_DELIVERY orders
-    active_statuses = ['SHIPPED', 'DISPATCHED', 'OUT_FOR_DELIVERY']
-    if is_delivery_partner_all_india(profile):
-        pincode_filter = active_orders_filter({'status': {'$in': active_statuses}})
-    else:
-        pincode_filter = active_orders_filter({
-            'destination_pincode': {'$in': service_pincodes},
-            'status': {'$in': active_statuses},
-        })
-
-    orders = list(orders_collection.find(pincode_filter).sort('created_at', -1).limit(100))
-
-    enriched = []
-    for order in orders:
-        payload = serialize_order(order, include_shipment=True)
-        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
-        customer_name = str(shipping.get('full_name') or payload.get('customer_email') or 'Customer').strip()
-        delivery_address = ', '.join(filter(None, [
-            str(shipping.get('address') or '').strip(),
-            str(shipping.get('city') or '').strip(),
-            str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
-        ]))
-        payload['customer_name'] = customer_name
-        payload['delivery_address'] = delivery_address
-        payload['order_value'] = float(payload.get('total_amount') or 0)
-        
-        assigned_to_me = (
-            payload.get('assigned_delivery_partner') == email
-            or payload.get('assigned_delivery_id') == user_id
-        )
-        payload['assigned_to_me'] = assigned_to_me
-        
-        assigned_partner_email = payload.get('assigned_delivery_partner')
-        assigned_partner_id = payload.get('assigned_delivery_id')
-        
-        assigned_to_other = False
-        assigned_to_name = None
-        
-        if assigned_partner_email or assigned_partner_id:
-            if not assigned_to_me:
-                assigned_to_other = True
-                query = {}
-                if assigned_partner_email:
-                    query['email'] = assigned_partner_email.strip().lower()
-                elif assigned_partner_id:
-                    query['id'] = assigned_partner_id
-                
-                partner_doc = users_collection.find_one(query, {'full_name': 1})
-                if partner_doc:
-                    assigned_to_name = partner_doc.get('full_name')
-                else:
-                    assigned_to_name = assigned_partner_email or 'Another Partner'
-
-        payload['assigned_to_other'] = assigned_to_other
-        payload['assigned_to_name'] = assigned_to_name
-        enriched.append(payload)
-
-    return {'orders': enriched}
-
-
-@app.post('/delivery/orders/{order_id}/self-assign')
-def self_assign_delivery_order(order_id: str, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    """
-    Lets a delivery partner self-assign an unassigned order whose destination_pincode
-    is in their service_pincodes list.
-    """
-    email = current_user['email'].strip().lower()
-    user_id = current_user.get('id')
-    profile = normalize_delivery_partner_profile_for_scope(
-        current_user.get('profile_details') or {},
-        is_demo_partner=is_demo_delivery_partner_account(current_user),
-    )
-    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
-
-    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    order_pincode = str(order.get('destination_pincode') or order.get('shipping_details', {}).get('pincode') or '').strip()
-    if not is_delivery_partner_all_india(profile) and order_pincode not in service_pincodes:
-        raise HTTPException(status_code=403, detail='This order is outside your service pincode coverage.')
-
-    # Ensure order has a shipment — create one if missing for backward compatibility
-    if not order.get('shipment_id'):
-        order_status = normalize_order_status(order.get('status', 'PLACED'))
-        
-        # Only auto-create shipment for PACKED or higher status orders
-        if order_status in {'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY'}:
-            try:
-                # Create shipment from order details
-                new_shipment = create_shipment_from_order(order, current_user, status='CREATED')
-                
-                # Auto-dispatch the shipment
-                updated_shipment = transition_shipment_status(
-                    new_shipment,
-                    'DISPATCHED',
-                    actor_id=str(current_user.get('id') or current_user.get('email', 'system')),
-                    performer_role='DELIVERY_ASSOCIATE',
-                    performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
-                    location='Delivery partner accepting order',
-                )
-                
-                # Reload order to get updated shipment_id
-                order = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
-            except Exception as e:
-                import traceback
-                print(f"Error creating shipment for order {order_id}: {str(e)}")
-                traceback.print_exc()
-                raise HTTPException(status_code=500, detail=f'Failed to create shipment: {str(e)}')
-        else:
-            # Order is not yet packed - cannot be assigned to delivery partner
-            raise HTTPException(status_code=400, detail='Order must be confirmed and packed before delivery partner assignment. Contact operations.')
+    partner_id = partner.get('id')
 
     orders_collection.update_one(
-        active_orders_filter({'order_id': order_id}),
+        {'order_id': order_id},
         {
             '$set': {
-                'assigned_delivery_partner': email,
-                'assigned_delivery_id': user_id,
+                'assigned_delivery_id': partner_id,
+                'assigned_delivery_partner': partner_email,
                 'delivery_meta.assigned_at': now_utc().isoformat(),
-                'delivery_meta.assignment_source': 'self_assigned',
+                'delivery_meta.assignment_source': 'admin_manual_assign',
                 'updated_at': now_utc(),
             }
         },
     )
-    latest = orders_collection.find_one({'order_id': order_id}) or order
-    return {'message': 'Order self-assigned successfully.', 'order': serialize_order(latest, include_shipment=True)}
+
+    shipment_id = order.get('shipment_id')
+    if shipment_id:
+        shipments_collection.update_one(
+            {'shipment_id': shipment_id},
+            {
+                '$set': {
+                    'assigned_partner_id': partner_id,
+                    'assigned_partner_email': partner_email,
+                    'updated_at': now_utc(),
+                }
+            },
+        )
+
+    return {
+        'message': f"Order assigned to {partner_email} successfully.",
+        'order': serialize_order(orders_collection.find_one({'order_id': order_id})),
+    }
+
+
+@app.get('/orders/{order_id}/eta')
+def get_order_eta(
+    order_id: str,
+    current_user: dict = Depends(get_current_user_optional),
+):
+    order = orders_collection.find_one({'order_id': order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    
+    # Calculate delivery ETA based on distance
+    settings = get_merchant_shipping_settings(get_default_merchant_id()) or {}
+    warehouse_pincode = settings.get('warehouse', {}).get('pincode', '560001')
+    customer_pincode = order.get('destination_pincode') or order.get('pincode') or '560001'
+    
+    distance = calculate_distance(warehouse_pincode, customer_pincode)
+    min_days, max_days = estimate_delivery_timeframe(distance)
+    
+    created_at = order.get('created_at') or now_utc()
+    eta_min = created_at + timedelta(days=min_days)
+    eta_max = created_at + timedelta(days=max_days)
+
+    return {
+        'order_id': order_id,
+        'min_eta': eta_min.isoformat(),
+        'max_eta': eta_max.isoformat(),
+        'estimated_days': f"{min_days}-{max_days} days",
+    }
+
+
+class DeliveryProfileUpdateRequest(BaseModel):
+    is_online: bool | None = None
+    service_pincodes: str | None = None
 
 
 @app.get('/delivery/profile')
-def get_delivery_profile(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    profile_details = normalize_delivery_profile_details(current_user.get('profile_details') or {})
+def get_delivery_profile(
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
+):
+    user_id = current_user.get('id')
+    user = users_collection.find_one({'id': user_id}, {'_id': 0}) or current_user
     return {
-        'user': serialize_user(current_user),
-        'profile_details': profile_details,
+        'user': serialize_user(user),
+        'profile_details': user.get('profile_details') or {},
     }
 
 
 @app.put('/delivery/profile')
 def update_delivery_profile(
     payload: DeliveryProfileUpdateRequest,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
 ):
-    profile_details = dict(current_user.get('profile_details') or {})
+    user_id = current_user.get('id')
+    user = users_collection.find_one({'id': user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found.')
 
-    if payload.full_name is not None:
-        full_name = str(payload.full_name).strip()
-        if not full_name:
-            raise HTTPException(status_code=400, detail='Full name is required.')
-        profile_details['full_name'] = full_name
-
-    if payload.phone_number is not None:
-        cleaned_phone = sanitize_phone_number(payload.phone_number)
-        if len(cleaned_phone) != 10:
-            raise HTTPException(status_code=400, detail='Phone number must be exactly 10 digits.')
-        profile_details['phone_number'] = cleaned_phone
-
-    if payload.vehicle_type is not None:
-        vehicle_type = str(payload.vehicle_type).strip().upper()
-        if vehicle_type not in {'BIKE', 'CYCLE', 'VAN'}:
-            raise HTTPException(status_code=400, detail='Vehicle type must be Bike, Cycle, or Van.')
-        profile_details['vehicle_type'] = vehicle_type
-
-    if payload.vehicle_number is not None:
-        vehicle_number = str(payload.vehicle_number).strip().upper()
-        if not vehicle_number:
-            raise HTTPException(status_code=400, detail='Vehicle number is required.')
-        profile_details['vehicle_number'] = vehicle_number
-
-    if payload.driving_license_number is not None:
-        driving_license_number = str(payload.driving_license_number).strip().upper()
-        if not driving_license_number:
-            raise HTTPException(status_code=400, detail='Driving license number is required.')
-        profile_details['driving_license_number'] = driving_license_number
-
-    if payload.availability is not None:
-        availability = str(payload.availability).strip().upper().replace('-', '_')
-        if availability not in {'FULL_TIME', 'PART_TIME'}:
-            raise HTTPException(status_code=400, detail='Availability must be Full-time or Part-time.')
-        profile_details['availability'] = availability
-
-    if payload.profile_image_url is not None:
-        profile_details['profile_image_url'] = str(payload.profile_image_url).strip()
-
-    if payload.city is not None:
-        profile_details['city'] = str(payload.city).strip()
-
-    if payload.state is not None:
-        profile_details['state'] = str(payload.state).strip()
-
+    current_profile_details = user.get('profile_details', {}) or {}
+    top_level_set: dict = {'updated_at': now_utc()}
+    
     if payload.is_online is not None:
-        profile_details['is_online'] = bool(payload.is_online)
-
-    # Handle service pincodes — only update if explicitly provided in this request
+        top_level_set['is_online'] = payload.is_online
+        current_profile_details['is_online'] = payload.is_online
+        
     if payload.service_pincodes is not None:
-        service_pincodes = parse_service_pincodes(payload.service_pincodes)
-        if not service_pincodes:
-            raise HTTPException(status_code=400, detail='At least one service pincode is required.')
+        current_profile_details['service_pincodes'] = payload.service_pincodes
 
-        for service_pincode in service_pincodes:
-            if not is_valid_indian_pincode(service_pincode):
-                raise HTTPException(status_code=400, detail=f'Invalid pincode: {service_pincode}. Each service pincode must be a valid 6-digit pincode.')
+    top_level_set['profile_details'] = current_profile_details
 
-        # Save pincodes
-        profile_details['allow_all_india'] = False
-        profile_details['service_scope'] = 'LOCAL'
-        profile_details['service_pincodes'] = service_pincodes
-        profile_details['service_pincode'] = service_pincodes[0] if service_pincodes else None
-        print(f"[PROFILE_UPDATE] Saving pincodes for {current_user.get('email')}: {service_pincodes}")
-    else:
-        # Keep existing pincodes unchanged; ensure fields are consistent
-        existing_pincodes = parse_service_pincodes(
-            profile_details.get('service_pincodes') or profile_details.get('service_pincode')
-        )
-        if existing_pincodes:
-            profile_details['service_pincodes'] = existing_pincodes
-            profile_details['service_pincode'] = existing_pincodes[0]
-        profile_details['allow_all_india'] = False
-        profile_details['service_scope'] = 'LOCAL'
-
-    users_collection.update_one(
-        {'id': current_user.get('id')},
-        {
-            '$set': {
-                'full_name': profile_details.get('full_name') or current_user.get('full_name'),
-                'phone_number': profile_details.get('phone_number') or current_user.get('phone_number'),
-                'city': profile_details.get('city') or current_user.get('city'),
-                'state': profile_details.get('state') or current_user.get('state'),
-                'is_online': bool(profile_details.get('is_online', current_user.get('is_online', False))),
-                'profile_details': profile_details,
-                'updated_at': now_utc(),
-            }
-        },
+    result = users_collection.update_one(
+        {'id': user_id},
+        {'$set': top_level_set},
     )
-    updated_user = users_collection.find_one({'id': current_user.get('id')}, {'_id': 0}) or {}
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=400, detail='Failed to update delivery profile.')
+
+    updated_user = users_collection.find_one({'id': user_id})
     return {
         'message': 'Delivery profile updated successfully.',
         'user': serialize_user(updated_user),
-        'profile_details': normalize_delivery_profile_details(updated_user.get('profile_details') or {}),
+        'profile_details': updated_user.get('profile_details') or {},
     }
-
-
-@app.post('/delivery/orders/{order_id}/reject')
-def reject_delivery_order(order_id: str, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    order = orders_collection.find_one({'order_id': order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    email = current_user['email'].strip().lower()
-    user_id = current_user.get('id')
-    if order.get('assigned_delivery_partner') != email and order.get('assigned_delivery_id') != user_id:
-        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
-
-    orders_collection.update_one(
-        {'order_id': order_id},
-        {
-            '$set': {
-                'assigned_delivery_partner': None,
-                'assigned_delivery_id': None,
-                'delivery_meta.rejected_at': now_utc().isoformat(),
-                'delivery_meta.last_action': 'REJECTED',
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    append_delivery_log(order_id, order.get('status', 'SHIPPED'), current_user.get('id'), location='Order rejected by delivery partner')
-    create_notification('DELIVERY_REJECTED', order_id, f'Order {order_id} was rejected by the assigned delivery partner.')
-    latest = orders_collection.find_one({'order_id': order_id})
-    return {'message': 'Order rejected and unassigned.', 'order': serialize_order(latest or {}, include_shipment=True)}
-
-
-@app.get('/delivery/estimate')
-def get_delivery_estimate(product_id: int, pincode: str | None = None, user_pincode: str | None = None, express: bool = False):
-    incoming_pincode = pincode or user_pincode or ''
-    cleaned_pincode = sanitize_pincode(incoming_pincode)
-    if not is_valid_indian_pincode(cleaned_pincode):
-        raise HTTPException(status_code=400, detail='Please enter a valid 6-digit Indian pincode.')
-
-    product = products_collection.find_one({'id': product_id}, {'_id': 0, 'id': 1, 'name': 1, 'merchant_id': 1})
-    if not product:
-        # Frontend can contain additional catalog ids not yet persisted in Mongo.
-        # Keep delivery estimate functional by using a synthetic product descriptor.
-        product = {'id': product_id, 'name': f'Product {product_id}'}
-
-    user_location = get_location_for_pincode(cleaned_pincode)
-    product_merchant_id = product.get('merchant_id') if product else None
-    coverage = get_merchant_delivery_coverage(product_merchant_id)
-    delivery_available = is_delivery_allowed_for_location(coverage, user_location)
-
-    if not delivery_available:
-        return {
-            'product_id': product_id,
-            'delivery_available': False,
-            'deliverable': False,
-            'delivery_text': 'Sorry, delivery not available',
-            'availability_text': 'Sorry, delivery not available',
-            'location_text': f"{user_location.get('city', 'Unknown City')}, {user_location.get('state', 'Unknown State')} - {cleaned_pincode}",
-            'coverage_scope': coverage.get('delivery_scope', 'NATIONWIDE'),
-        }
-
-    warehouse = choose_best_warehouse(product_id, user_location)
-    bucket = delivery_bucket(user_location, warehouse)
-    courier_type = choose_courier_name(warehouse, user_location)
-    if courier_type == 'Local Express':
-        min_days = 1
-        max_days = 1
-    elif courier_type == 'Regional Courier':
-        min_days = 2
-        max_days = 3
-    else:
-        min_days = 4
-        max_days = 6
-
-    if express and bool(warehouse.get('express_enabled')):
-        min_days = 1
-        max_days = 1
-
-    delivery_date = (now_utc() + timedelta(days=max_days)).date()
-    delivery_datetime = datetime.combine(delivery_date, datetime.min.time(), tzinfo=UTC)
-
-    response_payload = {
-        'product_id': product_id,
-        'delivery_available': True,
-        'deliverable': True,
-        'estimated_days': max_days,
-        'estimated_days_min': min_days,
-        'estimated_days_max': max_days,
-        'delivery_date': delivery_datetime.isoformat(),
-        'delivery_text': f"Delivery by {format_delivery_date(delivery_datetime)}",
-        'availability_text': 'Delivery available in your area',
-        'location_text': f'Delivering to {cleaned_pincode}',
-        'delivery_charge': 49,
-        'standard_delivery_charge': 49,
-        'free_delivery_threshold': 500,
-        'warehouse': {
-            'warehouse_id': warehouse.get('warehouse_id'),
-            'pincode': warehouse.get('pincode'),
-            'city': warehouse.get('city'),
-            'state': warehouse.get('state'),
-        },
-        'courier_type': courier_type,
-        'free_delivery': True,
-        'is_express': bool(express and warehouse.get('express_enabled')),
-    }
-
-    if min_days == 1 and max_days == 1:
-        response_payload['delivery_hint'] = 'Get it by Tomorrow'
-
-    cutoff_hours = compute_same_day_cutoff_hours()
-    if cutoff_hours > 0 and bucket == 0:
-        response_payload['order_within_text'] = f'Order within {cutoff_hours} hrs for same-day shipping'
-
-    return response_payload
-
-
-@app.put('/delivery/update-status')
-@app.post('/delivery/update-status')
-def update_delivery_status(
-    payload: DeliveryStatusUpdateRequest,
-    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
-):
-    email = current_user['email'].strip().lower()
-    requested_status = str(payload.status or '').strip().upper()
-    delivery_actions = {'ACCEPTED', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED'}
-    if requested_status not in delivery_actions:
-        raise HTTPException(status_code=400, detail='Delivery status must be one of ACCEPTED, PICKED_UP, OUT_FOR_DELIVERY, DELIVERED, FAILED.')
-
-    status_value = normalize_order_status('DELIVERY_FAILED' if requested_status == 'FAILED' else requested_status)
-
-    order = orders_collection.find_one({'order_id': payload.order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    if order.get('assigned_delivery_partner') != email and order.get('assigned_delivery_id') != current_user.get('id'):
-        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
-
-    shipment_id = order.get('shipment_id')
-    if not shipment_id:
-        shipment_id = f'SHP-{uuid4().hex[:10].upper()}'
-        orders_collection.update_one({'order_id': payload.order_id}, {'$set': {'shipment_id': shipment_id}})
-
-    shipments_collection.update_one(
-        {'shipment_id': shipment_id},
-        {
-            '$set': {
-                'id': shipment_id,
-                'shipment_id': shipment_id,
-                'status': 'ARRIVED' if status_value == 'DELIVERED' else 'IN_TRANSIT',
-                'current_location': (payload.current_location or '').strip() or 'Customer address',
-                'updated_at': now_utc(),
-            },
-            '$setOnInsert': {
-                'tracking_id': f'TRK-{uuid4().hex[:12].upper()}',
-                'warehouse_id': order.get('warehouse_id'),
-                'courier_name': 'Assigned courier',
-                'created_at': now_utc(),
-            },
-        },
-        upsert=True,
-    )
-
-    actor = str(current_user.get('id') or current_user.get('email', 'delivery'))
-    location_value = (payload.current_location or '').strip() or 'Last mile route'
-
-    if requested_status == 'ACCEPTED':
-        orders_collection.update_one(
-            {'order_id': payload.order_id},
-            {
-                '$set': {
-                    'delivery_meta.accepted_at': now_utc().isoformat(),
-                    'delivery_meta.last_action': 'ACCEPTED',
-                    'updated_at': now_utc(),
-                }
-            },
-        )
-        append_delivery_log(payload.order_id, order.get('status', 'SHIPPED'), actor, location='Order accepted by delivery partner')
-        create_notification('DELIVERY_ACCEPTED', payload.order_id, f'Order {payload.order_id} has been accepted by the delivery partner.')
-        latest = orders_collection.find_one({'order_id': payload.order_id})
-        return {'message': 'Order accepted successfully.', 'order': serialize_order(latest, include_shipment=True)}
-
-    if requested_status == 'PICKED_UP':
-        orders_collection.update_one(
-            {'order_id': payload.order_id},
-            {
-                '$set': {
-                    'delivery_meta.picked_at': now_utc().isoformat(),
-                    'delivery_meta.last_action': 'PICKED_UP',
-                    'updated_at': now_utc(),
-                }
-            },
-        )
-        append_delivery_log(payload.order_id, order.get('status', 'SHIPPED'), actor, location='Order picked up from warehouse')
-        create_notification('DELIVERY_PICKED_UP', payload.order_id, f'Order {payload.order_id} has been picked up for delivery.')
-        latest = orders_collection.find_one({'order_id': payload.order_id})
-        return {'message': 'Order marked as picked up.', 'order': serialize_order(latest, include_shipment=True)}
-
-    if requested_status == 'FAILED':
-        orders_collection.update_one(
-            {'order_id': payload.order_id},
-            {
-                '$set': {
-                    'status': 'DELIVERY_FAILED',
-                    'delivery_meta.failed_at': now_utc().isoformat(),
-                    'delivery_meta.last_action': 'FAILED',
-                    'updated_at': now_utc(),
-                }
-            },
-        )
-        append_delivery_log(payload.order_id, 'DELIVERY_FAILED', actor, location=location_value)
-        create_notification('DELIVERY_FAILED', payload.order_id, f'Order {payload.order_id} marked as delivery failed.')
-        latest = orders_collection.find_one({'order_id': payload.order_id})
-        return {'message': 'Order marked as failed.', 'order': serialize_order(latest, include_shipment=True)}
-
-    latest = apply_order_status_update(
-        order,
-        status_value,
-        actor,
-        location=location_value,
-        performer_role='DELIVERY_ASSOCIATE',
-        performer_email=email,
-    )
-
-    orders_collection.update_one(
-        {'order_id': payload.order_id},
-        {
-            '$set': {
-                'delivery_meta.last_action': requested_status,
-                'delivery_meta.out_for_delivery_at': now_utc().isoformat() if requested_status == 'OUT_FOR_DELIVERY' else order.get('delivery_meta', {}).get('out_for_delivery_at'),
-                'delivery_meta.delivered_at': now_utc().isoformat() if requested_status == 'DELIVERED' else order.get('delivery_meta', {}).get('delivered_at'),
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    latest = orders_collection.find_one({'order_id': payload.order_id})
-    return {'message': 'Delivery status updated.', 'order': serialize_order(latest or {}, include_shipment=True)}
-
-
-def calculate_delivery_commission(order: dict) -> float:
-    total = float(order.get('total_amount') or 0)
-    return round(max(30.0, total * 0.08), 2)
 
 
 @app.get('/delivery/earnings')
-def get_delivery_earnings(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
-    email = str(current_user.get('email') or '').strip().lower()
-    user_id = str(current_user.get('id') or '').strip()
-    assigned_filter = {'$or': [{'assigned_delivery_partner': email}, {'assigned_delivery_id': user_id}]}
+def get_delivery_earnings(
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
+):
+    partner_id = current_user.get('id')
     now = now_utc()
-    start_today = datetime(now.year, now.month, now.day, tzinfo=UTC)
-    start_week = start_today - timedelta(days=start_today.weekday())
-
-    delivered_orders = list(
-        orders_collection.find(
-            {
-                **assigned_filter,
-                'status': 'DELIVERED',
-            },
-            {'_id': 0},
-        )
-    )
-
+    today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    week_start = today_start - timedelta(days=7)
+    
+    delivered_orders = list(orders_collection.find({
+        'assigned_delivery_id': partner_id,
+        'status': 'DELIVERED'
+    }))
+    
     today_deliveries = 0
-    total_deliveries_today = 0
+    today_earnings = 0.0
     weekly_earnings = 0.0
-
+    
     for order in delivered_orders:
-        commission = calculate_delivery_commission(order)
-        delivered_at_iso = str((order.get('delivery_meta') or {}).get('delivered_at') or order.get('updated_at') or '')
-        try:
-            delivered_at = datetime.fromisoformat(delivered_at_iso.replace('Z', '+00:00')) if delivered_at_iso else None
-        except ValueError:
-            delivered_at = None
-
-        if delivered_at and delivered_at.tzinfo is None:
-            delivered_at = delivered_at.replace(tzinfo=UTC)
-
-        if delivered_at and delivered_at >= start_week:
-            weekly_earnings += commission
-
-        if delivered_at and delivered_at >= start_today:
-            total_deliveries_today += 1
-            today_deliveries += commission
-
+        delivered_at_str = order.get('delivery_meta', {}).get('delivered_at')
+        if delivered_at_str:
+            try:
+                delivered_at = datetime.fromisoformat(delivered_at_str)
+            except ValueError:
+                delivered_at = order.get('updated_at') or now
+        else:
+            delivered_at = order.get('updated_at') or now
+            
+        if delivered_at.tzinfo is None:
+            delivered_at = delivered_at.replace(tzinfo=timezone.utc)
+            
+        order_value = float(order.get('total_amount') or order.get('order_value') or 0)
+        fee = 60.0 + (0.02 * order_value)
+        
+        if delivered_at >= today_start:
+            today_deliveries += 1
+            today_earnings += fee
+            
+        if delivered_at >= week_start:
+            weekly_earnings += fee
+            
     return {
-        'today_earnings': round(today_deliveries, 2),
-        'today_deliveries': total_deliveries_today,
+        'today_deliveries': today_deliveries,
+        'today_earnings': round(today_earnings, 2),
         'weekly_earnings': round(weekly_earnings, 2),
     }
 
 
-@app.get('/tracking/{order_id}')
-def get_tracking(order_id: str, current_user: dict = Depends(get_current_user)):
-    order = orders_collection.find_one({'order_id': order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
+@app.get('/delivery/pincode-orders')
+def get_delivery_pincode_orders(
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
+):
+    profile = current_user.get('profile_details') or {}
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode') or '')
+    
+    unassigned_orders = []
+    if service_pincodes:
+        unassigned_orders = list(orders_collection.find({
+            'assigned_delivery_id': None,
+            'status': {'$in': ['CONFIRMED', 'PACKED', 'SHIPPED']},
+            'destination_pincode': {'$in': service_pincodes}
+        }).sort('created_at', -1))
+    
+    if normalize_role(current_user.get('role')) == 'ADMIN' and not unassigned_orders:
+        unassigned_orders = list(orders_collection.find({
+            'assigned_delivery_id': None,
+            'status': {'$in': ['CONFIRMED', 'PACKED', 'SHIPPED']}
+        }).sort('created_at', -1))
 
-    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    if actor_role == 'CUSTOMER' and order.get('customer_email') != actor_email:
-        raise HTTPException(status_code=403, detail='Access denied.')
+    return serialize_orders_batch(unassigned_orders)
 
-    logs = get_tracking_logs(order_id)
-    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) if order.get('shipment_id') else None
-    shipment_events = get_shipment_events(str(order.get('shipment_id') or '')) if order.get('shipment_id') else []
+
+@app.get('/delivery/orders')
+def get_delivery_orders(
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
+):
+    email = current_user.get('email', '').strip().lower()
+    partner_id = current_user.get('id')
+
+    # Get orders assigned to me, including PACKED, SHIPPED, OUT_FOR_DELIVERY, ARRIVED_AT_CITY, DELIVERED
+    my_orders = list(orders_collection.find({
+        'assigned_delivery_id': partner_id,
+        'status': {'$in': ['PACKED', 'ACCEPTED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'ARRIVED_AT_CITY', 'DELIVERED']}
+    }).sort('created_at', -1))
+
+    # Get available (unassigned) orders in my service pincodes
+    profile = current_user.get('profile_details') or {}
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode') or '')
+    
+    unassigned_orders = []
+    if service_pincodes:
+        unassigned_orders = list(orders_collection.find({
+            'assigned_delivery_id': None,
+            'status': {'$in': ['CONFIRMED', 'PACKED', 'SHIPPED']},
+            'destination_pincode': {'$in': service_pincodes}
+        }).sort('created_at', -1))
+    
+    if normalize_role(current_user.get('role')) == 'ADMIN' and not unassigned_orders:
+        unassigned_orders = list(orders_collection.find({
+            'assigned_delivery_id': None,
+            'status': {'$in': ['CONFIRMED', 'PACKED', 'SHIPPED']}
+        }).sort('created_at', -1))
+
     return {
-        'order_id': order_id,
-        'current_status': normalize_order_status(order.get('status', 'PLACED')),
-        'timeline_steps': ORDER_STATUS_FLOW,
-        'logs': logs,
-        'shipment': serialize_shipment(shipment),
-        'shipment_events': shipment_events,
-        'order': serialize_order(order, include_shipment=True),
+        'assigned_orders': serialize_orders_batch(my_orders),
+        'available_orders': serialize_orders_batch(unassigned_orders),
     }
 
 
-@app.get('/orders/{order_id}/tracking')
-def get_order_tracking(order_id: str, current_user: dict = Depends(get_current_user)):
-    return get_tracking(order_id, current_user)
-
-
-@app.get('/admin/tracking-logs')
-def get_admin_tracking_logs(order_id: str, current_user: dict = Depends(require_roles('ADMIN'))):
-    _ = current_user
-    logs = get_tracking_logs(order_id)
-    return {'order_id': order_id, 'logs': logs}
-
-
-@app.put('/orders/{order_id}/cancel')
-def cancel_order(order_id: str, payload: CancelOrderRequest, current_user: dict = Depends(require_roles('CUSTOMER'))):
+@app.put('/delivery/orders/{order_id}/self-assign')
+@app.post('/delivery/orders/{order_id}/self-assign')
+def self_assign_delivery_order(
+    order_id: str,
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE', 'ADMIN')),
+):
     order = orders_collection.find_one({'order_id': order_id})
     if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
+        raise HTTPException(status_code=404, detail="Order not found.")
 
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    actor_id = str(current_user.get('id', '')).strip()
-    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
-    if not is_owner:
-        raise HTTPException(status_code=403, detail='Access denied.')
+    partner_email = current_user.get('email', '').strip().lower()
+    partner_id = current_user.get('id')
 
-    current_status = normalize_order_status(order.get('status', 'PLACED'))
-    if current_status != 'PLACED':
-        raise HTTPException(status_code=400, detail='Order can only be cancelled while it is PLACED.')
-    if current_status == 'CANCELLED':
-        raise HTTPException(status_code=400, detail='Order is already cancelled.')
-
-    latest = apply_order_status_update(
-        order,
-        'CANCELLED',
-        actor_id or actor_email or 'customer',
-        location='Order cancelled by customer',
-        performer_role='CUSTOMER',
-        performer_email=actor_email,
-    )
     orders_collection.update_one(
         {'order_id': order_id},
         {
             '$set': {
-                'cancellation_reason': str(payload.reason or '').strip(),
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    append_delivery_log(order_id, 'CANCELLED', actor_id or actor_email or 'customer', location='Order cancelled by customer')
-    set_payment_status(order_id, 'REFUNDED', reason='Order cancelled before shipping')
-    create_notification('ORDER_CANCELLED', order_id, f'Order {order_id} cancelled by customer.', user_id=actor_id or actor_email)
-    latest = orders_collection.find_one({'order_id': order_id}) or latest
-    return {'message': 'Order cancelled successfully.', 'order': serialize_order(latest, include_shipment=True)}
-
-
-@app.post('/orders/{order_id}/return-request')
-def request_order_return(
-    order_id: str,
-    payload: ReturnRequestCreateRequest | None = None,
-    current_user: dict = Depends(require_roles('CUSTOMER')),
-):
-    order = orders_collection.find_one({'order_id': order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    actor_email = str(current_user.get('email', '')).strip().lower()
-    actor_id = str(current_user.get('id', '')).strip()
-    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
-    if not is_owner:
-        raise HTTPException(status_code=403, detail='Access denied.')
-    if normalize_order_status(order.get('status', 'PLACED')) != 'DELIVERED':
-        raise HTTPException(status_code=400, detail='Return can only be requested after delivery.')
-
-    existing_return = returns_collection.find_one({'order_id': order_id})
-    if existing_return:
-        raise HTTPException(status_code=400, detail='Return request already exists for this order.')
-
-    proof_images = []
-    raw_images = (payload.proof_images if payload else None) or []
-    for image in raw_images:
-        normalized = str(image or '').strip()
-        if normalized:
-            proof_images.append(normalized)
-    proof_images = proof_images[:5]
-
-    returns_collection.insert_one(
-        {
-            'id': f"RET-{uuid4().hex[:12].upper()}",
-            'order_id': order_id,
-            'status': 'RETURN_REQUESTED',
-            'reason': str((payload.reason if payload else '') or '').strip(),
-            'issue_details': str((payload.issue_details if payload else '') or '').strip(),
-            'proof_images': proof_images,
-            'timestamps': {'RETURN_REQUESTED': now_utc().isoformat()},
-            'created_by': actor_id or actor_email,
-            'created_at': now_utc(),
-            'updated_at': now_utc(),
-        }
-    )
-    create_notification('RETURN_REQUESTED', order_id, f'Return requested for order {order_id}.', user_id=actor_id or actor_email)
-    return {'message': 'Return request submitted successfully.', 'return_request': serialize_return_for_order(order_id)}
-
-
-@app.put('/returns/{order_id}/status')
-def update_return_status(
-    order_id: str,
-    payload: ReturnUpdateRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    request = returns_collection.find_one({'order_id': order_id})
-    if not request:
-        raise HTTPException(status_code=404, detail='Return request not found.')
-
-    current_status = normalize_return_status(request.get('status', 'RETURN_REQUESTED'))
-    target_status = normalize_return_status(payload.status)
-    if not is_valid_return_transition(current_status, target_status):
-        raise HTTPException(status_code=400, detail='Invalid return status transition.')
-
-    actor = str(current_user.get('id') or current_user.get('email') or 'staff')
-    returns_collection.update_one(
-        {'order_id': order_id},
-        {
-            '$set': {
-                'status': target_status,
-                f'timestamps.{target_status}': now_utc().isoformat(),
-                'updated_at': now_utc(),
-                'location': str(payload.location or '').strip(),
-                'updated_by': actor,
+                'assigned_delivery_id': partner_id,
+                'assigned_delivery_partner': partner_email,
+                'delivery_meta.assigned_at': now_utc().isoformat(),
+                'delivery_meta.assignment_source': 'delivery_self_assign',
             }
         },
     )
 
-    if target_status == 'REFUNDED':
-        set_payment_status(order_id, 'REFUNDED', reason='Return refunded')
-
-    create_notification(target_status, order_id, f'Return status for {order_id} updated to {target_status}.')
-    return {'message': 'Return status updated.', 'return_request': serialize_return_for_order(order_id)}
-
-
-@app.get('/admin/returns')
-def get_admin_returns(
-    status_filter: str = 'RETURN_REQUESTED',
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    _ = current_user
-    query = {'status': normalize_return_status(status_filter, fallback='RETURN_REQUESTED')}
-    results = []
-    for return_request in returns_collection.find(query, {'_id': 0}).sort('created_at', -1):
-        order_id = str(return_request.get('order_id') or '').strip()
-        order = orders_collection.find_one({'order_id': order_id}, {'_id': 0}) if order_id else None
-
-        payload = dict(return_request)
-        if isinstance(payload.get('created_at'), datetime):
-            payload['created_at'] = payload['created_at'].isoformat()
-        if isinstance(payload.get('updated_at'), datetime):
-            payload['updated_at'] = payload['updated_at'].isoformat()
-
-        payload['status'] = normalize_return_status(payload.get('status', 'RETURN_REQUESTED'))
-        payload['proof_images'] = [str(item).strip() for item in (payload.get('proof_images') or []) if str(item).strip()]
-        payload['order'] = serialize_order(order, include_shipment=True) if order else None
-        results.append(payload)
-
-    return {'returns': results}
-
-
-@app.put('/admin/returns/{order_id}/decision')
-def decide_return_request(
-    order_id: str,
-    payload: ReturnDecisionRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    request = returns_collection.find_one({'order_id': order_id})
-    if not request:
-        raise HTTPException(status_code=404, detail='Return request not found.')
-
-    current_status = normalize_return_status(request.get('status', 'RETURN_REQUESTED'))
-    if current_status != 'RETURN_REQUESTED':
-        raise HTTPException(status_code=400, detail='Only RETURN_REQUESTED items can be approved or rejected.')
-
-    decision = str(payload.decision or '').strip().upper()
-    if decision not in {'APPROVE', 'REJECT'}:
-        raise HTTPException(status_code=400, detail='Decision must be APPROVE or REJECT.')
-
-    target_status = 'PICKUP' if decision == 'APPROVE' else 'RETURN_REJECTED'
-    actor = str(current_user.get('id') or current_user.get('email') or 'staff').strip() or 'staff'
-    review_note = str(payload.review_note or '').strip()
-
-    returns_collection.update_one(
-        {'order_id': order_id},
-        {
-            '$set': {
-                'status': target_status,
-                f'timestamps.{target_status}': now_utc().isoformat(),
-                'review_note': review_note,
-                'reviewed_by': actor,
-                'updated_at': now_utc(),
-            }
-        },
+    apply_order_status_update(
+        order=order,
+        next_status='ACCEPTED',
+        actor_id=partner_id,
+        performer_role=normalize_role(current_user.get('role', 'DELIVERY_ASSOCIATE')),
+        performer_email=partner_email,
     )
 
-    if target_status == 'RETURN_REJECTED':
-        create_notification('RETURN_REJECTED', order_id, f'Return request for {order_id} was rejected.')
-        return {'message': 'Return request rejected.', 'return_request': serialize_return_for_order(order_id)}
-
-    create_notification('RETURN_APPROVED', order_id, f'Return request for {order_id} approved. Pickup initiated.')
-    return {'message': 'Return request approved.', 'return_request': serialize_return_for_order(order_id)}
-
-
-@app.put('/orders/{order_id}/payment')
-def update_payment_status(
-    order_id: str,
-    payload: PaymentUpdateRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
-):
-    order = orders_collection.find_one({'order_id': order_id})
-    if not order:
-        raise HTTPException(status_code=404, detail='Order not found.')
-
-    payment = set_payment_status(order_id, payload.status, method=order.get('payment_method'))
-    create_notification(
-        'PAYMENT_STATUS',
-        order_id,
-        f"Payment status for {order_id} updated to {normalize_payment_status(payload.status)}.",
-        user_id=str(order.get('user_id') or order.get('customer_email') or ''),
-    )
-    return {'message': 'Payment status updated.', 'payment': payment}
-
-
-@app.get('/notifications/my')
-def get_my_notifications(current_user: dict = Depends(get_current_user)):
-    actor_id = str(current_user.get('id') or '').strip()
-    actor_email = str(current_user.get('email') or '').strip().lower()
-    notifications = list(
-        notifications_collection.find(
-            {'$or': [{'user_id': actor_id}, {'user_id': actor_email}, {'user_id': None}]},
-            {'_id': 0},
-        ).sort('created_at', -1)
-    )
-    for note in notifications:
-        if isinstance(note.get('created_at'), datetime):
-            note['created_at'] = note['created_at'].isoformat()
-        note['is_read'] = bool(note.get('is_read', False))
-        note['type'] = str(note.get('type') or 'GENERAL').strip().upper() or 'GENERAL'
-    return {'notifications': notifications}
-
-
-@app.put('/notifications/mark-all-read')
-def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
-    actor_id = str(current_user.get('id') or '').strip()
-    actor_email = str(current_user.get('email') or '').strip().lower()
-    notifications_collection.update_many(
-        {'$or': [{'user_id': actor_id}, {'user_id': actor_email}, {'user_id': None}], 'is_read': {'$ne': True}},
-        {'$set': {'is_read': True, 'updated_at': now_utc()}},
-    )
-    return {'message': 'Notifications marked as read.'}
-
-
-@app.put('/notifications/{notification_id}/read')
-def mark_notification_read(notification_id: str, current_user: dict = Depends(get_current_user)):
-    actor_id = str(current_user.get('id') or '').strip()
-    actor_email = str(current_user.get('email') or '').strip().lower()
-    result = notifications_collection.update_one(
-        {
-            'id': str(notification_id or '').strip(),
-            '$or': [{'user_id': actor_id}, {'user_id': actor_email}, {'user_id': None}],
-        },
-        {'$set': {'is_read': True, 'updated_at': now_utc()}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Notification not found.')
-    return {'message': 'Notification marked as read.'}
-
-
-# ============================================================================
-# PAYMENT METHODS MANAGEMENT
-# ============================================================================
-
-@app.get('/payment-methods')
-def get_payment_methods(current_user: dict = Depends(require_roles('CUSTOMER'))):
-    """Get all saved payment methods for the current user."""
-    user_email = current_user['email'].strip().lower()
-    user = users_collection.find_one({'email': user_email}, {'_id': 0})
-    
-    if not user:
-        raise HTTPException(status_code=404, detail='User not found.')
-    
-    profile_details = user.get('profile_details', {})
-    if not isinstance(profile_details, dict):
-        profile_details = {}
-    
-    saved_methods = profile_details.get('saved_payment_methods', [])
-    if not isinstance(saved_methods, list):
-        saved_methods = []
-    
-    # Return sanitized payment methods (no sensitive data)
-    return {'payment_methods': saved_methods}
-
-
-@app.post('/payment-methods')
-def save_payment_method(
-    payload: SavePaymentMethodRequest,
-    current_user: dict = Depends(require_roles('CUSTOMER'))
-):
-    """Save a new payment method for the user."""
-    method_type = str(payload.method_type or '').strip().upper()
-    if method_type not in PAYMENT_METHODS:
-        raise HTTPException(status_code=400, detail=f'Invalid payment method type: {method_type}')
-    
-    nickname = str(payload.nickname or '').strip() or f'{method_type} Payment'
-    
-    # Validate and sanitize based on method type
-    method_id = f"PM-{uuid4().hex[:12].upper()}"
-    saved_method = {
-        'id': method_id,
-        'method_type': method_type,
-        'nickname': nickname,
-        'is_default': bool(payload.is_default),
-        'created_at': now_utc().isoformat(),
-    }
-    
-    if method_type == 'UPI':
-        upi_id = str(payload.upi_id or '').strip()
-        if not upi_id:
-            raise HTTPException(status_code=400, detail='UPI ID is required for UPI payments.')
-        if not re.match(r'^[a-zA-Z0-9._-]+@[a-zA-Z]{3,}$', upi_id):
-            raise HTTPException(status_code=400, detail='Invalid UPI ID format.')
-        saved_method['upi_id'] = upi_id
-    
-    elif method_type == 'CARD':
-        card_number = str(payload.card_number or '').strip().replace(' ', '')
-        if not card_number or len(card_number) < 13 or len(card_number) > 19:
-            raise HTTPException(status_code=400, detail='Invalid card number.')
-        if not card_number.isdigit():
-            raise HTTPException(status_code=400, detail='Card number must contain only digits.')
-        
-        card_holder = str(payload.card_holder_name or '').strip()
-        if not card_holder:
-            raise HTTPException(status_code=400, detail='Card holder name is required.')
-        
-        expiry = str(payload.card_expiry or '').strip()
-        if not re.match(r'^\d{2}/\d{2}$', expiry):
-            raise HTTPException(status_code=400, detail='Expiry must be in MM/YY format.')
-        
-        # Store only last 4 digits for security
-        saved_method['card_last4'] = card_number[-4:]
-        saved_method['card_holder_name'] = card_holder
-        saved_method['card_expiry'] = expiry
-    
-    elif method_type == 'NETBANKING':
-        bank_name = str(payload.bank_name or '').strip()
-        if not bank_name:
-            raise HTTPException(status_code=400, detail='Bank name is required for Net Banking.')
-        saved_method['bank_name'] = bank_name
-    
-    elif method_type == 'WALLET':
-        wallet_provider = str(payload.wallet_provider or '').strip()
-        if not wallet_provider:
-            raise HTTPException(status_code=400, detail='Wallet provider is required.')
-        saved_method['wallet_provider'] = wallet_provider
-    
-    # Get current user and update profile
-    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
-    profile_details = user.get('profile_details', {}) if user else {}
-    if not isinstance(profile_details, dict):
-        profile_details = {}
-    
-    saved_methods = profile_details.get('saved_payment_methods', [])
-    if not isinstance(saved_methods, list):
-        saved_methods = []
-    
-    # If marking as default, unmark other defaults
-    if saved_method['is_default']:
-        for method in saved_methods:
-            method['is_default'] = False
-    
-    saved_methods.append(saved_method)
-    profile_details['saved_payment_methods'] = saved_methods
-    
-    users_collection.update_one(
-        {'email': current_user['email'].strip().lower()},
-        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
-    )
-    
-    return {'message': 'Payment method saved successfully.', 'payment_method': saved_method}
-
-
-@app.put('/payment-methods/{method_id}')
-def update_payment_method(
-    method_id: str,
-    payload: UpdatePaymentMethodRequest,
-    current_user: dict = Depends(require_roles('CUSTOMER'))
-):
-    """Update a saved payment method."""
-    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
-    if not user:
-        raise HTTPException(status_code=404, detail='User not found.')
-    
-    profile_details = user.get('profile_details', {})
-    if not isinstance(profile_details, dict):
-        profile_details = {}
-    
-    saved_methods = profile_details.get('saved_payment_methods', [])
-    if not isinstance(saved_methods, list):
-        raise HTTPException(status_code=404, detail='Payment method not found.')
-    
-    # Find the payment method
-    method_index = None
-    for idx, method in enumerate(saved_methods):
-        if method.get('id') == method_id:
-            method_index = idx
-            break
-    
-    if method_index is None:
-        raise HTTPException(status_code=404, detail='Payment method not found.')
-    
-    # Update fields
-    if payload.nickname is not None:
-        saved_methods[method_index]['nickname'] = str(payload.nickname or '').strip()
-    
-    if payload.is_default is not None and payload.is_default:
-        # Unmark other defaults
-        for method in saved_methods:
-            method['is_default'] = False
-        saved_methods[method_index]['is_default'] = True
-    elif payload.is_default is False:
-        saved_methods[method_index]['is_default'] = False
-    
-    profile_details['saved_payment_methods'] = saved_methods
-    
-    users_collection.update_one(
-        {'email': current_user['email'].strip().lower()},
-        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
-    )
-    
-    return {'message': 'Payment method updated successfully.', 'payment_method': saved_methods[method_index]}
-
-
-@app.delete('/payment-methods/{method_id}')
-def delete_payment_method(
-    method_id: str,
-    current_user: dict = Depends(require_roles('CUSTOMER'))
-):
-    """Delete a saved payment method."""
-    user = users_collection.find_one({'email': current_user['email'].strip().lower()}, {'_id': 0})
-    if not user:
-        raise HTTPException(status_code=404, detail='User not found.')
-    
-    profile_details = user.get('profile_details', {})
-    if not isinstance(profile_details, dict):
-        profile_details = {}
-    
-    saved_methods = profile_details.get('saved_payment_methods', [])
-    if not isinstance(saved_methods, list):
-        raise HTTPException(status_code=404, detail='Payment method not found.')
-    
-    # Find and remove the payment method
-    updated_methods = [m for m in saved_methods if m.get('id') != method_id]
-    
-    if len(updated_methods) == len(saved_methods):
-        raise HTTPException(status_code=404, detail='Payment method not found.')
-    
-    profile_details['saved_payment_methods'] = updated_methods
-    
-    users_collection.update_one(
-        {'email': current_user['email'].strip().lower()},
-        {'$set': {'profile_details': profile_details, 'updated_at': now_utc()}},
-    )
-    
-    return {'message': 'Payment method deleted successfully.'}
-
-
-def get_platform_branding_document() -> dict:
-    branding = platform_settings_collection.find_one({'key': 'branding'}, {'_id': 0})
-    if branding:
-        return branding
-    return {
-        'key': 'branding',
-        'platform_name': 'Movi Fashion',
-        'logo_url': '/movicloud%20logo.png',
-        'updated_at': now_utc().isoformat(),
-    }
-
-
-@app.get('/public/platform-settings')
-def get_public_platform_settings():
-    branding = get_platform_branding_document()
-    return {
-        'platform_name': str(branding.get('platform_name') or 'Movi Fashion').strip() or 'Movi Fashion',
-        'logo_url': str(branding.get('logo_url') or '/movicloud%20logo.png').strip() or '/movicloud%20logo.png',
-        'updated_at': branding.get('updated_at'),
-    }
-
-
-@app.get('/public/banners')
-def get_public_banners():
-    approved = list(
-        banners_collection.find({'status': 'APPROVED'}, {'_id': 0}).sort('updated_at', -1)
-    )
-    return {'banners': approved}
-
-
-@app.get('/public/global-offer')
-def get_public_global_offer():
-    offer = global_offers_collection.find_one({'key': 'global'}, {'_id': 0})
-    if not offer:
-        return {'offer': None}
-    if not bool(offer.get('active')):
-        return {'offer': None}
-    return {'offer': offer}
-
-
-@app.post('/merchant/banner-requests')
-def create_banner_request(
-    payload: BannerRequestCreateRequest,
-    current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT')),
-):
-    merchant_id = str(current_user.get('id') or '').strip()
-    if not merchant_id:
-        raise HTTPException(status_code=400, detail='Unable to resolve merchant account id.')
-
-    banner = {
-        'id': f"BNR-{uuid4().hex[:10].upper()}",
-        'merchant_id': merchant_id,
-        'merchant_email': str(current_user.get('email') or '').strip().lower(),
-        'title': str(payload.title or '').strip(),
-        'subtitle': str(payload.subtitle or '').strip(),
-        'image_url': str(payload.image_url or '').strip(),
-        'target_path': str(payload.target_path or '/products').strip() or '/products',
-        'offer_text': str(payload.offer_text or '').strip(),
-        'status': 'PENDING',
-        'rejection_reason': '',
-        'created_at': now_utc(),
-        'updated_at': now_utc(),
-    }
-
-    if not banner['title']:
-        raise HTTPException(status_code=400, detail='Banner title is required.')
-    if not banner['image_url']:
-        raise HTTPException(status_code=400, detail='Banner image URL is required.')
-
-    banners_collection.insert_one(banner)
-    banner.pop('_id', None)
-    return {'message': 'Banner request submitted for review.', 'banner': banner}
-
-
-@app.get('/merchant/banner-requests')
-def get_merchant_banner_requests(
-    current_user: dict = Depends(require_roles('ADMIN', 'MERCHANT')),
-):
-    merchant_id = str(current_user.get('id') or '').strip()
-    if not merchant_id:
-        return {'banners': []}
-    banners = list(banners_collection.find({'merchant_id': merchant_id}, {'_id': 0}).sort('created_at', -1))
-    return {'banners': banners}
-
-
-@app.get('/super-admin/overview')
-def get_super_admin_overview(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    total_orders = orders_collection.count_documents({})
-    total_users = users_collection.count_documents({})
-    total_merchants = users_collection.count_documents({'role': {'$in': ['ADMIN', 'MERCHANT']}})
-    pending_merchants = users_collection.count_documents(
-        {'role': {'$in': ['ADMIN', 'MERCHANT']}, 'merchant_status': 'PENDING'}
-    )
-    pending_banners = banners_collection.count_documents({'status': 'PENDING'})
-    pending_products = products_collection.count_documents({'review_status': 'PENDING'})
-
-    revenue_sum = 0.0
-    for order in orders_collection.find({}, {'_id': 0, 'total_amount': 1}):
-        revenue_sum += float(order.get('total_amount') or 0)
+    shipment_id = order.get('shipment_id')
+    if shipment_id:
+        shipments_collection.update_one(
+            {'shipment_id': shipment_id},
+            {
+                '$set': {
+                    'assigned_partner_id': partner_id,
+                    'assigned_partner_email': partner_email,
+                    'updated_at': now_utc(),
+                }
+            },
+        )
 
     return {
-        'analytics': {
-            'orders': total_orders,
-            'users': total_users,
-            'merchants': total_merchants,
-            'pending_merchants': pending_merchants,
-            'pending_banners': pending_banners,
-            'pending_products': pending_products,
-            'revenue': round(revenue_sum, 2),
-        },
-        'secret_path_configured': bool(str(SUPER_ADMIN_SECRET_PATH or '').strip()),
+        'message': "Order self-assigned and accepted successfully.",
+        'order': serialize_order(orders_collection.find_one({'order_id': order_id})),
     }
 
 
-@app.get('/super-admin/merchants')
-def get_super_admin_merchants(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    merchants = list(
-        users_collection.find(
-            {'role': {'$in': ['ADMIN', 'MERCHANT']}},
-            {'_id': 0},
-        ).sort('created_at', -1)
-    )
-    return {'merchants': [serialize_user(item) for item in merchants]}
+# --- Operations & Shipments Endpoints to resolve 404 errors ---
+
+class DispatchShipmentRequest(BaseModel):
+    current_location: str | None = None
 
 
-@app.put('/super-admin/merchants/{merchant_id}/decision')
-def decide_super_admin_merchant(
-    merchant_id: str,
-    payload: SuperAdminMerchantDecisionRequest,
-    current_user: dict = Depends(require_roles('SUPER_ADMIN')),
+@app.post('/shipments/{shipment_id}/dispatch')
+def dispatch_shipment_endpoint(
+    shipment_id: str,
+    payload: DispatchShipmentRequest | None = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    _ = current_user
-    next_merchant_status = normalize_merchant_status(payload.merchant_status, fallback='PENDING')
-    next_status = 'ACTIVE' if payload.active else 'BLOCKED'
-    if next_merchant_status == 'REJECTED':
-        next_status = 'BLOCKED'
+    shipment = shipments_collection.find_one({'shipment_id': shipment_id})
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found.")
 
-    result = users_collection.update_one(
-        {'id': merchant_id, 'role': {'$in': ['ADMIN', 'MERCHANT']}},
-        {
-            '$set': {
-                'merchant_status': next_merchant_status,
-                'status': next_status,
-                'updated_at': now_utc(),
-            }
-        },
+    actor_id = current_user.get('id')
+    role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    email = current_user.get('email', 'system@local')
+
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DISPATCHED',
+        actor_id,
+        role,
+        email,
+        location=(payload.current_location if payload else None),
     )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Merchant account not found.')
-
-    updated = users_collection.find_one({'id': merchant_id})
-    return {'message': 'Merchant review decision saved.', 'merchant': serialize_user(updated)}
-
-
-@app.get('/super-admin/products/pending')
-def get_super_admin_pending_products(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    products = list(products_collection.find({'review_status': {'$in': ['PENDING', 'REJECTED']}}, {'_id': 0}).sort('updated_at', -1))
-    return {'products': [serialize_product(item) for item in products]}
+    return {
+        'message': "Shipment dispatched successfully.",
+        'shipment': serialize_shipment(updated_shipment),
+    }
 
 
-@app.put('/super-admin/products/{product_id}/decision')
-def decide_super_admin_product(
-    product_id: int,
-    payload: SuperAdminProductDecisionRequest,
-    current_user: dict = Depends(require_roles('SUPER_ADMIN')),
+@app.get('/operations/orders')
+def get_operations_orders(
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    _ = current_user
-    next_status = normalize_product_review_status(payload.status, fallback='PENDING')
-    result = products_collection.update_one(
-        {'id': product_id},
-        {'$set': {'review_status': next_status, 'updated_at': now_utc()}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Product not found.')
-
-    updated = products_collection.find_one({'id': product_id}, {'_id': 0})
-    return {'message': 'Product review decision saved.', 'product': serialize_product(updated)}
+    orders = list(orders_collection.find({'status': 'CONFIRMED'}).sort('created_at', -1))
+    return serialize_orders_batch(orders)
 
 
-@app.get('/super-admin/banner-requests')
-def get_super_admin_banner_requests(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    banners = list(banners_collection.find({}, {'_id': 0}).sort('created_at', -1))
-    return {'banners': banners}
-
-
-@app.put('/super-admin/banner-requests/{banner_id}/decision')
-def decide_super_admin_banner(
-    banner_id: str,
-    payload: SuperAdminBannerDecisionRequest,
-    current_user: dict = Depends(require_roles('SUPER_ADMIN')),
+@app.get('/operations/packed-orders')
+def get_operations_packed_orders(
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    _ = current_user
-    next_status = normalize_banner_status(payload.status, fallback='PENDING')
-    rejection_reason = str(payload.rejection_reason or '').strip()
-    result = banners_collection.update_one(
-        {'id': banner_id},
-        {
-            '$set': {
-                'status': next_status,
-                'rejection_reason': rejection_reason if next_status == 'REJECTED' else '',
-                'updated_at': now_utc(),
-            }
-        },
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Banner request not found.')
-
-    updated = banners_collection.find_one({'id': banner_id}, {'_id': 0})
-    return {'message': 'Banner review decision saved.', 'banner': updated}
+    orders = list(orders_collection.find({'status': 'PACKED'}).sort('created_at', -1))
+    return serialize_orders_batch(orders)
 
 
-@app.get('/super-admin/platform-branding')
-def get_super_admin_platform_branding(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    branding = get_platform_branding_document()
-    branding.pop('_id', None)
-    return {'branding': branding}
-
-
-@app.put('/super-admin/platform-branding')
-def update_super_admin_platform_branding(
-    payload: PlatformBrandingUpdateRequest,
-    current_user: dict = Depends(require_roles('SUPER_ADMIN')),
+@app.get('/operations/shipments')
+def get_operations_shipments(
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    _ = current_user
-    name = str(payload.platform_name or '').strip()
-    logo_url = str(payload.logo_url or '').strip()
-    if not name:
-        raise HTTPException(status_code=400, detail='Platform name is required.')
-    if not logo_url:
-        raise HTTPException(status_code=400, detail='Logo URL is required.')
-
-    now = now_utc()
-    platform_settings_collection.update_one(
-        {'key': 'branding'},
-        {
-            '$set': {
-                'platform_name': name,
-                'logo_url': logo_url,
-                'updated_at': now,
-            },
-            '$setOnInsert': {
-                'key': 'branding',
-                'created_at': now,
-            },
-        },
-        upsert=True,
-    )
-    return {'message': 'Platform branding updated successfully.', 'branding': get_platform_branding_document()}
+    shipments = list(shipments_collection.find().sort('created_at', -1))
+    return [serialize_shipment(s) for s in shipments]
 
 
-@app.get('/super-admin/offers/global')
-def get_super_admin_global_offer(current_user: dict = Depends(require_roles('SUPER_ADMIN'))):
-    _ = current_user
-    offer = global_offers_collection.find_one({'key': 'global'}, {'_id': 0})
-    if not offer:
-        offer = {
-            'key': 'global',
-            'title': '',
-            'description': '',
-            'discount_percent': 0,
-            'code': '',
-            'active': False,
-        }
-    return {'offer': offer}
-
-
-@app.put('/super-admin/offers/global')
-def update_super_admin_global_offer(
-    payload: GlobalOfferUpdateRequest,
-    current_user: dict = Depends(require_roles('SUPER_ADMIN')),
+@app.get('/admin/tracking-logs')
+def get_admin_tracking_logs(
+    order_id: str,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
-    _ = current_user
-    discount_percent = float(payload.discount_percent or 0)
-    if discount_percent < 0 or discount_percent > 90:
-        raise HTTPException(status_code=400, detail='Discount percent must be between 0 and 90.')
-
-    now = now_utc()
-    global_offers_collection.update_one(
-        {'key': 'global'},
-        {
-            '$set': {
-                'title': str(payload.title or '').strip(),
-                'description': str(payload.description or '').strip(),
-                'discount_percent': discount_percent,
-                'code': str(payload.code or '').strip(),
-                'active': bool(payload.active),
-                'updated_at': now,
-            },
-            '$setOnInsert': {
-                'key': 'global',
-                'created_at': now,
-            },
-        },
-        upsert=True,
-    )
-
-    offer = global_offers_collection.find_one({'key': 'global'}, {'_id': 0})
-    return {'message': 'Global offer updated successfully.', 'offer': offer}
+    logs = get_tracking_logs(order_id)
+    return {'logs': logs}

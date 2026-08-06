@@ -29,7 +29,7 @@ export default function AdminCustomersPage() {
           setOrders([])
           return
         }
-        setOrders(Array.isArray(data?.orders) ? data.orders : [])
+        setOrders(Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : []))
       } catch {
         setOrders([])
       } finally {

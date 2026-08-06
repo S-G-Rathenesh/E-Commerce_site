@@ -1,4 +1,4 @@
-import { getAuthToken, setStoredUser } from './auth'
+import { getAuthToken, setStoredUser, getStoredUser } from './auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const PROFILE_ADDRESS_STORAGE_KEY = 'veloura_saved_profile_addresses'

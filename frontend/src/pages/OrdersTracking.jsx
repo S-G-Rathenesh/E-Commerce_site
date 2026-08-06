@@ -33,6 +33,7 @@ const STATUS_LABELS = {
   PLACED: 'Order Placed',
   CONFIRMED: 'Confirmed',
   PACKED: 'Packed',
+  ACCEPTED: 'Accepted',
   SHIPPED: 'Shipped',
   OUT_FOR_DELIVERY: 'Out for Delivery',
   DELIVERED: 'Delivered',
@@ -91,7 +92,7 @@ function getTrackerActiveIndex(order) {
     || status === 'IN_TRANSIT' || status === 'ARRIVED_AT_CITY'
     || orderStatus === 'OUT_FOR_DELIVERY' || orderStatus === 'SHIPPED'
     || status === 'SHIPPED') return 3
-  if (status === 'PACKED' || orderStatus === 'PACKED') return 2
+  if (status === 'PACKED' || orderStatus === 'PACKED' || orderStatus === 'ACCEPTED') return 2
   if (status === 'CONFIRMED' || orderStatus === 'CONFIRMED') return 1
   if (status === 'PLACED' || orderStatus === 'PLACED') return 0
   return -1
@@ -114,6 +115,7 @@ function formatTrackerMessage(order) {
   if (status === 'DISPATCHED' || status === 'SHIPPED' || orderStatus === 'SHIPPED')
     return lastEvent?.message || order?.shipment?.current_location || 'Shipment dispatched'
   if (status === 'PACKED' || orderStatus === 'PACKED') return lastEvent?.message || 'Shipment packed and ready'
+  if (orderStatus === 'ACCEPTED') return lastEvent?.message || 'Order accepted by delivery partner'
   if (status === 'CONFIRMED' || orderStatus === 'CONFIRMED') return lastEvent?.message || 'Order confirmed'
   if (status === 'PLACED' || orderStatus === 'PLACED') return 'Order placed successfully'
   if (status === 'CANCELLED') return 'Order cancelled'
@@ -371,11 +373,11 @@ export default function OrdersTracking() {
         setOrders([])
         return
       }
-      setOrders(Array.isArray(data?.orders) ? data.orders : [])
+      const freshOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [])
+      setOrders(freshOrders)
       setMessage('')
 
       // Fetch ETA for every non-delivered, non-cancelled order in the background
-      const freshOrders = Array.isArray(data?.orders) ? data.orders : []
       const activeOrders = freshOrders.filter(o => {
         const s = normalizeStatus(o?.status)
         return !['DELIVERED', 'CANCELLED', 'REJECTED'].includes(s)

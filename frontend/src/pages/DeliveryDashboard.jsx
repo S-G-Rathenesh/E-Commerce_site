@@ -7,7 +7,7 @@ import { buildAuthHeaders, clearStoredUser, getStoredUser, setStoredUser } from 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 // Tabs: MY_ORDERS shows assigned+pincode orders, rest are filtered from combined list
 const DELIVERY_TABS = ['READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'COMPLETED', 'FAILED']
-const DELIVERY_FLOW = ['READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const DELIVERY_FLOW = ['READY_FOR_PICKUP', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED']
 
 function buildMapsLink(order) {
   const shipping = order?.shipping_details || {}
@@ -40,6 +40,7 @@ function getDeliveryQueueState(order) {
     status === 'SHIPPED' ||
     status === 'DISPATCHED' ||
     status === 'PACKED' ||
+    status === 'ACCEPTED' ||
     status === 'CONFIRMED' ||
     status === 'PLACED'
   ) {
@@ -53,17 +54,22 @@ function getFlowState(order, step) {
   const shipmentStatus = String(order?.shipment?.status || '').toUpperCase()
   const completed = {
     READY_FOR_PICKUP:
-      ['ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(shipmentStatus) ||
-      ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(status),
+      ['PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(status) ||
+      ['PACKED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(shipmentStatus),
+    SHIPPED:
+      ['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(status) ||
+      ['DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(shipmentStatus),
     OUT_FOR_DELIVERY:
-      shipmentStatus === 'OUT_FOR_DELIVERY' ||
-      status === 'OUT_FOR_DELIVERY' ||
-      status === 'DELIVERED',
-    DELIVERED: shipmentStatus === 'DELIVERED' || status === 'DELIVERED',
+      ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(status) ||
+      ['OUT_FOR_DELIVERY', 'DELIVERED'].includes(shipmentStatus),
+    DELIVERED: 
+      status === 'DELIVERED' || shipmentStatus === 'DELIVERED',
   }
   if (!completed[step]) return 'todo'
-  if (status === 'DELIVERED' && step === 'DELIVERED') return 'active'
+  if (status === 'PACKED' && step === 'READY_FOR_PICKUP') return 'active'
+  if (status === 'SHIPPED' && step === 'SHIPPED') return 'active'
   if (status === 'OUT_FOR_DELIVERY' && step === 'OUT_FOR_DELIVERY') return 'active'
+  if (status === 'DELIVERED' && step === 'DELIVERED') return 'active'
   return 'done'
 }
 
@@ -222,8 +228,18 @@ export default function DeliveryDashboard() {
       const assignedData = await assignedRes.json()
       
       if (assignedRes.ok) {
-        const next = Array.isArray(assignedData?.orders) ? assignedData.orders : []
+        const next = Array.isArray(assignedData)
+          ? assignedData
+          : (Array.isArray(assignedData?.assigned_orders)
+            ? assignedData.assigned_orders
+            : (Array.isArray(assignedData?.orders) ? assignedData.orders : []))
         setAssignedOrders(next)
+        
+        // If pincode orders are part of assignedData, extract them as fallback
+        if (assignedData && !Array.isArray(assignedData) && Array.isArray(assignedData.available_orders)) {
+          setPincodeOrders(assignedData.available_orders)
+        }
+        
         setDrafts(prev => {
           const updated = { ...prev }
           for (const o of next) {
@@ -239,7 +255,11 @@ export default function DeliveryDashboard() {
 
       if (pincodeRes && pincodeRes.ok) {
         const pincodeData = await pincodeRes.json()
-        const next = Array.isArray(pincodeData?.orders) ? pincodeData.orders : []
+        const next = Array.isArray(pincodeData)
+          ? pincodeData
+          : (Array.isArray(pincodeData?.available_orders)
+            ? pincodeData.available_orders
+            : (Array.isArray(pincodeData?.orders) ? pincodeData.orders : []))
         setPincodeOrders(next)
         setDrafts(prev => {
           const updated = { ...prev }
@@ -363,23 +383,15 @@ export default function DeliveryDashboard() {
     const currentLocation = draft.current_location || 'Last mile route'
     const body = { current_location: currentLocation }
 
-    let endpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/start-delivery`
-    if (action === 'DELIVERED') endpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/delivered`
+    const actionPath = action.toLowerCase().replaceAll('_', '-')
+    const endpoint = `${API_BASE}/orders/${encodeURIComponent(orderId)}/${actionPath}`
 
     try {
-      let res = await requestWithAuth(endpoint, {
+      const res = await requestWithAuth(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      // legacy fallback
-      if (action !== 'DELIVERED' && res.status === 404) {
-        res = await requestWithAuth(`${API_BASE}/orders/${encodeURIComponent(orderId)}/out-for-delivery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-      }
       const data = await res.json()
       if (!res.ok) { setMessage(data?.detail || 'Failed to update delivery task.'); return }
       setMessage(data?.message || 'Delivery task updated.')
@@ -535,11 +547,20 @@ export default function DeliveryDashboard() {
           {filteredOrders.map((order) => {
             const shipment = order.shipment || {}
             const draft = drafts[order.order_id] || { current_location: shipment.current_location || 'Last mile route' }
-            const phone = String(order.customer_phone || '').trim()
+            const shipping = order?.shipping_details || {}
+            const phone = String(shipping.phone || order.customer_phone || '').trim()
+            const addressParts = [
+              String(shipping.address || '').trim(),
+              String(shipping.city || '').trim(),
+              String(shipping.state || '').trim(),
+              String(shipping.pincode || shipping.postalCode || order?.destination_pincode || '').trim()
+            ].filter(Boolean)
+            const deliveryAddress = addressParts.length > 0 ? addressParts.join(', ') : String(order.delivery_address || '').trim()
             const mapsLink = buildMapsLink(order)
             const status = String(order.status || '').toUpperCase()
             const queueState = getDeliveryQueueState(order)
-            const isAssignedToMe = Boolean(order.assigned_to_me)
+            const user = getStoredUser()
+            const isAssignedToMe = Boolean(order.assigned_to_me) || (user && order.assigned_delivery_id === user.id)
             const isActionLoading = Boolean(actionLoadingByOrder[order.order_id])
 
             const shipmentSt = String(order?.shipment?.status || '').toUpperCase()
@@ -589,7 +610,7 @@ export default function DeliveryDashboard() {
 
                   <div className="field-group">
                     <span className="field-label">Delivery address</span>
-                    <p>{order.delivery_address || 'Address not available'}</p>
+                    <p>{deliveryAddress || 'Address not available'}</p>
                   </div>
 
                   <div className="field-group">
@@ -666,20 +687,39 @@ export default function DeliveryDashboard() {
                     )
                   ) : null}
 
-                  {/* Assigned + ready for pickup */}
-                  {isAssignedToMe && !isDelivered && queueState === 'READY_FOR_PICKUP' ? (
+                  {/* Accepted state — show Accepted (disabled) to prevent duplicate clicks */}
+                  {isAssignedToMe && (status === 'ACCEPTED' || status === 'PACKED') ? (
+                    <button type="button" className="btn btn-secondary" disabled style={{ opacity: 0.8 }}>
+                      Accepted
+                    </button>
+                  ) : null}
+
+                  {/* Assigned + PACKED/ACCEPTED -> Shipped */}
+                  {isAssignedToMe && (status === 'PACKED' || status === 'ACCEPTED') ? (
                     <button
                       type="button"
                       className="btn btn-primary"
                       onClick={() => performDeliveryAction(order.order_id, 'START_DELIVERY')}
-                      disabled={!canStart || isActionLoading}
+                      disabled={isActionLoading}
+                    >
+                      {isActionLoading ? 'Updating...' : 'Ready for Pickup'}
+                    </button>
+                  ) : null}
+
+                  {/* Assigned + SHIPPED -> Out for Delivery */}
+                  {isAssignedToMe && status === 'SHIPPED' ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => performDeliveryAction(order.order_id, 'OUT_FOR_DELIVERY')}
+                      disabled={isActionLoading}
                     >
                       {isActionLoading ? 'Starting...' : 'Start Delivery'}
                     </button>
                   ) : null}
 
-                  {/* Out for delivery — mark delivered */}
-                  {canComplete ? (
+                  {/* Assigned + OUT_FOR_DELIVERY -> Delivered */}
+                  {isAssignedToMe && status === 'OUT_FOR_DELIVERY' ? (
                     <button
                       type="button"
                       className="btn btn-secondary"

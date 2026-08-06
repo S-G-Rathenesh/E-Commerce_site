@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { motion } from 'framer-motion'
 import Button from '../components/Button'
 import Input from '../components/Input'
@@ -64,6 +64,7 @@ export default function AdminDashboard() {
   const [range, setRange] = useState('WEEK')
   const [dashboardStats, setDashboardStats] = useState(null)
   const [chartData, setChartData] = useState({ revenue: [], orders: [] })
+  const lastFetchTimeRef = useRef(0)
   const [statsLoading, setStatsLoading] = useState(true)
   const [trackingModalOrderId, setTrackingModalOrderId] = useState('')
   const [trackingModalData, setTrackingModalData] = useState(null)
@@ -140,6 +141,7 @@ export default function AdminDashboard() {
   }
 
   const loadRecentOrders = async () => {
+    lastFetchTimeRef.current = Date.now()
     setOrdersLoading(true)
     try {
       const response = await fetch(`${API_BASE}/admin/orders`, {
@@ -152,7 +154,7 @@ export default function AdminDashboard() {
         return
       }
 
-      const nextOrders = Array.isArray(data?.orders) ? data.orders : []
+      const nextOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [])
       setRecentOrders(nextOrders.slice(0, 5))
     } catch {
       setRecentOrders([])
@@ -191,6 +193,7 @@ export default function AdminDashboard() {
   }
 
   const loadDashboardStats = async () => {
+    lastFetchTimeRef.current = Date.now()
     setStatsLoading(true)
     try {
       const response = await fetch(`${API_BASE}/admin/dashboard-stats`, {
@@ -235,8 +238,10 @@ export default function AdminDashboard() {
     }, 15000)
 
     const syncRecentOrders = () => {
-      loadRecentOrders()
-      loadDashboardStats()
+      if (Date.now() - lastFetchTimeRef.current > 5000) {
+        loadRecentOrders()
+        loadDashboardStats()
+      }
     }
 
     window.addEventListener('focus', syncRecentOrders)
