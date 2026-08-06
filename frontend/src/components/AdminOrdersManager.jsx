@@ -799,11 +799,36 @@ export default function AdminOrdersManager({ compact = false }) {
                         >
                           View Status
                         </button>
+<<<<<<< Updated upstream
                       </td>
                     </tr>
                   )
                 })
               )}
+=======
+                      ) : null}
+                      {normalizeOrderStatus(order.status) === 'PACKED' ? (
+                        <span className="admin-packed-label" style={{ color: '#d97706', fontWeight: '500' }}>
+                          Awaiting Assignment
+                        </span>
+                      ) : null}
+                      {normalizeOrderStatus(order.status) === 'SHIPPED' ? (
+                        <span className="admin-shipped-label" style={{ color: '#10b981', fontWeight: '500' }}>
+                          ✓ Dispatched
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => openTrackingModal(order.order_id)}
+                      >
+                        View Status
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+>>>>>>> Stashed changes
             </tbody>
           </table>
         </div>
@@ -943,6 +968,7 @@ export default function AdminOrdersManager({ compact = false }) {
                       value={draft.delivery_partner_email}
                       onChange={(e) => updateDraft(order.order_id, 'delivery_partner_email', e.target.value)}
                     >
+<<<<<<< Updated upstream
                       <option value="delivery@veloura.com">delivery@veloura.com</option>
                       <option value="delivery.demo@veloura.com">delivery.demo@veloura.com</option>
                     </select>
@@ -954,6 +980,35 @@ export default function AdminOrdersManager({ compact = false }) {
                     >
                       Assign
                     </button>
+=======
+                      <span className="tracking-dot" />
+                      <span>{formatStatusLabel(step)}</span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="admin-orders-grid">
+                {/* Shipment status details based on packed or shipped */}
+                {normalizeOrderStatus(order.status) === 'PACKED' ? (
+                  <div className="admin-auto-dispatch-info" style={{ gridColumn: '1 / -1', padding: '1rem', backgroundColor: '#fffbeb', borderRadius: '0.5rem', border: '1px solid #fde68a' }}>
+                    <p style={{ margin: 0, color: '#b45309', fontWeight: '500' }}>
+                      📦 Order packed and shipment created. Awaiting delivery partner assignment.
+                    </p>
+                    <p style={{ margin: '0.5rem 0 0 0', color: '#b45309', fontSize: '0.875rem' }}>
+                      Tracking ID: {shipment.tracking_id || 'Pending'} · Courier: {shipment.courier_name || 'Assigned'}
+                    </p>
+                  </div>
+                ) : null}
+                {normalizeOrderStatus(order.status) === 'SHIPPED' ? (
+                  <div className="admin-auto-dispatch-info" style={{ gridColumn: '1 / -1', padding: '1rem', backgroundColor: '#f0fdf4', borderRadius: '0.5rem', border: '1px solid #86efac' }}>
+                    <p style={{ margin: 0, color: '#166534', fontWeight: '500' }}>
+                      ✓ Shipment dispatched
+                    </p>
+                    <p style={{ margin: '0.5rem 0 0 0', color: '#15803d', fontSize: '0.875rem' }}>
+                      Tracking ID: {shipment.tracking_id || 'Pending'} · Courier: {shipment.courier_name || 'Assigned'}
+                    </p>
+>>>>>>> Stashed changes
                   </div>
                 </div>
 

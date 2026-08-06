@@ -3,11 +3,17 @@ import base64
 import os
 import random
 import re
+<<<<<<< Updated upstream
 from datetime import datetime, timezone, timedelta
 try:
     from datetime import UTC
 except ImportError:
     UTC = timezone.utc
+=======
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
+>>>>>>> Stashed changes
 from typing import Callable
 from uuid import uuid4
 
@@ -5777,9 +5783,57 @@ def transition_shipment_status(
     return latest_shipment
 
 
+<<<<<<< Updated upstream
 # ============================================================================
 # ORDER ENDPOINTS
 # ============================================================================
+=======
+def simulate_shipment_progress_once() -> None:
+    """
+    AGGRESSIVE AUTOMATION: Rapidly move shipments through transit stages
+    CREATED → DISPATCHED → IN_TRANSIT → ARRIVED_AT_CITY (auto-assigns delivery partner)
+    Delays reduced to 1-2 seconds for real-world e-commerce speed
+    """
+    pending_shipments = list(
+        shipments_collection.find(
+            {'status': {'$in': ['DISPATCHED', 'IN_TRANSIT']}},
+            {'_id': 0},
+        ).sort('updated_at', 1)
+    )
+    now_value = now_utc()
+    for shipment in pending_shipments:
+        updated_at = shipment.get('updated_at')
+        if isinstance(updated_at, datetime):
+            elapsed = (now_value - updated_at).total_seconds()
+        else:
+            elapsed = 0
+        
+        # AGGRESSIVE: 1-2 second delay instead of 5 seconds
+        current_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+        required_delay = 1 if current_status == 'CREATED' else 2
+        
+        if elapsed < required_delay:
+            continue
+
+        next_status_map = {
+            'CREATED': 'DISPATCHED',
+            'DISPATCHED': 'IN_TRANSIT',
+            'IN_TRANSIT': 'ARRIVED_AT_CITY',
+        }
+        next_status = next_status_map.get(current_status)
+        if not next_status:
+            continue
+
+        transition_shipment_status(
+            shipment,
+            next_status,
+            actor_id='system',
+            performer_role='SYSTEM',
+            performer_email='system@local',
+            location=build_shipment_location(list(shipment.get('route') or []), next_status, shipment)[0],
+        )
+
+>>>>>>> Stashed changes
 
 @app.post('/orders')
 def create_order(
@@ -5922,9 +5976,358 @@ def get_my_orders(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get('id')
     user_email = current_user.get('email', '').strip().lower()
     
+<<<<<<< Updated upstream
     query = {'$or': [{'user_id': user_id}, {'customer_id': user_id}, {'customer_email': user_email}]}
     orders = list(orders_collection.find(query).sort('created_at', -1))
     return serialize_orders_batch(orders)
+=======
+    # Verify access
+    actor_email = str(current_user.get('email', '')).strip().lower()
+    actor_id = str(current_user.get('id', '')).strip()
+    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    
+    is_owner = order.get('customer_email') == actor_email or order.get('user_id') in {actor_id, actor_email}
+    is_delivery_assignee = order.get('assigned_delivery_partner') == actor_email or order.get('assigned_delivery_id') == actor_id
+    is_staff = actor_role in {'ADMIN', 'OPERATIONS_STAFF', 'MERCHANT'}
+    
+    if actor_role == 'CUSTOMER' and not is_owner:
+        raise HTTPException(status_code=403, detail='Access denied.')
+    if actor_role == 'DELIVERY_ASSOCIATE' and not is_delivery_assignee and not is_staff:
+        raise HTTPException(status_code=403, detail='Access denied.')
+    
+    # Get status history from the dedicated history collection.
+    status_history = get_order_status_history(order_id)
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')}) if order.get('shipment_id') else None
+    shipment_events = get_shipment_events(str(order.get('shipment_id') or '')) if order.get('shipment_id') else []
+
+    # Get delivery logs
+    delivery_logs = list(delivery_logs_collection.find({'order_id': order_id}).sort('timestamp', 1))
+    
+    return {
+        'order_id': order_id,
+        'current_status': normalize_order_status(order.get('status', 'PLACED')),
+        'updated_by_role': order.get('updated_by_role'),
+        'updated_by_email': order.get('updated_by_email'),
+        'status_history': [
+            {
+                'id': h.get('id'),
+                'status': h.get('status'),
+                'timestamp': h.get('timestamp'),
+                'updated_by': h.get('updated_by'),
+                'updated_by_role': h.get('updated_by_role'),
+                'updated_by_email': h.get('updated_by_email'),
+                'location': h.get('location'),
+            }
+            for h in status_history
+        ],
+        'delivery_logs': [
+            {
+                'id': log.get('id'),
+                'status': log.get('status'),
+                'timestamp': log.get('timestamp').isoformat() if isinstance(log.get('timestamp'), datetime) else log.get('timestamp'),
+                'updated_by': log.get('updated_by'),
+                'performer_role': log.get('performer_role'),
+                'performer_email': log.get('performer_email'),
+                'location': log.get('location'),
+            }
+            for log in delivery_logs
+        ],
+        'status_timeline_steps': ORDER_STATUS_FLOW,
+        'shipment': serialize_shipment(shipment),
+        'shipment_events': shipment_events,
+        'created_at': order.get('created_at').isoformat() if isinstance(order.get('created_at'), datetime) else order.get('created_at'),
+        'updated_at': order.get('updated_at').isoformat() if isinstance(order.get('updated_at'), datetime) else order.get('updated_at'),
+    }
+
+
+@app.put('/orders/{order_id}/status')
+def update_order_status(
+    order_id: str,
+    payload: UpdateOrderStatusRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    actor_role = normalize_role(current_user.get('role', 'CUSTOMER'))
+    target_status = normalize_order_status(payload.status)
+    actor_id = current_user.get('id') or current_user.get('email', 'system')
+    performer_email = current_user.get('email', 'system@local').strip().lower()
+
+    if target_status == 'SHIPPED':
+        raise HTTPException(status_code=400, detail='Use shipment dispatch to move an order to SHIPPED.')
+
+    if target_status not in STATUS_PERFORMER_ROLE_MAP:
+        raise HTTPException(status_code=403, detail='Only staff can update order statuses.')
+
+    if actor_role == 'DELIVERY_ASSOCIATE' and order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != current_user.get('email', '').strip().lower():
+        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
+
+    latest = apply_order_status_update(
+        order, 
+        target_status, 
+        str(actor_id),
+        location=(payload.current_location or '').strip(),
+        performer_role=actor_role,
+        performer_email=performer_email
+    )
+    return {'message': f'Order moved to {target_status}.', 'order': serialize_order(latest, include_shipment=True)}
+
+
+@app.patch('/orders/{order_id}/confirm')
+def confirm_order(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    location_value = (payload.current_location if payload and payload.current_location else 'Merchant confirmation').strip() if payload else 'Merchant confirmation'
+    latest = apply_order_status_update(
+        order,
+        'CONFIRMED',
+        str(current_user.get('id') or current_user.get('email', 'merchant')),
+        location=location_value or 'Merchant confirmation',
+        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+    )
+    return {'message': 'Order confirmed.', 'order': serialize_order(latest, include_shipment=True)}
+
+
+@app.post('/orders/{order_id}/confirm')
+def confirm_order_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN')),
+):
+    return confirm_order(order_id, payload, current_user)
+
+
+@app.patch('/orders/{order_id}/reject')
+def reject_order(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    location_value = (payload.current_location if payload and payload.current_location else 'Merchant rejection').strip() if payload else 'Merchant rejection'
+    latest = apply_order_status_update(
+        order,
+        'REJECTED',
+        str(current_user.get('id') or current_user.get('email', 'merchant')),
+        location=location_value or 'Merchant rejection',
+        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+    )
+    orders_collection.update_one(
+        active_orders_filter({'order_id': order_id}),
+        {'$set': {'rejection_reason': str(payload.reason if payload and payload.reason else '').strip(), 'updated_at': now_utc()}},
+    )
+    return {'message': 'Order rejected.', 'order': serialize_order(latest, include_shipment=True)}
+
+
+@app.patch('/orders/{order_id}/pack')
+def pack_order(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    location_value = (payload.current_location if payload and payload.current_location else 'Warehouse packing unit').strip() if payload else 'Warehouse packing unit'
+    latest = apply_order_status_update(
+        order,
+        'PACKED',
+        str(current_user.get('id') or current_user.get('email', 'ops')),
+        location=location_value or 'Warehouse packing unit',
+        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+    )
+    
+    # AUTO-CREATE SHIPMENT: Create shipment when packed
+    shipment = create_shipment_from_order(latest, current_user, status='CREATED')
+    
+    return {'message': 'Order packed and shipment created.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(shipment)}
+
+
+@app.post('/orders/{order_id}/pack')
+def pack_order_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    return pack_order(order_id, payload, current_user)
+
+
+@app.patch('/orders/{order_id}/ship')
+def ship_order(
+    order_id: str,
+    payload: ShipmentUpdateRequest,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        shipment = create_shipment_from_order(order, current_user, status='CREATED')
+
+    location_value = payload.current_location.strip() if payload and payload.current_location else 'Warehouse dispatch'
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'ops')),
+        performer_role=normalize_role(current_user.get('role', 'OPERATIONS_STAFF')),
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value,
+    )
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Shipment dispatched.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
+
+
+@app.patch('/orders/{order_id}/out-for-delivery')
+def mark_out_for_delivery(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
+        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
+
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
+
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    if shipment_status == 'OUT_FOR_DELIVERY':
+        raise HTTPException(status_code=409, detail='Order is already out for delivery.')
+    # Allow starting delivery from CREATED, DISPATCHED, IN_TRANSIT, or ARRIVED_AT_CITY
+    valid_start_statuses = {'CREATED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY'}
+    if shipment_status not in valid_start_statuses:
+        raise HTTPException(status_code=400, detail='Order can only move to out for delivery after the shipment has been dispatched.')
+
+    location_value = (payload.current_location if payload and payload.current_location else 'Last mile route').strip() if payload else 'Last mile route'
+    actor_id = str(current_user.get('id') or current_user.get('email', 'delivery'))
+    performer_email = str(current_user.get('email', 'system@local')).strip().lower()
+
+    # Auto-advance shipment through intermediate stages to reach OUT_FOR_DELIVERY
+    shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or shipment
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    advance_stages = []
+    if shipment_status == 'CREATED':
+        advance_stages = ['DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
+    elif shipment_status == 'DISPATCHED':
+        advance_stages = ['IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
+    elif shipment_status == 'IN_TRANSIT':
+        advance_stages = ['ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY']
+    else:
+        advance_stages = ['OUT_FOR_DELIVERY']
+
+    updated_shipment = shipment
+    for stage in advance_stages:
+        try:
+            updated_shipment = transition_shipment_status(
+                updated_shipment,
+                stage,
+                actor_id=actor_id,
+                performer_role='DELIVERY_ASSOCIATE',
+                performer_email=performer_email,
+                location=location_value if stage == 'OUT_FOR_DELIVERY' else (updated_shipment.get('current_location') or 'Hub network'),
+            )
+            updated_shipment = shipments_collection.find_one({'shipment_id': shipment.get('shipment_id')}) or updated_shipment
+        except Exception:
+            break
+    orders_collection.update_one(
+        active_orders_filter({'order_id': order_id}),
+        {
+            '$set': {
+                'delivery_meta.out_for_delivery_at': now_utc().isoformat(),
+                'delivery_meta.last_action': 'OUT_FOR_DELIVERY',
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Order marked out for delivery.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
+
+
+@app.patch('/orders/{order_id}/deliver')
+def mark_delivered(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    if order.get('assigned_delivery_id') not in {current_user.get('id'), None} and order.get('assigned_delivery_partner') != str(current_user.get('email', '')).strip().lower():
+        raise HTTPException(status_code=403, detail='Order is not assigned to this delivery partner.')
+
+    shipment = shipments_collection.find_one({'shipment_id': order.get('shipment_id')})
+    if not shipment:
+        raise HTTPException(status_code=400, detail='Shipment not found for this order.')
+
+    shipment_status = normalize_shipment_status(shipment.get('status', 'CREATED'))
+    if shipment_status == 'DELIVERED':
+        raise HTTPException(status_code=409, detail='Order is already delivered.')
+    if shipment_status != 'OUT_FOR_DELIVERY':
+        raise HTTPException(status_code=400, detail='Order can only be delivered from OUT_FOR_DELIVERY shipment status.')
+
+    location_value = (payload.current_location if payload and payload.current_location else 'Customer address').strip() if payload else 'Customer address'
+    updated_shipment = transition_shipment_status(
+        shipment,
+        'DELIVERED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'delivery')),
+        performer_role='DELIVERY_ASSOCIATE',
+        performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+        location=location_value or 'Customer address',
+    )
+    orders_collection.update_one(
+        active_orders_filter({'order_id': order_id}),
+        {
+            '$set': {
+                'delivery_meta.delivered_at': now_utc().isoformat(),
+                'delivery_meta.last_action': 'DELIVERED',
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    latest = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+    return {'message': 'Order delivered.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
+
+
+@app.post('/orders/{order_id}/delivered')
+def mark_delivered_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
+):
+    return mark_delivered(order_id, payload, current_user)
+
+
+@app.post('/orders/{order_id}/start-delivery')
+def mark_out_for_delivery_alias(
+    order_id: str,
+    payload: OrderActionRequest | None = None,
+    current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE')),
+):
+    # Delegate to the main function which has proper shipment status validation
+    return mark_out_for_delivery(order_id, payload, current_user)
+>>>>>>> Stashed changes
 
 
 @app.get('/admin/dashboard-stats')
@@ -6149,6 +6552,204 @@ def handle_order_action(
 def assign_delivery_partner(
     order_id: str,
     payload: AssignDeliveryRequest,
+<<<<<<< Updated upstream
+=======
+    current_user: dict = Depends(require_roles('admin', 'merchant')),
+):
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    role = normalize_role(current_user.get('role', ''))
+    merchant_id = str(current_user.get('id') or '').strip()
+    
+    if role == 'MERCHANT':
+        # Verify that this order contains products belonging to this merchant
+        merchant_products = list(products_collection.find({'merchant_id': merchant_id}, {'id': 1}))
+        merchant_product_ids = {p['id'] for p in merchant_products}
+        
+        order_has_merchant_products = order_items_collection.find_one({
+            'order_id': order_id,
+            'product_id': {'$in': list(merchant_product_ids)}
+        })
+        if not order_has_merchant_products:
+            raise HTTPException(status_code=403, detail="You do not have permission to assign delivery partners for this order.")
+
+    delivery_email = payload.delivery_partner_email.strip().lower()
+    partner = users_collection.find_one({'email': delivery_email})
+
+    if (
+        not partner
+        or normalize_role(partner.get('role', '')) != 'DELIVERY_ASSOCIATE'
+        or normalize_account_status(partner.get('status', 'ACTIVE')) != 'ACTIVE'
+    ):
+        raise HTTPException(status_code=404, detail='Delivery partner account not found.')
+
+    result = orders_collection.update_one(
+        active_orders_filter({'order_id': order_id}),
+        {
+            '$set': {
+                'assigned_delivery_partner': delivery_email,
+                'assigned_delivery_id': partner.get('id'),
+                'updated_at': now_utc(),
+            }
+        },
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    return {'message': 'Delivery partner assigned.', 'order': serialize_order(order, include_shipment=True)}
+
+
+@app.post('/shipments')
+def create_shipment(payload: CreateShipmentRequest, current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))):
+    if not payload.order_ids:
+        raise HTTPException(status_code=400, detail='Select at least one order.')
+
+    unique_order_ids = list(dict.fromkeys(payload.order_ids))
+    orders = list(orders_collection.find(active_orders_filter({'order_id': {'$in': unique_order_ids}})))
+    if len(orders) != len(unique_order_ids):
+        raise HTTPException(status_code=404, detail='One or more orders were not found.')
+
+    invalid_orders = [
+        str(order.get('order_id') or '').strip()
+        for order in orders
+        if normalize_order_status(order.get('status', 'PLACED')) != 'PACKED'
+    ]
+    if invalid_orders:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Shipment creation only supports PACKED orders. Invalid order(s): {', '.join(invalid_orders)}",
+        )
+
+    already_assigned_orders = [
+        str(order.get('order_id') or '').strip()
+        for order in orders
+        if str(order.get('shipment_id') or '').strip()
+    ]
+    if already_assigned_orders:
+        raise HTTPException(
+            status_code=409,
+            detail=f"These orders are already attached to a shipment: {', '.join(already_assigned_orders)}",
+        )
+
+    max_orders = normalize_max_orders_per_shipment(payload.max_orders_per_shipment)
+    order_batches = group_orders_for_shipments(orders, max_orders)
+    if not order_batches:
+        raise HTTPException(status_code=400, detail='Unable to group selected orders for shipment creation.')
+
+    explicit_courier = str(payload.courier_name or '').strip()
+    explicit_tracking = str(payload.tracking_id or '').strip()
+    explicit_vehicle_type = normalize_shipment_vehicle_type(payload.vehicle_type, fallback='VAN')
+    explicit_notes = str(payload.shipment_notes or '').strip()
+    requested_destination_state = str(payload.destination_state or '').strip()
+    requested_destination_city = str(payload.destination_city or '').strip()
+
+    created_shipments = []
+    for batch_index, batch_orders in enumerate(order_batches):
+        primary_order = batch_orders[0]
+        destination = get_order_destination_location(primary_order)
+        warehouse = get_warehouse_location(primary_order)
+        destination_state = requested_destination_state or str(destination.get('state') or '').strip()
+        destination_city = requested_destination_city or str(destination.get('city') or '').strip()
+        destination_label = ', '.join([part for part in [destination_city, destination_state] if part])
+
+        shipment_id = f"SHP-{uuid4().hex[:10].upper()}"
+        tracking_id = build_tracking_id_for_batch(explicit_tracking, batch_index)
+        courier_name = explicit_courier if explicit_courier and explicit_courier != 'Assigned courier' else choose_courier_name(warehouse, destination)
+        route = build_shipment_route(warehouse, destination)
+        current_location, next_location = build_shipment_location(route, 'CREATED', {'source_warehouse': warehouse.get('warehouse_id')})
+
+        shipments_collection.insert_one(
+            {
+                'id': shipment_id,
+                'shipment_id': shipment_id,
+                'source_warehouse': warehouse.get('city') and f"{warehouse.get('city')} Warehouse" or warehouse.get('warehouse_id') or 'Warehouse',
+                'source_warehouse_id': warehouse.get('warehouse_id'),
+                'destination_pincode': sanitize_pincode(primary_order.get('destination_pincode', '')),
+                'destination_city': destination_city,
+                'destination_state': destination_state,
+                'tracking_id': tracking_id,
+                'warehouse_id': payload.warehouse_id or warehouse.get('warehouse_id'),
+                'status': 'CREATED',
+                'courier_name': courier_name,
+                'destination': destination_label,
+                'vehicle_type': explicit_vehicle_type,
+                'shipment_notes': explicit_notes,
+                'current_location': current_location,
+                'next_location': next_location,
+                'assigned_partner_id': None,
+                'assigned_partner_email': None,
+                'route': route,
+                'created_at': now_utc(),
+                'updated_at': now_utc(),
+                'updated_by': current_user.get('id') or current_user.get('email', 'admin'),
+            }
+        )
+        append_shipment_event(shipment_id, 'CREATED', current_location, 'Shipment created and queued for dispatch.', order_id=primary_order.get('order_id'))
+
+        batch_order_ids = []
+        for order in batch_orders:
+            batch_order_ids.append(order['order_id'])
+            shipment_items_collection.update_one(
+                {'shipment_id': shipment_id, 'order_id': order['order_id']},
+                {
+                    '$set': {
+                        'id': f"SI-{uuid4().hex[:12].upper()}",
+                        'shipment_id': shipment_id,
+                        'order_id': order['order_id'],
+                    }
+                },
+                upsert=True,
+            )
+
+            orders_collection.update_one(
+                {'order_id': order['order_id']},
+                {
+                    '$set': {
+                        'shipment_id': shipment_id,
+                        'assigned_delivery_partner': None,
+                        'assigned_delivery_id': None,
+                        'updated_at': now_utc(),
+                    }
+                },
+            )
+
+            customer_id = str(order.get('user_id') or order.get('customer_email') or '').strip()
+            if customer_id:
+                send_order_notification(
+                    order_id=order['order_id'],
+                    event_type='SHIPMENT_CREATED',
+                    message=f"Great news! Shipment SHP-{shipment_id.replace('SHP-', '')} has been created for order {order['order_id']}.",
+                    user_id=customer_id,
+                    title='📦 Shipment Created'
+                )
+
+        shipment = shipments_collection.find_one({'shipment_id': shipment_id})
+        created_shipments.append(
+            {
+                'shipment': serialize_shipment(shipment),
+                'order_ids': batch_order_ids,
+            }
+        )
+
+    first_shipment = created_shipments[0]['shipment'] if created_shipments else None
+    return {
+        'message': f'Shipment records created. Created {len(created_shipments)} shipment(s).',
+        'shipment': first_shipment,
+        'shipments': created_shipments,
+        'order_ids': unique_order_ids,
+        'shipments_created': len(created_shipments),
+    }
+
+
+@app.post('/shipments/{shipment_id}/dispatch')
+def dispatch_shipment(
+    shipment_id: str,
+    payload: OrderActionRequest | None = None,
+>>>>>>> Stashed changes
     current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF')),
 ):
     order = orders_collection.find_one({'order_id': order_id})
@@ -6160,7 +6761,247 @@ def assign_delivery_partner(
     if not partner:
         raise HTTPException(status_code=404, detail=f"Delivery associate with email {partner_email} not found.")
 
+<<<<<<< Updated upstream
     partner_id = partner.get('id')
+=======
+    shipments_collection.update_one(
+        {'shipment_id': shipment_id},
+        {
+            '$set': {
+                'courier_name': payload.courier_name.strip(),
+                'tracking_id': payload.tracking_id.strip() or f'TRK-{uuid4().hex[:12].upper()}',
+                'updated_at': now_utc(),
+            }
+        },
+    )
+    updated_shipment = transition_shipment_status(
+        shipments_collection.find_one({'shipment_id': shipment_id}) or shipment,
+        'DISPATCHED',
+        actor_id=str(current_user.get('id') or current_user.get('email', 'admin')),
+        performer_role=normalize_role(current_user.get('role', 'ADMIN')),
+        performer_email=current_user.get('email', 'system@local').strip().lower(),
+        location=(payload.current_location or '').strip() or 'Warehouse dispatch',
+    )
+
+    latest = orders_collection.find_one({'order_id': order_id}) or order
+    return {'message': 'Shipment updated.', 'order': serialize_order(latest, include_shipment=True), 'shipment': serialize_shipment(updated_shipment)}
+
+
+@app.get('/delivery/orders')
+@app.get('/delivery/assigned')
+def get_delivery_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    email = current_user['email'].strip().lower()
+    user_id = current_user.get('id')
+    
+    # Fetch orders assigned to this delivery partner
+    # Include all statuses from SHIPPED onward, plus DISPATCHED in case of sync lag
+    orders = list(
+        orders_collection.find(
+            active_orders_filter({
+                '$or': [
+                    {'assigned_delivery_partner': email},
+                    {'assigned_delivery_id': user_id},
+                ],
+                'status': {'$in': ['PACKED', 'DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED']},
+            })
+        ).sort('updated_at', -1)
+    )
+    
+    enriched_orders = []
+    for order in orders:
+        payload = serialize_order(order, include_shipment=True)
+        
+        shipment_status = str((payload.get('shipment') or {}).get('status') or '').upper()
+        order_status = str(payload.get('status') or '').upper()
+        
+        # Show orders that are assigned to this partner and have been packed/dispatched or further
+        # Include all shipment stages from CREATED/DISPATCHED onward so partner sees incoming orders
+        valid_shipment_statuses = {'CREATED', 'DISPATCHED', 'IN_TRANSIT', 'ARRIVED_AT_CITY', 'OUT_FOR_DELIVERY', 'DELIVERED'}
+        valid_order_statuses = {'PACKED', 'DISPATCHED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED'}
+        
+        if shipment_status not in valid_shipment_statuses and order_status not in valid_order_statuses:
+            continue
+        
+        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
+        customer = users_collection.find_one({'email': str(payload.get('customer_email') or '').strip().lower()}, {'_id': 0}) or {}
+        customer_profile = customer.get('profile_details') if isinstance(customer.get('profile_details'), dict) else {}
+
+        customer_name = str(shipping.get('full_name') or customer.get('full_name') or customer.get('name') or '').strip()
+        customer_phone = sanitize_phone_number(str(shipping.get('phone') or customer.get('phone_number') or customer_profile.get('phone_number') or '').strip())
+        delivery_address = ', '.join(
+            [
+                str(shipping.get('address') or '').strip(),
+                str(shipping.get('city') or '').strip(),
+                str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
+            ]
+        ).strip(', ').strip()
+
+        payload['customer_name'] = customer_name or str(payload.get('customer_email') or 'Customer').split('@')[0]
+        payload['customer_phone'] = customer_phone
+        payload['delivery_address'] = delivery_address
+        payload['order_value'] = float(payload.get('total_amount') or 0)
+
+        delivery_meta = payload.get('delivery_meta') if isinstance(payload.get('delivery_meta'), dict) else {}
+        payload['delivery_meta'] = {
+            'accepted_at': delivery_meta.get('accepted_at'),
+            'picked_at': delivery_meta.get('picked_at'),
+            'out_for_delivery_at': delivery_meta.get('out_for_delivery_at'),
+            'delivered_at': delivery_meta.get('delivered_at'),
+            'failed_at': delivery_meta.get('failed_at'),
+            'rejected_at': delivery_meta.get('rejected_at'),
+        }
+        if payload.get('status') == 'DELIVERED':
+            payload['delivery_queue_state'] = 'COMPLETED'
+        elif payload.get('status') == 'DELIVERY_FAILED':
+            payload['delivery_queue_state'] = 'FAILED'
+        elif delivery_meta.get('accepted_at') or payload.get('status') in {'OUT_FOR_DELIVERY'}:
+            payload['delivery_queue_state'] = 'ACTIVE'
+        else:
+            payload['delivery_queue_state'] = 'ASSIGNED'
+        enriched_orders.append(payload)
+
+    return {'orders': enriched_orders}
+
+
+@app.get('/delivery/pincode-orders')
+def get_delivery_pincode_orders(current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    """
+    Returns all active (non-delivered, non-cancelled) orders whose destination_pincode
+    is in the delivery partner's service_pincodes list — regardless of assignment.
+    This lets the partner see and self-assign orders that belong to their coverage area.
+    """
+    email = current_user['email'].strip().lower()
+    user_id = current_user.get('id')
+    profile = normalize_delivery_partner_profile_for_scope(
+        current_user.get('profile_details') or {},
+        is_demo_partner=is_demo_delivery_partner_account(current_user),
+    )
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
+
+    if not service_pincodes and not is_delivery_partner_all_india(profile):
+        return {'orders': [], 'message': 'No service pincodes configured in your profile.'}
+
+    # Build the query: only show PACKED, SHIPPED, DISPATCHED, and OUT_FOR_DELIVERY orders
+    # AND exclude orders assigned to other delivery partners
+    active_statuses = ['PACKED', 'SHIPPED', 'DISPATCHED', 'OUT_FOR_DELIVERY']
+    
+    base_query = {
+        'status': {'$in': active_statuses},
+        '$or': [
+            {'assigned_delivery_partner': {'$in': [None, '', email]}},
+            {'assigned_delivery_id': {'$in': [None, '', user_id]}}
+        ]
+    }
+    
+    if is_delivery_partner_all_india(profile):
+        pincode_filter = active_orders_filter(base_query)
+    else:
+        base_query['destination_pincode'] = {'$in': service_pincodes}
+        pincode_filter = active_orders_filter(base_query)
+
+    orders = list(orders_collection.find(pincode_filter).sort('created_at', -1).limit(100))
+
+    enriched = []
+    for order in orders:
+        payload = serialize_order(order, include_shipment=True)
+        shipping = payload.get('shipping_details') if isinstance(payload.get('shipping_details'), dict) else {}
+        customer_name = str(shipping.get('full_name') or payload.get('customer_email') or 'Customer').strip()
+        delivery_address = ', '.join(filter(None, [
+            str(shipping.get('address') or '').strip(),
+            str(shipping.get('city') or '').strip(),
+            str(shipping.get('pincode') or payload.get('destination_pincode') or '').strip(),
+        ]))
+        payload['customer_name'] = customer_name
+        payload['delivery_address'] = delivery_address
+        payload['order_value'] = float(payload.get('total_amount') or 0)
+        
+        assigned_to_me = (
+            payload.get('assigned_delivery_partner') == email
+            or payload.get('assigned_delivery_id') == user_id
+        )
+        payload['assigned_to_me'] = assigned_to_me
+        
+        assigned_partner_email = payload.get('assigned_delivery_partner')
+        assigned_partner_id = payload.get('assigned_delivery_id')
+        
+        assigned_to_other = False
+        assigned_to_name = None
+        
+        if assigned_partner_email or assigned_partner_id:
+            if not assigned_to_me:
+                assigned_to_other = True
+                query = {}
+                if assigned_partner_email:
+                    query['email'] = assigned_partner_email.strip().lower()
+                elif assigned_partner_id:
+                    query['id'] = assigned_partner_id
+                
+                partner_doc = users_collection.find_one(query, {'full_name': 1})
+                if partner_doc:
+                    assigned_to_name = partner_doc.get('full_name')
+                else:
+                    assigned_to_name = assigned_partner_email or 'Another Partner'
+
+        payload['assigned_to_other'] = assigned_to_other
+        payload['assigned_to_name'] = assigned_to_name
+        enriched.append(payload)
+
+    return {'orders': enriched}
+
+
+@app.post('/delivery/orders/{order_id}/self-assign')
+def self_assign_delivery_order(order_id: str, current_user: dict = Depends(require_roles('DELIVERY_ASSOCIATE'))):
+    """
+    Lets a delivery partner self-assign an unassigned order whose destination_pincode
+    is in their service_pincodes list.
+    """
+    email = current_user['email'].strip().lower()
+    user_id = current_user.get('id')
+    profile = normalize_delivery_partner_profile_for_scope(
+        current_user.get('profile_details') or {},
+        is_demo_partner=is_demo_delivery_partner_account(current_user),
+    )
+    service_pincodes = parse_service_pincodes(profile.get('service_pincodes') or profile.get('service_pincode'))
+
+    order = orders_collection.find_one(active_orders_filter({'order_id': order_id}))
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    order_pincode = str(order.get('destination_pincode') or order.get('shipping_details', {}).get('pincode') or '').strip()
+    if not is_delivery_partner_all_india(profile) and order_pincode not in service_pincodes:
+        raise HTTPException(status_code=403, detail='This order is outside your service pincode coverage.')
+
+    # Ensure order has a shipment — create one if missing for backward compatibility
+    if not order.get('shipment_id'):
+        order_status = normalize_order_status(order.get('status', 'PLACED'))
+        
+        # Only auto-create shipment for PACKED or higher status orders
+        if order_status in {'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY'}:
+            try:
+                # Create shipment from order details
+                new_shipment = create_shipment_from_order(order, current_user, status='CREATED')
+                
+                # Auto-dispatch the shipment
+                updated_shipment = transition_shipment_status(
+                    new_shipment,
+                    'DISPATCHED',
+                    actor_id=str(current_user.get('id') or current_user.get('email', 'system')),
+                    performer_role='DELIVERY_ASSOCIATE',
+                    performer_email=str(current_user.get('email', 'system@local')).strip().lower(),
+                    location='Delivery partner accepting order',
+                )
+                
+                # Reload order to get updated shipment_id
+                order = orders_collection.find_one(active_orders_filter({'order_id': order_id})) or order
+            except Exception as e:
+                import traceback
+                print(f"Error creating shipment for order {order_id}: {str(e)}")
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f'Failed to create shipment: {str(e)}')
+        else:
+            # Order is not yet packed - cannot be assigned to delivery partner
+            raise HTTPException(status_code=400, detail='Order must be confirmed and packed before delivery partner assignment. Contact operations.')
+>>>>>>> Stashed changes
 
     orders_collection.update_one(
         {'order_id': order_id},

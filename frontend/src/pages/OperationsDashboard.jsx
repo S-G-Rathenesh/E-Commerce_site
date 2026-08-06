@@ -88,7 +88,7 @@ export default function OperationsDashboard() {
         setMessage(data?.detail || 'Unable to mark order as packed.')
         return
       }
-      setMessage(data?.message || 'Order packed successfully. Shipment created and dispatched automatically.')
+      setMessage(data?.message || 'Order packed successfully. Shipment created.')
       loadData()
     } catch {
       setMessage('Unable to mark order as packed.')
@@ -130,13 +130,13 @@ export default function OperationsDashboard() {
       className="page-operations"
       eyebrow="Operations"
       title="Operations dashboard"
-      description="Monitor and pack orders. Shipments are automatically created and dispatched when orders are packed."
+      description="Monitor and pack orders. Shipments are automatically created when orders are packed."
     >
       <section className="panel panel-stack">
         <div className="section-head">
           <div>
             <h2>Packing queue</h2>
-            <p>Mark orders as packed - shipments will be created and dispatched automatically.</p>
+            <p>Mark orders as packed - shipments will be created automatically.</p>
           </div>
           <button type="button" className="btn btn-secondary" onClick={loadData}>
             Refresh
@@ -181,7 +181,7 @@ export default function OperationsDashboard() {
         <div className="section-head">
           <div>
             <h2>Shipment list</h2>
-            <p>View auto-created and auto-dispatched shipments. Shipments are created and dispatched automatically when orders are packed.</p>
+            <p>View auto-created shipments. Shipments are created automatically when orders are packed.</p>
           </div>
         </div>
 
@@ -219,7 +219,7 @@ export default function OperationsDashboard() {
                   <span className="field-label">Status</span>
                   <p style={{ color: '#10b981', fontWeight: '500' }}>
                     {String(shipment.status || '').toUpperCase() === 'DISPATCHED' 
-                      ? '✓ Auto-dispatched' 
+                      ? '✓ Dispatched' 
                       : String(shipment.status || 'CREATED').replace('_', ' ')}
                   </p>
                 </div>
