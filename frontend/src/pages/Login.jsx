@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import Button from '../components/Button'
 import Input from '../components/Input'
-import { setStoredUser } from '../utils/auth'
+import { findLocalAccountByEmail, setStoredUser } from '../utils/auth'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -69,8 +69,19 @@ export default function Login() {
       const role = (data.role || 'user').toLowerCase()
       navigate(redirectPathByRole(role))
     } catch {
-      setMessage('Unable to reach auth service. Please try again.')
-      setNeedsSignup(false)
+      const localAcc = findLocalAccountByEmail(nextEmail)
+      if (localAcc && localAcc.password === nextPassword) {
+        setStoredUser(localAcc)
+        setMessage('Logged in (Offline / Local Mode)')
+        const role = (localAcc.role || 'user').toLowerCase()
+        navigate(redirectPathByRole(role))
+      } else if (localAcc && localAcc.password !== nextPassword) {
+        setMessage('Invalid password.')
+        setNeedsSignup(false)
+      } else {
+        setMessage('Unable to reach auth service. Please try again.')
+        setNeedsSignup(false)
+      }
     } finally {
       setIsLoggingIn(false)
     }

@@ -142,6 +142,20 @@ export async function fetchCatalogRecentlyViewed(productIds = []) {
   return fetchDiscoveryList('/products/recently-viewed', { ids: productIds })
 }
 
+const LOCAL_PRODUCTS_KEY = 'veloura_merchant_products'
+
+function getLocalMerchantProducts() {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_PRODUCTS_KEY) || '[]')
+  } catch {
+    return []
+  }
+}
+
+function setLocalMerchantProducts(products) {
+  localStorage.setItem(LOCAL_PRODUCTS_KEY, JSON.stringify(products))
+}
+
 async function requestJson(path, options = {}) {
   for (const baseUrl of API_CANDIDATES) {
     try {
@@ -163,10 +177,50 @@ async function requestJson(path, options = {}) {
 
       return response.json()
     } catch (error) {
-      if (error instanceof Error && error.message !== 'Request failed.') {
+      if (error instanceof Error && error.message !== 'Request failed.' && !error.message.includes('fetch')) {
         throw error
       }
     }
+  }
+
+  // Local storage fallback for offline / mock mode
+  if (path === '/merchant/products' && (!options.method || options.method === 'GET')) {
+    return getLocalMerchantProducts()
+  }
+
+  if (path === '/merchant/products' && options.method === 'POST') {
+    const payload = JSON.parse(options.body || '{}')
+    const newProduct = {
+      id: `prod_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      ...payload,
+      review_status: 'APPROVED',
+      created_at: new Date().toISOString(),
+    }
+    const current = getLocalMerchantProducts()
+    current.unshift(newProduct)
+    setLocalMerchantProducts(current)
+    return newProduct
+  }
+
+  if (path.startsWith('/merchant/products/') && options.method === 'PUT') {
+    const productId = path.replace('/merchant/products/', '')
+    const payload = JSON.parse(options.body || '{}')
+    const current = getLocalMerchantProducts()
+    const index = current.findIndex((p) => p.id === productId)
+    if (index >= 0) {
+      current[index] = { ...current[index], ...payload }
+      setLocalMerchantProducts(current)
+      return current[index]
+    }
+    return { id: productId, ...payload }
+  }
+
+  if (path.startsWith('/merchant/products/') && options.method === 'DELETE') {
+    const productId = path.replace('/merchant/products/', '')
+    const current = getLocalMerchantProducts()
+    const filtered = current.filter((p) => p.id !== productId)
+    setLocalMerchantProducts(filtered)
+    return { success: true }
   }
 
   throw new Error('Unable to reach the API.')

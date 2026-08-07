@@ -73,8 +73,16 @@ export default function OperationsDashboard() {
   }, [])
 
   const markPacked = async (orderId) => {
+    // Optimistic local state update for instant single-click UI response
+    setOrders((currentOrders) =>
+      currentOrders.map((order) => {
+        const isTarget = order.order_id === orderId || order.id === orderId || order._id === orderId
+        return isTarget ? { ...order, status: 'PACKED' } : order
+      })
+    )
+
     try {
-      const response = await fetch(`${API_BASE}/orders/${orderId}/pack`, {
+      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/pack`, {
         method: 'PATCH',
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
@@ -86,12 +94,16 @@ export default function OperationsDashboard() {
       const data = await response.json()
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to mark order as packed.')
+        loadData()
         return
       }
-      setMessage(data?.message || 'Order packed successfully. Shipment created.')
-      loadData()
+      setMessage(data?.message || 'Order packed successfully. Shipment created and dispatched automatically.')
+      setTimeout(() => {
+        loadData()
+      }, 600)
     } catch {
       setMessage('Unable to mark order as packed.')
+      loadData()
     }
   }
 
@@ -130,13 +142,13 @@ export default function OperationsDashboard() {
       className="page-operations"
       eyebrow="Operations"
       title="Operations dashboard"
-      description="Monitor and pack orders. Shipments are automatically created when orders are packed."
+      description="Monitor and pack orders. Shipments are automatically created and dispatched when orders are packed."
     >
       <section className="panel panel-stack">
         <div className="section-head">
           <div>
             <h2>Packing queue</h2>
-            <p>Mark orders as packed - shipments will be created automatically.</p>
+            <p>Mark orders as packed - shipments will be created and dispatched automatically.</p>
           </div>
           <button type="button" className="btn btn-secondary" onClick={loadData}>
             Refresh
@@ -181,7 +193,7 @@ export default function OperationsDashboard() {
         <div className="section-head">
           <div>
             <h2>Shipment list</h2>
-            <p>View auto-created shipments. Shipments are created automatically when orders are packed.</p>
+            <p>View auto-created and auto-dispatched shipments. Shipments are created and dispatched automatically when orders are packed.</p>
           </div>
         </div>
 
@@ -219,7 +231,7 @@ export default function OperationsDashboard() {
                   <span className="field-label">Status</span>
                   <p style={{ color: '#10b981', fontWeight: '500' }}>
                     {String(shipment.status || '').toUpperCase() === 'DISPATCHED' 
-                      ? '✓ Dispatched' 
+                      ? '✓ Auto-dispatched' 
                       : String(shipment.status || 'CREATED').replace('_', ' ')}
                   </p>
                 </div>

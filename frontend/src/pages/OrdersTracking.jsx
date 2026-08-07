@@ -140,6 +140,11 @@ function getStepDate(order, stepKey) {
 function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewProductId, reviewOrderId, onCloseReview, onToast, onViewInvoice, onBuyAgain }) {
   const [specsOpen, setSpecsOpen] = useState(false)
   const [deliveryRatingOpen, setDeliveryRatingOpen] = useState(false)
+  const [returnOpen, setReturnOpen] = useState(false)
+  const [returnReason, setReturnReason] = useState('Defective / Damaged Item')
+  const [returnDetails, setReturnDetails] = useState('')
+  const [returnSubmitting, setReturnSubmitting] = useState(false)
+  const [existingReturn, setExistingReturn] = useState(order.return_request || null)
   const primary = getPrimaryItem(order) || {}
   const status = getShipmentStatus(order)
   const placedDate = formatDateTime(order.created_at)
@@ -148,6 +153,35 @@ function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewPr
   const activeIndex = getTrackerActiveIndex(order)
   const isDelivered = status === 'DELIVERED' || normalizeStatus(order?.status) === 'DELIVERED'
   const isCancelled = status === 'CANCELLED'
+
+  const handleReturnSubmit = async (e) => {
+    e.preventDefault()
+    setReturnSubmitting(true)
+    try {
+      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(order.order_id || order.id)}/return`, {
+        method: 'POST',
+        headers: buildAuthHeaders({
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify({
+          reason: returnReason,
+          issue_details: returnDetails,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        onToast(data?.detail || 'Unable to submit return request.')
+        return
+      }
+      setExistingReturn(data.return_request || { status: 'RETURN_REQUESTED', reason: returnReason })
+      setReturnOpen(false)
+      onToast('🔄 Return request submitted successfully!')
+    } catch {
+      onToast('Unable to submit return request right now.')
+    } finally {
+      setReturnSubmitting(false)
+    }
+  }
 
   const statusBadgeClass =
     isDelivered ? 'ot-badge ot-badge--delivered' :
@@ -298,6 +332,54 @@ function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewPr
 
           {/* Delivery rating */}
           {isDelivered && deliveryRatingOpen && <DeliveryRating orderId={order.order_id} />}
+
+          {/* Return request status banner */}
+          {isDelivered && existingReturn && (
+            <div style={{ marginTop: '14px', padding: '12px 16px', background: '#f8fafc', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+              <p style={{ margin: 0, fontWeight: 600, color: '#0f172a', fontSize: '14px' }}>
+                🔄 Return Status: <span style={{ color: existingReturn.status === 'RETURN_APPROVED' ? '#16a34a' : existingReturn.status === 'RETURN_REJECTED' ? '#dc2626' : '#d97706' }}>{String(existingReturn.status || 'RETURN_REQUESTED').replaceAll('_', ' ')}</span>
+              </p>
+              {existingReturn.reason ? <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#64748b' }}>Reason: {existingReturn.reason}</p> : null}
+              {existingReturn.review_note ? <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#64748b' }}>Admin Note: {existingReturn.review_note}</p> : null}
+            </div>
+          )}
+
+          {/* Return request form */}
+          {isDelivered && !existingReturn && returnOpen && (
+            <form onSubmit={handleReturnSubmit} style={{ marginTop: '14px', padding: '14px', background: '#fff', borderRadius: '10px', border: '1px solid #cbd5e1', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <h4 style={{ margin: 0, fontSize: '15px', color: '#0f172a' }}>Request Return</h4>
+              <label style={{ fontSize: '13px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span>Reason for return *</span>
+                <select
+                  value={returnReason}
+                  onChange={(e) => setReturnReason(e.target.value)}
+                  style={{ padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '14px' }}
+                >
+                  <option value="Defective / Damaged Item">Defective / Damaged Item</option>
+                  <option value="Wrong Size / Fit Issue">Wrong Size / Fit Issue</option>
+                  <option value="Item Not as Described">Item Not as Described</option>
+                  <option value="Quality Not Expected">Quality Not Expected</option>
+                  <option value="Changed Mind">Changed Mind</option>
+                </select>
+              </label>
+              <label style={{ fontSize: '13px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span>Issue details (optional)</span>
+                <textarea
+                  value={returnDetails}
+                  onChange={(e) => setReturnDetails(e.target.value)}
+                  placeholder="Describe the issue with the item..."
+                  rows={2}
+                  style={{ padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '14px' }}
+                />
+              </label>
+              <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                <button type="button" className="ot-cta__btn ot-cta__btn--outline" onClick={() => setReturnOpen(false)}>Cancel</button>
+                <button type="submit" className="ot-cta__btn ot-cta__btn--primary" disabled={returnSubmitting}>
+                  {returnSubmitting ? 'Submitting...' : 'Submit Return'}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
 
         {/* CTA column */}
@@ -312,6 +394,15 @@ function OrderCard({ order, eta, onOpenDetails, onOpenReview, onCancel, reviewPr
               <button className="ot-cta__btn ot-cta__btn--ghost" onClick={() => onOpenReview(primary.product_id || primary.id, order.order_id)}>
                 ⭐ Write Review
               </button>
+              {!existingReturn ? (
+                <button className="ot-cta__btn ot-cta__btn--outline" style={{ borderColor: '#dc2626', color: '#dc2626' }} onClick={() => setReturnOpen(v => !v)}>
+                  {returnOpen ? 'Hide Return Form' : '🔄 Return Item'}
+                </button>
+              ) : (
+                <span className="ot-badge ot-badge--packed" style={{ alignSelf: 'center', marginTop: '4px' }}>
+                  🔄 {String(existingReturn.status || 'RETURN_REQUESTED').replaceAll('_', ' ')}
+                </span>
+              )}
             </>
           ) : status === 'SHIPPED' || status === 'OUT_FOR_DELIVERY' ? (
             <>
