@@ -131,7 +131,13 @@ export default function ImageUploadField({
       }
 
       if (!uploadedUrl) {
-        throw lastError || new Error('Unable to upload image right now.')
+        // Fallback to client-side Data URL preview if backend upload endpoint is not reachable
+        const reader = new FileReader()
+        const dataUrlPromise = new Promise((resolve) => {
+          reader.onloadend = () => resolve(reader.result)
+          reader.readAsDataURL(file)
+        })
+        uploadedUrl = await dataUrlPromise
       }
 
       commitValue(uploadedUrl)

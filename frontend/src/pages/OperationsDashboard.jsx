@@ -73,8 +73,16 @@ export default function OperationsDashboard() {
   }, [])
 
   const markPacked = async (orderId) => {
+    // Optimistic local state update for instant single-click UI response
+    setOrders((currentOrders) =>
+      currentOrders.map((order) => {
+        const isTarget = order.order_id === orderId || order.id === orderId || order._id === orderId
+        return isTarget ? { ...order, status: 'PACKED' } : order
+      })
+    )
+
     try {
-      const response = await fetch(`${API_BASE}/orders/${orderId}/pack`, {
+      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/pack`, {
         method: 'PATCH',
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
@@ -86,12 +94,16 @@ export default function OperationsDashboard() {
       const data = await response.json()
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to mark order as packed.')
+        loadData()
         return
       }
       setMessage(data?.message || 'Order packed successfully. Shipment created and dispatched automatically.')
-      loadData()
+      setTimeout(() => {
+        loadData()
+      }, 600)
     } catch {
       setMessage('Unable to mark order as packed.')
+      loadData()
     }
   }
 

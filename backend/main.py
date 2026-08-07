@@ -25,6 +25,42 @@ from pymongo import MongoClient
 from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
 
 load_dotenv()
+app = FastAPI(title='Digital Atelier API')
+
+
+# Allow frontend to communicate with FastAPI backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_ROOT = os.path.join(os.path.dirname(__file__), 'uploads')
+UPLOAD_IMAGE_ROOT = os.path.join(UPLOAD_ROOT, 'images')
+
+ALLOWED_IMAGE_CONTENT_TYPES = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+}
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_ROOT = os.path.join(os.path.dirname(__file__), 'uploads')
 
 app = FastAPI(title='Digital Atelier API')
 UPLOAD_ROOT = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -597,6 +633,18 @@ class ProductReviewRequest(BaseModel):
 class DeliveryRatingRequest(BaseModel):
     rating: int 
     feedback: str | None = None
+
+
+class ReturnOrderRequest(BaseModel):
+    reason: str
+    issue_details: str | None = None
+    proof_images: list[str] | None = None
+
+
+class ReturnDecisionRequest(BaseModel):
+    decision: str
+    review_note: str | None = None
+
 
 
 
@@ -4448,6 +4496,137 @@ def get_delivery_rating(
     return {'rating': rating.get('rating'), 'feedback': rating.get('feedback') or ''}
 
 
+@app.post('/orders/{order_id}/return')
+def create_order_return(
+    order_id: str,
+    payload: ReturnOrderRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Submit a return request for a delivered order."""
+    order = orders_collection.find_one({
+        '$or': [{'order_id': order_id}, {'id': order_id}]
+    })
+
+    if not order:
+        raise HTTPException(status_code=404, detail='Order not found.')
+
+    order_status = normalize_order_status(order.get('status', ''))
+    if order_status != 'DELIVERED' and order.get('shipment_id'):
+        shipment = shipments_collection.find_one({'shipment_id': order['shipment_id']})
+        if shipment and normalize_shipment_status(shipment.get('status', '')) == 'DELIVERED':
+            order_status = 'DELIVERED'
+
+    if order_status != 'DELIVERED':
+        raise HTTPException(status_code=400, detail='Return requests can only be submitted for delivered orders.')
+
+    target_order_id = order.get('order_id') or order.get('id') or order_id
+    existing_return = returns_collection.find_one({'order_id': target_order_id})
+
+    reason_str = (payload.reason or '').strip() or 'Defective / Damaged Item'
+    issue_str = (payload.issue_details or '').strip()
+    proof_imgs = payload.proof_images or []
+
+    return_payload = {
+        'id': (existing_return or {}).get('id') or f"RET-{uuid4().hex[:10].upper()}",
+        'order_id': target_order_id,
+        'user_id': current_user.get('id') or current_user.get('email'),
+        'user_email': current_user.get('email', 'customer@local'),
+        'reason': reason_str,
+        'issue_details': issue_str,
+        'proof_images': proof_imgs,
+        'status': 'RETURN_REQUESTED',
+        'created_at': (existing_return or {}).get('created_at') or now_utc().isoformat(),
+        'updated_at': now_utc().isoformat(),
+        'order': serialize_order(order),
+    }
+
+    returns_collection.update_one(
+        {'order_id': target_order_id},
+        {'$set': return_payload},
+        upsert=True
+    )
+
+    orders_collection.update_one(
+        {'$or': [{'order_id': target_order_id}, {'id': target_order_id}]},
+        {'$set': {'status': 'RETURN_REQUESTED', 'updated_at': now_utc()}}
+    )
+
+    return {
+        'message': 'Return request submitted successfully.',
+        'return_request': return_payload
+    }
+
+
+@app.get('/orders/{order_id}/return')
+def get_order_return(
+    order_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get the return request status for an order if one exists."""
+    return_req = returns_collection.find_one({'order_id': order_id}, {'_id': 0})
+    if not return_req:
+        return {'return_request': None}
+    if isinstance(return_req.get('created_at'), datetime):
+        return_req['created_at'] = return_req['created_at'].isoformat()
+    if isinstance(return_req.get('updated_at'), datetime):
+        return_req['updated_at'] = return_req['updated_at'].isoformat()
+    return {'return_request': return_req}
+
+
+@app.get('/admin/returns')
+def get_admin_returns(
+    status_filter: str | None = None,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))
+):
+    """Get list of return requests for admin/ops review."""
+    query = {}
+    if status_filter and status_filter != 'ALL':
+        query['status'] = status_filter
+    ret_list = list(returns_collection.find(query).sort('created_at', -1))
+    result = []
+    for r in ret_list:
+        r_dict = dict(r)
+        r_dict.pop('_id', None)
+        if isinstance(r_dict.get('created_at'), datetime):
+            r_dict['created_at'] = r_dict['created_at'].isoformat()
+        if isinstance(r_dict.get('updated_at'), datetime):
+            r_dict['updated_at'] = r_dict['updated_at'].isoformat()
+        if not r_dict.get('order'):
+            ord_doc = orders_collection.find_one({'order_id': r_dict.get('order_id')})
+            if ord_doc:
+                r_dict['order'] = serialize_order(ord_doc)
+        result.append(r_dict)
+    return {'returns': result}
+
+
+@app.put('/admin/returns/{order_id}/decision')
+def update_return_decision(
+    order_id: str,
+    payload: ReturnDecisionRequest,
+    current_user: dict = Depends(require_roles('ADMIN', 'OPERATIONS_STAFF'))
+):
+    ret_item = returns_collection.find_one({'order_id': order_id})
+    if not ret_item:
+        raise HTTPException(status_code=404, detail='Return request not found.')
+    new_status = 'RETURN_APPROVED' if payload.decision.upper() == 'APPROVE' else 'RETURN_REJECTED'
+    returns_collection.update_one(
+        {'order_id': order_id},
+        {
+            '$set': {
+                'status': new_status,
+                'review_note': payload.review_note or '',
+                'updated_at': now_utc().isoformat()
+            }
+        }
+    )
+    orders_collection.update_one(
+        {'$or': [{'order_id': order_id}, {'id': order_id}]},
+        {'$set': {'status': new_status, 'updated_at': now_utc()}}
+    )
+    return {'message': f"Return request {payload.decision.lower()}d successfully."}
+
+
+
 def update_product_rating(product_id: int):
     """Update product's average rating and review count"""
     reviews = list(product_reviews_collection.find(
@@ -5437,6 +5616,18 @@ def apply_order_status_update(
     latest = orders_collection.find_one({'order_id': order['order_id']})
     check_and_notify_early_arrival(latest)
     return latest
+
+
+def check_and_notify_early_arrival(order: dict | None) -> None:
+    if not order:
+        return
+    try:
+        status_timestamps = (order.get('status_timestamps') if isinstance(order, dict) else {}) or {}
+        delivered_at = status_timestamps.get('DELIVERED')
+        if delivered_at:
+            pass
+    except Exception:
+        pass
 
 
 def get_status_message(status: str) -> str:

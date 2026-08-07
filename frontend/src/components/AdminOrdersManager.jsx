@@ -129,11 +129,21 @@ export default function AdminOrdersManager({ compact = false }) {
         return
       }
 
-      const nextOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [])
+      const rawList = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [])
+      const nextOrders = rawList.map((order) => {
+        const oid = String(order.order_id || order.id || order._id || '').trim()
+        return {
+          ...order,
+          order_id: oid,
+          id: oid,
+        }
+      })
       setOrders(nextOrders)
       setDrafts(
         nextOrders.reduce((accumulator, order) => {
-          accumulator[order.order_id] = defaultDraft(order)
+          if (order.order_id) {
+            accumulator[order.order_id] = defaultDraft(order)
+          }
           return accumulator
         }, {}),
       )
@@ -336,8 +346,30 @@ export default function AdminOrdersManager({ compact = false }) {
 
   const transitionOrder = async (orderId, action, payload = {}, successMessage = '') => {
     setTransitioningOrders((current) => ({ ...current, [orderId]: true }))
+
+    const actionStatusMap = {
+      confirm: 'CONFIRMED',
+      reject: 'REJECTED',
+      pack: 'PACKED',
+      cancel: 'CANCELLED',
+      'start-delivery': 'SHIPPED',
+      'out-for-delivery': 'OUT_FOR_DELIVERY',
+      delivered: 'DELIVERED',
+    }
+    const nextStatus = actionStatusMap[String(action || '').toLowerCase().trim()]
+
+    // Optimistic instant UI update on single click
+    if (nextStatus) {
+      setOrders((currentOrders) =>
+        currentOrders.map((order) => {
+          const isTarget = order.order_id === orderId || order.id === orderId || order._id === orderId
+          return isTarget ? { ...order, status: nextStatus } : order
+        })
+      )
+    }
+
     try {
-      const response = await fetch(`${API_BASE}/orders/${orderId}/${action}`, {
+      const response = await fetch(`${API_BASE}/orders/${encodeURIComponent(orderId)}/${action}`, {
         method: 'PATCH',
         headers: buildAuthHeaders({
           'Content-Type': 'application/json',
@@ -348,32 +380,29 @@ export default function AdminOrdersManager({ compact = false }) {
       const data = await response.json()
       if (!response.ok) {
         setMessage(data?.detail || 'Unable to update order status.')
+        await loadOrders()
         return
       }
       setMessage(successMessage || data?.message || 'Order updated.')
 
-      // Optimistic local state update
-      const actionStatusMap = {
-        confirm: 'CONFIRMED',
-        reject: 'REJECTED',
-        pack: 'PACKED',
-        cancel: 'CANCELLED',
-        'start-delivery': 'SHIPPED',
-        'out-for-delivery': 'OUT_FOR_DELIVERY',
-        'delivered': 'DELIVERED',
-      }
-      const nextStatus = actionStatusMap[String(action || '').toLowerCase().trim()]
-      if (nextStatus) {
+      // Update with server returned order object if provided
+      if (data?.order) {
         setOrders((currentOrders) =>
-          currentOrders.map((order) =>
-            order.order_id === orderId ? { ...order, status: nextStatus } : order
-          )
+          currentOrders.map((order) => {
+            const isTarget = order.order_id === orderId || order.id === orderId || order._id === orderId
+            return isTarget ? { ...order, ...data.order } : order
+          })
         )
       }
 
-      await loadOrders()
+      // Delayed background sync to prevent stale DB state overwrite
+      setTimeout(() => {
+        loadOrders()
+        loadPackedOrdersAndShipments()
+      }, 600)
     } catch {
       setMessage('Unable to update order status.')
+      await loadOrders()
     } finally {
       setTransitioningOrders((current) => ({ ...current, [orderId]: false }))
     }
@@ -747,16 +776,16 @@ export default function AdminOrdersManager({ compact = false }) {
                             <button
                               type="button"
                               className="btn btn-primary"
-                              onClick={() => transitionOrder(order.order_id, 'confirm', { current_location: 'Merchant confirmation desk' }, 'Order confirmed.')}
-                              disabled={transitioningOrders[order.order_id]}
+                              onClick={() => transitionOrder(order.order_id || order.id, 'confirm', { current_location: 'Merchant confirmation desk' }, 'Order confirmed.')}
+                              disabled={transitioningOrders[order.order_id || order.id]}
                             >
                               Confirm
                             </button>
                             <button
                               type="button"
                               className="btn btn-secondary"
-                              onClick={() => transitionOrder(order.order_id, 'reject', { current_location: 'Merchant review desk', reason: 'Rejected by merchant' }, 'Order rejected.')}
-                              disabled={transitioningOrders[order.order_id]}
+                              onClick={() => transitionOrder(order.order_id || order.id, 'reject', { current_location: 'Merchant review desk', reason: 'Rejected by merchant' }, 'Order rejected.')}
+                              disabled={transitioningOrders[order.order_id || order.id]}
                             >
                               Reject
                             </button>
@@ -766,8 +795,8 @@ export default function AdminOrdersManager({ compact = false }) {
                           <button
                             type="button"
                             className="btn btn-primary"
-                            onClick={() => transitionOrder(order.order_id, 'pack', { current_location: 'Warehouse packing unit' }, 'Order packed.')}
-                            disabled={transitioningOrders[order.order_id]}
+                            onClick={() => transitionOrder(order.order_id || order.id, 'pack', { current_location: 'Warehouse packing unit' }, 'Order packed.')}
+                            disabled={transitioningOrders[order.order_id || order.id]}
                           >
                             Pack
                           </button>
@@ -785,8 +814,8 @@ export default function AdminOrdersManager({ compact = false }) {
                           <button
                             type="button"
                             className="btn btn-primary"
-                            onClick={() => transitionOrder(order.order_id, 'start-delivery', { current_location: 'Warehouse dispatch bay' }, 'Order shipped.')}
-                            disabled={transitioningOrders[order.order_id]}
+                            onClick={() => transitionOrder(order.order_id || order.id, 'start-delivery', { current_location: 'Warehouse dispatch bay' }, 'Order shipped.')}
+                            disabled={transitioningOrders[order.order_id || order.id]}
                           >
                             Shipped
                           </button>
@@ -794,8 +823,8 @@ export default function AdminOrdersManager({ compact = false }) {
                         <button
                           type="button"
                           className="btn btn-secondary"
-                          onClick={() => openTrackingModal(order.order_id)}
-                          disabled={transitioningOrders[order.order_id]}
+                          onClick={() => openTrackingModal(order.order_id || order.id)}
+                          disabled={transitioningOrders[order.order_id || order.id]}
                         >
                           View Status
                         </button>
